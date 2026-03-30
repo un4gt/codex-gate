@@ -1,0 +1,12 @@
+.git
+.gitignore
+data
+backend/target
+backend/data
+frontend/node_modules
+frontend/dist
+frontend/*.tsbuildinfo
+helloagents
+refrence
+scripts/__pycache__
+.env
