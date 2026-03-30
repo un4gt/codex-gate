@@ -13,6 +13,24 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Local env (do not commit populated secrets)
+.env
+.env.*
+!.env.example
+
+# Frontend (Vite / Solid / TypeScript)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Local runtime data / logs (do not commit)
+data/archive/
+data/tmp/
+*.sqlite*
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
