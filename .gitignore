@@ -40,6 +40,12 @@ data/tmp/
 .DS_Store
 Thumbs.db
 
+# Local reference repos (keep `factory.ai-design/` assets tracked)
+refrence/MCCH/
+refrence/claude-code-hub/
+refrence/llmio/
+refrence/octopus/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
