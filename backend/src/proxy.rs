@@ -20,7 +20,7 @@ use tokio::time;
 
 use crate::health::{should_trip_endpoint, should_trip_key};
 use crate::http::{self, HttpResponse};
-use crate::metrics::FailoverKind;
+use crate::metrics::{FailoverKind, RequestMetric};
 use crate::openai::{OpenAiRequestInfo, ensure_include_usage, parse_request_info};
 use crate::selector;
 use crate::state::SharedState;
@@ -31,12 +31,185 @@ use crate::util;
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     match (req.method(), path) {
+        (&Method::GET, "/v1/models") => list_models(req, state).await,
         (&Method::POST, "/v1/chat/completions") => {
             proxy_openai(ApiFormat::ChatCompletions, req, state).await
         }
         (&Method::POST, "/v1/responses") => proxy_openai(ApiFormat::Responses, req, state).await,
         _ => http::json_error(StatusCode::NOT_FOUND, "not found"),
     }
+}
+
+async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let now_ms = util::now_ms();
+    let requested_api_format = list_models_api_format(req.uri().query());
+
+    let Some(api_key_plaintext) = http::bearer_token(&req) else {
+        return http::json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
+    };
+
+    let auth = match state
+        .caches
+        .api_keys
+        .validate(
+            &state.db,
+            &state.config.master_key,
+            api_key_plaintext,
+            now_ms,
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    if auth.is_none() {
+        return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
+    }
+
+    let snap = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(items) => items,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    let mut enabled_provider_ids = HashSet::new();
+    for provider in &snap.providers {
+        if provider.enabled
+            && provider_supports_api_format(&provider.provider_type, requested_api_format)
+        {
+            enabled_provider_ids.insert(provider.id);
+        }
+    }
+
+    let provider_model_enabled = |provider_id: i64, upstream_model: &str| -> bool {
+        snap.provider_models_by_provider
+            .get(&provider_id)
+            .and_then(|items| items.get(upstream_model).copied())
+            .unwrap_or(true)
+    };
+
+    let provider_has_usable_key_for_model = |provider_id: i64, upstream_model: &str| -> bool {
+        let Some(keys) = snap.keys_by_provider.get(&provider_id) else {
+            return false;
+        };
+
+        keys.iter().any(|key| {
+            if !key.enabled {
+                return false;
+            }
+            match snap.key_models_by_key.get(&key.id) {
+                Some(models) => models.get(upstream_model).copied().unwrap_or(false),
+                None => true,
+            }
+        })
+    };
+
+    let provider_can_serve_model = |provider_id: i64, upstream_model: &str| -> bool {
+        if !enabled_provider_ids.contains(&provider_id) {
+            return false;
+        }
+        if !provider_model_enabled(provider_id, upstream_model) {
+            return false;
+        }
+        provider_has_usable_key_for_model(provider_id, upstream_model)
+    };
+
+    let route_allows_provider = |upstream_model: &str, provider_id: i64| -> bool {
+        let Some(route) = snap.routes_by_model.get(upstream_model) else {
+            return true;
+        };
+        if !route.enabled || route.provider_ids.is_empty() {
+            return true;
+        }
+        route.provider_ids.contains(&provider_id)
+    };
+
+    let model_is_routable = |upstream_model: &str| -> bool {
+        if let Some(route) = snap.routes_by_model.get(upstream_model)
+            && route.enabled
+            && !route.provider_ids.is_empty()
+        {
+            return route
+                .provider_ids
+                .iter()
+                .copied()
+                .any(|provider_id| provider_can_serve_model(provider_id, upstream_model));
+        }
+
+        enabled_provider_ids
+            .iter()
+            .copied()
+            .any(|provider_id| provider_can_serve_model(provider_id, upstream_model))
+    };
+
+    let mut upstream_models = HashSet::new();
+    for models in snap.provider_models_by_provider.values() {
+        for (upstream_model, enabled) in models {
+            if !enabled {
+                continue;
+            }
+            if !snap.is_model_globally_enabled(upstream_model) {
+                continue;
+            }
+            upstream_models.insert(upstream_model.clone());
+        }
+    }
+
+    let mut ids: HashSet<String> = HashSet::new();
+    for upstream_model in upstream_models {
+        if !model_is_routable(&upstream_model) {
+            continue;
+        }
+        ids.insert(upstream_model);
+    }
+
+    // Aliases are stored separately as well; only advertise those that are actually routable (alias
+    // forces a provider_id, and model_routes may further restrict providers).
+    for (alias, target) in &snap.alias_to_provider_model {
+        if !target.enabled {
+            continue;
+        }
+        if !snap.is_model_globally_enabled(alias) {
+            continue;
+        }
+        if !snap.is_model_globally_enabled(&target.upstream_model) {
+            continue;
+        }
+        if !route_allows_provider(&target.upstream_model, target.provider_id) {
+            continue;
+        }
+        if !provider_can_serve_model(target.provider_id, &target.upstream_model) {
+            continue;
+        }
+        ids.insert(alias.clone());
+    }
+
+    let mut models: Vec<String> = ids.into_iter().collect();
+    models.sort();
+
+    let data = models
+        .into_iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "codex-gate"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    http::json(
+        StatusCode::OK,
+        &serde_json::json!({
+            "object": "list",
+            "data": data
+        }),
+    )
 }
 
 async fn proxy_openai(
@@ -51,12 +224,14 @@ async fn proxy_openai(
     let record_request_metric = |http_status: Option<i32>, error_type: Option<&str>| {
         state.metrics.record_request(
             api_format,
-            http_status,
-            error_type,
-            Some(start.elapsed().as_millis() as i64),
-            &Usage::default(),
-            Decimal::ZERO,
-            Decimal::ZERO,
+            RequestMetric {
+                http_status,
+                error_type,
+                duration_ms: Some(start.elapsed().as_millis() as i64),
+                usage: Usage::default(),
+                cost_in_usd: Decimal::ZERO,
+                cost_out_usd: Decimal::ZERO,
+            },
         );
     };
 
@@ -205,14 +380,14 @@ async fn proxy_openai(
         ApiFormat::Responses => "responses",
     };
 
-    let attempts = match build_upstream_plan(&state, &model_name).await {
+    let plan = match build_upstream_plan(&state, api_format, &model_name).await {
         Ok(v) => v,
         Err((status, msg)) => {
             submit_err(
                 &mut telemetry_permit,
                 status,
                 "upstream_resolve_failed",
-                msg.to_string(),
+                msg.clone(),
                 None,
                 None,
                 None,
@@ -226,10 +401,35 @@ async fn proxy_openai(
         }
     };
 
+    let base_body = if plan.upstream_model == model_name {
+        body_bytes.clone()
+    } else {
+        match rewrite_model_name(body_bytes.clone(), &plan.upstream_model) {
+            Ok(v) => v,
+            Err(_) => {
+                submit_err(
+                    &mut telemetry_permit,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_model",
+                    "invalid model".to_string(),
+                    None,
+                    None,
+                    None,
+                    Some(model_name.clone()),
+                );
+                record_request_metric(
+                    Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                    Some("invalid_model"),
+                );
+                return http::json_error(StatusCode::BAD_REQUEST, "invalid model");
+            }
+        }
+    };
+
     let mut exclusions = AttemptExclusions::default();
     let mut last_failure: Option<AttemptFailure> = None;
 
-    for (index, resolved) in attempts.iter().enumerate() {
+    for (index, resolved) in plan.attempts.iter().enumerate() {
         if exclusions.should_skip(resolved) {
             continue;
         }
@@ -239,16 +439,15 @@ async fn proxy_openai(
         }
         state.metrics.record_upstream_attempt();
 
-        let mut out_body = body_bytes.clone();
+        let mut out_body = base_body.clone();
         if should_inject_include_usage(
             api_format,
             &info,
             resolved.provider.supports_include_usage,
             state.config.inject_include_usage,
-        ) {
-            if let Ok(body) = ensure_include_usage(out_body.clone()) {
-                out_body = body;
-            }
+        ) && let Ok(body) = ensure_include_usage(out_body.clone())
+        {
+            out_body = body;
         }
 
         let upstream_uri = match build_upstream_uri(
@@ -274,7 +473,7 @@ async fn proxy_openai(
                     error.clone(),
                 ));
 
-                if has_remaining_candidate(&attempts, index + 1, &exclusions) {
+                if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
                     state.metrics.record_failover(FailoverKind::Endpoint);
                     continue;
                 }
@@ -310,72 +509,76 @@ async fn proxy_openai(
             headers.insert(AUTHORIZATION, value);
         }
 
-        let mut upstream_req = Request::new(Full::new(out_body));
-        *upstream_req.method_mut() = request_method.clone();
-        *upstream_req.uri_mut() = upstream_uri;
-        *upstream_req.version_mut() = request_version;
-        *upstream_req.headers_mut() = headers;
+        let websocket_attempt = resolved.provider.websocket_enabled
+            && info.stream
+            && matches!(api_format, ApiFormat::Responses);
+        let mut ws_attempt_error: Option<UpstreamDispatchError> = None;
 
-        let upstream_resp = match time::timeout(
-            state.config.upstream_request_timeout,
-            state.upstream.request(upstream_req),
-        )
-        .await
-        {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
-                let error_message = error.to_string();
-                record_pre_stream_outcome(
+        let upstream_response = if websocket_attempt {
+            if let Some(ws_uri) = websocket_uri_from_http_uri(&upstream_uri) {
+                match dispatch_upstream_request(
                     &state,
-                    resolved,
-                    Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                    Some("upstream_request_error"),
-                    Some(&error_message),
-                    None,
-                );
-                exclusions.note_attempt(resolved);
-                exclusions.avoid_endpoint(resolved.endpoint.id);
-                last_failure = Some(AttemptFailure::new(
-                    resolved,
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_request_error",
-                    error_message.clone(),
-                ));
-
-                if has_remaining_candidate(&attempts, index + 1, &exclusions) {
-                    state.metrics.record_failover(FailoverKind::Endpoint);
-                    continue;
+                    &request_method,
+                    request_version,
+                    &headers,
+                    out_body.clone(),
+                    ws_uri,
+                )
+                .await
+                {
+                    Ok(response) => Ok(response),
+                    Err(error) => {
+                        ws_attempt_error = Some(error);
+                        dispatch_upstream_request(
+                            &state,
+                            &request_method,
+                            request_version,
+                            &headers,
+                            out_body,
+                            upstream_uri,
+                        )
+                        .await
+                    }
                 }
-
-                submit_err(
-                    &mut telemetry_permit,
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_request_error",
-                    error_message.clone(),
-                    Some(resolved.provider.id),
-                    Some(resolved.endpoint.id),
-                    Some(resolved.key.id),
-                    Some(model_name.clone()),
-                );
-                record_request_metric(
-                    Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                    Some("upstream_request_error"),
-                );
-                return http::json_error(
-                    StatusCode::BAD_GATEWAY,
-                    format!("upstream error: {error}"),
-                );
+            } else {
+                dispatch_upstream_request(
+                    &state,
+                    &request_method,
+                    request_version,
+                    &headers,
+                    out_body,
+                    upstream_uri,
+                )
+                .await
             }
-            Err(_) => {
-                let error_message = format!(
-                    "upstream request timeout after {:?}",
-                    state.config.upstream_request_timeout
-                );
+        } else {
+            dispatch_upstream_request(
+                &state,
+                &request_method,
+                request_version,
+                &headers,
+                out_body,
+                upstream_uri,
+            )
+            .await
+        };
+
+        let upstream_resp = match upstream_response {
+            Ok(response) => response,
+            Err(error) => {
+                let (status, error_type, mut error_message) = dispatch_error_to_http(error, &state);
+                if let Some(ws_error) = ws_attempt_error {
+                    let ws_error_message = dispatch_error_message(&ws_error, &state);
+                    error_message = format!(
+                        "websocket transport failed ({ws_error_message}), fallback http failed ({error_message})",
+                    );
+                }
+
                 record_pre_stream_outcome(
                     &state,
                     resolved,
-                    Some(StatusCode::GATEWAY_TIMEOUT.as_u16() as i32),
-                    Some("upstream_timeout"),
+                    Some(status.as_u16() as i32),
+                    Some(error_type),
                     Some(&error_message),
                     None,
                 );
@@ -383,31 +586,28 @@ async fn proxy_openai(
                 exclusions.avoid_endpoint(resolved.endpoint.id);
                 last_failure = Some(AttemptFailure::new(
                     resolved,
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "upstream_timeout",
+                    status,
+                    error_type,
                     error_message.clone(),
                 ));
 
-                if has_remaining_candidate(&attempts, index + 1, &exclusions) {
+                if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
                     state.metrics.record_failover(FailoverKind::Endpoint);
                     continue;
                 }
 
                 submit_err(
                     &mut telemetry_permit,
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "upstream_timeout",
+                    status,
+                    error_type,
                     error_message.clone(),
                     Some(resolved.provider.id),
                     Some(resolved.endpoint.id),
                     Some(resolved.key.id),
                     Some(model_name.clone()),
                 );
-                record_request_metric(
-                    Some(StatusCode::GATEWAY_TIMEOUT.as_u16() as i32),
-                    Some("upstream_timeout"),
-                );
-                return http::json_error(StatusCode::GATEWAY_TIMEOUT, "upstream timeout");
+                record_request_metric(Some(status.as_u16() as i32), Some(error_type));
+                return http::json_error(status, error_message);
             }
         };
 
@@ -415,7 +615,7 @@ async fn proxy_openai(
         let status_code = upstream_resp.status();
         let status_i32 = status_code.as_u16() as i32;
         if should_retry_response_status(status_i32)
-            && has_remaining_candidate(&attempts, index + 1, &exclusions)
+            && has_remaining_candidate(&plan.attempts, index + 1, &exclusions)
         {
             record_pre_stream_outcome(
                 &state,
@@ -523,6 +723,157 @@ fn should_inject_include_usage(
     }
 }
 
+fn rewrite_model_name(body: Bytes, new_model: &str) -> Result<Bytes, String> {
+    let mut value: Value =
+        serde_json::from_slice(&body).map_err(|e| format!("invalid json: {e}"))?;
+    let Some(root) = value.as_object_mut() else {
+        return Err("invalid json object".to_string());
+    };
+    root.insert("model".to_string(), Value::String(new_model.to_string()));
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|e| format!("json encode failed: {e}"))
+}
+
+#[derive(Debug)]
+enum UpstreamDispatchError {
+    Request(String),
+    Timeout,
+}
+
+async fn dispatch_upstream_request(
+    state: &SharedState,
+    request_method: &Method,
+    request_version: hyper::Version,
+    request_headers: &hyper::HeaderMap,
+    body: Bytes,
+    uri: Uri,
+) -> Result<Response<Incoming>, UpstreamDispatchError> {
+    let mut upstream_req = Request::new(Full::new(body));
+    *upstream_req.method_mut() = request_method.clone();
+    *upstream_req.uri_mut() = uri;
+    *upstream_req.version_mut() = request_version;
+    *upstream_req.headers_mut() = request_headers.clone();
+
+    time::timeout(
+        state.config.upstream_request_timeout,
+        state.upstream.request(upstream_req),
+    )
+    .await
+    .map_err(|_| UpstreamDispatchError::Timeout)?
+    .map_err(|e| UpstreamDispatchError::Request(e.to_string()))
+}
+
+fn dispatch_error_to_http(
+    error: UpstreamDispatchError,
+    state: &SharedState,
+) -> (StatusCode, &'static str, String) {
+    match error {
+        UpstreamDispatchError::Request(message) => {
+            (StatusCode::BAD_GATEWAY, "upstream_request_error", message)
+        }
+        UpstreamDispatchError::Timeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_timeout",
+            format!(
+                "upstream request timeout after {:?}",
+                state.config.upstream_request_timeout
+            ),
+        ),
+    }
+}
+
+fn dispatch_error_message(error: &UpstreamDispatchError, state: &SharedState) -> String {
+    match error {
+        UpstreamDispatchError::Request(message) => message.clone(),
+        UpstreamDispatchError::Timeout => format!(
+            "upstream request timeout after {:?}",
+            state.config.upstream_request_timeout
+        ),
+    }
+}
+
+fn websocket_uri_from_http_uri(http_uri: &Uri) -> Option<Uri> {
+    let mut parts = http_uri.clone().into_parts();
+    let next_scheme = match parts.scheme.as_ref()?.as_str() {
+        "http" | "ws" => "ws",
+        "https" | "wss" => "wss",
+        _ => return None,
+    };
+    parts.scheme = Some(next_scheme.parse().ok()?);
+    Uri::from_parts(parts).ok()
+}
+
+fn provider_supports_api_format(provider_type: &str, api_format: ApiFormat) -> bool {
+    match api_format {
+        ApiFormat::ChatCompletions => provider_type != "openai_compatible_responses",
+        ApiFormat::Responses => true,
+    }
+}
+
+fn list_models_api_format(query: Option<&str>) -> ApiFormat {
+    let value = query_param(query, "api_format").unwrap_or_else(|| "chat_completions".to_string());
+    match value.trim().to_ascii_lowercase().as_str() {
+        "responses" => ApiFormat::Responses,
+        "chat" | "chat_completions" | "chat-completions" => ApiFormat::ChatCompletions,
+        _ => ApiFormat::ChatCompletions,
+    }
+}
+
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    fn decode_component(raw: &str) -> String {
+        fn from_hex(byte: u8) -> Option<u8> {
+            match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            }
+        }
+
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut idx = 0;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'+' => {
+                    out.push(b' ');
+                    idx += 1;
+                }
+                b'%' if idx + 2 < bytes.len() => {
+                    let hi = from_hex(bytes[idx + 1]);
+                    let lo = from_hex(bytes[idx + 2]);
+                    if let (Some(hi), Some(lo)) = (hi, lo) {
+                        out.push((hi << 4) | lo);
+                        idx += 3;
+                    } else {
+                        out.push(bytes[idx]);
+                        idx += 1;
+                    }
+                }
+                byte => {
+                    out.push(byte);
+                    idx += 1;
+                }
+            }
+        }
+
+        String::from_utf8(out)
+            .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned())
+    }
+
+    let query = query?;
+    for part in query.split('&') {
+        let mut items = part.splitn(2, '=');
+        let key_name = items.next()?.trim();
+        let value = items.next().unwrap_or("").trim();
+        if key_name == key {
+            return Some(decode_component(value));
+        }
+    }
+    None
+}
+
 #[derive(Clone)]
 struct ResolvedUpstream {
     provider: crate::types::UpstreamProvider,
@@ -588,24 +939,44 @@ impl AttemptFailure {
     }
 }
 
+struct UpstreamPlan {
+    upstream_model: String,
+    attempts: Vec<ResolvedUpstream>,
+}
+
 async fn build_upstream_plan(
     state: &SharedState,
-    model: &str,
-) -> Result<Vec<ResolvedUpstream>, (StatusCode, &'static str)> {
+    api_format: ApiFormat,
+    requested_model: &str,
+) -> Result<UpstreamPlan, (StatusCode, String)> {
     let snap = state
         .caches
         .upstream
         .get(&state.db, &state.config.master_key)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to load upstream config",
-            )
-        })?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let candidates: Vec<&crate::types::UpstreamProvider> =
-        if let Some(route) = snap.routes_by_model.get(model) {
+    if !snap.is_model_globally_enabled(requested_model) {
+        return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+    }
+
+    let mut upstream_model = requested_model.to_string();
+    let mut forced_provider_id: Option<i64> = None;
+
+    if let Some(target) = snap.alias_to_provider_model.get(requested_model) {
+        if !target.enabled {
+            return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+        }
+        upstream_model = target.upstream_model.clone();
+        forced_provider_id = Some(target.provider_id);
+    }
+
+    if !snap.is_model_globally_enabled(&upstream_model) {
+        return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+    }
+
+    let mut candidates: Vec<&crate::types::UpstreamProvider> =
+        if let Some(route) = snap.routes_by_model.get(&upstream_model) {
             if route.enabled && !route.provider_ids.is_empty() {
                 snap.providers
                     .iter()
@@ -618,6 +989,22 @@ async fn build_upstream_plan(
             snap.providers.iter().collect()
         };
 
+    if let Some(provider_id) = forced_provider_id {
+        candidates.retain(|provider| provider.id == provider_id);
+    }
+
+    candidates.retain(|provider| match api_format {
+        ApiFormat::ChatCompletions => provider.provider_type != "openai_compatible_responses",
+        ApiFormat::Responses => true,
+    });
+
+    candidates.retain(|provider| {
+        snap.provider_models_by_provider
+            .get(&provider.id)
+            .and_then(|items| items.get(&upstream_model).copied())
+            .unwrap_or(true)
+    });
+
     let now_ms = util::now_ms();
     let ranked_providers = selector::rank_provider_refs_with_health(
         &candidates,
@@ -628,7 +1015,10 @@ async fn build_upstream_plan(
         now_ms,
     );
     if ranked_providers.is_empty() {
-        return Err((StatusCode::SERVICE_UNAVAILABLE, "no available providers"));
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no available providers".to_string(),
+        ));
     }
 
     let mut attempts = Vec::new();
@@ -636,7 +1026,15 @@ async fn build_upstream_plan(
         let keys = snap
             .keys_by_provider
             .get(&provider.id)
-            .map(|items| items.iter().collect::<Vec<_>>())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|key| match snap.key_models_by_key.get(&key.id) {
+                        Some(models) => models.get(&upstream_model).copied().unwrap_or(false),
+                        None => true,
+                    })
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let ranked_keys =
             selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
@@ -659,7 +1057,7 @@ async fn build_upstream_plan(
             continue;
         }
 
-        let price = snap.find_price(provider.id, model);
+        let price = snap.find_price(provider.id, &upstream_model);
         for key in &ranked_keys {
             for endpoint in &ranked_endpoints {
                 attempts.push(ResolvedUpstream {
@@ -675,11 +1073,14 @@ async fn build_upstream_plan(
     if attempts.is_empty() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "no available upstream targets",
+            "no available upstream targets".to_string(),
         ));
     }
 
-    Ok(attempts)
+    Ok(UpstreamPlan {
+        upstream_model,
+        attempts,
+    })
 }
 
 fn reserve_attempt(state: &SharedState, resolved: &ResolvedUpstream, now_ms: i64) -> bool {
@@ -803,6 +1204,15 @@ struct TapConfig {
     metrics: std::sync::Arc<crate::metrics::Metrics>,
 }
 
+struct TapFinalizeInputs<'a> {
+    first_byte_ms: Option<i64>,
+    first_token_ms: Option<i64>,
+    usage: &'a mut Usage,
+    error_type: &'a Option<String>,
+    error_message: &'a Option<String>,
+    collected: &'a BytesMut,
+}
+
 pin_project! {
     struct ProxyTapBody {
         #[pin]
@@ -828,12 +1238,14 @@ pin_project! {
                 this.cfg,
                 this.telemetry_permit,
                 this.finalized,
-                *this.first_byte_ms,
-                *this.first_token_ms,
-                this.usage,
-                this.error_type,
-                this.error_message,
-                this.collected,
+                TapFinalizeInputs {
+                    first_byte_ms: *this.first_byte_ms,
+                    first_token_ms: *this.first_token_ms,
+                    usage: this.usage,
+                    error_type: this.error_type,
+                    error_message: this.error_message,
+                    collected: this.collected,
+                },
             );
         }
     }
@@ -884,12 +1296,14 @@ impl hyper::body::Body for ProxyTapBody {
                     this.cfg,
                     this.telemetry_permit,
                     this.finalized,
-                    *this.first_byte_ms,
-                    *this.first_token_ms,
-                    this.usage,
-                    this.error_type,
-                    this.error_message,
-                    this.collected,
+                    TapFinalizeInputs {
+                        first_byte_ms: *this.first_byte_ms,
+                        first_token_ms: *this.first_token_ms,
+                        usage: this.usage,
+                        error_type: this.error_type,
+                        error_message: this.error_message,
+                        collected: this.collected,
+                    },
                 );
                 Poll::Ready(None)
             }
@@ -929,12 +1343,14 @@ impl hyper::body::Body for ProxyTapBody {
                     this.cfg,
                     this.telemetry_permit,
                     this.finalized,
-                    *this.first_byte_ms,
-                    *this.first_token_ms,
-                    this.usage,
-                    this.error_type,
-                    this.error_message,
-                    this.collected,
+                    TapFinalizeInputs {
+                        first_byte_ms: *this.first_byte_ms,
+                        first_token_ms: *this.first_token_ms,
+                        usage: this.usage,
+                        error_type: this.error_type,
+                        error_message: this.error_message,
+                        collected: this.collected,
+                    },
                 );
                 Poll::Ready(Some(Err(e)))
             }
@@ -1034,42 +1450,40 @@ fn finalize_tap(
     cfg: &TapConfig,
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
     finalized: &mut bool,
-    first_byte_ms: Option<i64>,
-    first_token_ms: Option<i64>,
-    usage: &mut Usage,
-    error_type: &Option<String>,
-    error_message: &Option<String>,
-    collected: &BytesMut,
+    inputs: TapFinalizeInputs<'_>,
 ) {
     if *finalized {
         return;
     }
     *finalized = true;
 
-    if !cfg.is_sse && !collected.is_empty() {
-        if let Ok(v) = serde_json::from_slice::<Value>(collected) {
-            if let Some(u) = extract_usage(cfg.api_format, &v) {
-                *usage = u;
-            }
-        }
+    if !cfg.is_sse
+        && !inputs.collected.is_empty()
+        && let Ok(v) = serde_json::from_slice::<Value>(inputs.collected)
+        && let Some(u) = extract_usage(cfg.api_format, &v)
+    {
+        *inputs.usage = u;
     }
 
-    let (cost_in, cost_out) = compute_cost(usage, cfg.price.as_ref());
+    let (cost_in, cost_out) = compute_cost(inputs.usage, cfg.price.as_ref());
     record_runtime_outcomes(
         cfg,
-        first_byte_ms,
-        first_token_ms,
-        error_type.as_deref(),
-        error_message.as_deref(),
+        inputs.first_byte_ms,
+        inputs.first_token_ms,
+        inputs.error_type.as_deref(),
+        inputs.error_message.as_deref(),
     );
+    let duration_ms = Some(cfg.start.elapsed().as_millis() as i64);
     cfg.metrics.record_request_str(
         cfg.api_format,
-        cfg.http_status,
-        error_type.as_deref(),
-        Some(cfg.start.elapsed().as_millis() as i64),
-        usage,
-        cost_in,
-        cost_out,
+        RequestMetric {
+            http_status: cfg.http_status,
+            error_type: inputs.error_type.as_deref(),
+            duration_ms,
+            usage: *inputs.usage,
+            cost_in_usd: cost_in,
+            cost_out_usd: cost_out,
+        },
     );
 
     let event = TelemetryEvent {
@@ -1081,13 +1495,13 @@ fn finalize_tap(
         api_format: cfg.api_format,
         model: cfg.model.clone(),
         http_status: cfg.http_status,
-        error_type: error_type.clone(),
-        error_message: error_message.clone(),
+        error_type: inputs.error_type.clone(),
+        error_message: inputs.error_message.clone(),
         t_stream_ms: cfg.t_stream_ms,
-        t_first_byte_ms: first_byte_ms,
-        t_first_token_ms: first_token_ms,
+        t_first_byte_ms: inputs.first_byte_ms,
+        t_first_token_ms: inputs.first_token_ms,
         duration_ms: Some(cfg.start.elapsed().as_millis() as i64),
-        usage: *usage,
+        usage: *inputs.usage,
         cost_in_usd: cost_in,
         cost_out_usd: cost_out,
         time_ms: util::now_ms(),
@@ -1166,13 +1580,13 @@ impl SseParser {
                     if self.api_format == "chat_completions" && chat_has_output_delta(&v) {
                         out.saw_first_token = true;
                         self.done_first_token = true;
-                    } else if self.api_format == "responses" {
-                        if let Some(ev) = self.event.as_deref() {
-                            if ev.ends_with(".delta") && responses_has_delta(&v) {
-                                out.saw_first_token = true;
-                                self.done_first_token = true;
-                            }
-                        }
+                    } else if self.api_format == "responses"
+                        && let Some(ev) = self.event.as_deref()
+                        && ev.ends_with(".delta")
+                        && responses_has_delta(&v)
+                    {
+                        out.saw_first_token = true;
+                        self.done_first_token = true;
                     }
                 }
 
@@ -1300,8 +1714,8 @@ fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Deci
 
     let input_tokens = Decimal::from(usage.input_tokens);
     let output_tokens = Decimal::from(usage.output_tokens);
-    let cache_read = Decimal::from(usage.cache_read_input_tokens);
-    let cache_create = Decimal::from(usage.cache_creation_input_tokens);
+    let cache_read_tokens = Decimal::from(usage.cache_read_input_tokens);
+    let cache_create_tokens = Decimal::from(usage.cache_creation_input_tokens);
 
     let mut cost_in = Decimal::ZERO;
     let mut cost_out = Decimal::ZERO;
@@ -1313,10 +1727,13 @@ fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Deci
         cost_out += output_tokens * v;
     }
     if let Some(v) = price.cache_read_input_token_cost {
-        cost_in += cache_read * v;
+        cost_in += cache_read_tokens * v;
     }
-    if let Some(v) = price.cache_creation_input_token_cost {
-        cost_in += cache_create * v;
+    if let Some(v) = price
+        .cache_creation_input_token_cost
+        .or(price.cache_creation_input_token_cost_above_1hr)
+    {
+        cost_in += cache_create_tokens * v;
     }
 
     (cost_in, cost_out)

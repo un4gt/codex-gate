@@ -1,5 +1,6 @@
 mod admin;
 mod cache;
+mod codex_oauth;
 mod config;
 mod crypto;
 mod db;
@@ -65,6 +66,10 @@ async fn handle(
             .body(crate::http::full(Bytes::from(body), None))
             .expect("metrics response builder");
         return Ok(response);
+    }
+
+    if req.method() == hyper::Method::GET && path == "/api/v1/codex-oauth/callback" {
+        return Ok(crate::codex_oauth::handle_callback(req, state).await);
     }
 
     if path.starts_with("/api/v1/") {
@@ -211,7 +216,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = db::Database::connect(&config.db_dsn, config.db_max_connections).await?;
     db.migrate().await?;
 
-    let caches = cache::Caches::new(config.api_key_cache_ttl, config.upstream_cache_ttl);
+    let caches = cache::Caches::new(
+        config.api_key_cache_ttl,
+        config.upstream_cache_ttl,
+        config.upstream_cache_stale_grace,
+        config.api_key_cache_max_entries,
+    );
 
     let retention = telemetry::RetentionPolicy::new(
         config.request_log_retention_days,
@@ -241,6 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
 
     let metrics = Arc::new(metrics::Metrics::new());
+    let codex_oauth = codex_oauth::CodexOauthManager::new();
 
     let state: SharedState = Arc::new(AppState {
         config,
@@ -251,6 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         endpoint_health,
         upstream_key_health,
         metrics,
+        codex_oauth,
     });
 
     let addr: SocketAddr = state.config.listen_addr;

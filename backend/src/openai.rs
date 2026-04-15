@@ -6,7 +6,6 @@ pub struct OpenAiRequestInfo {
     pub model: Option<String>,
     pub stream: bool,
     pub include_usage: Option<bool>,
-    pub has_stream_options: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,7 +32,6 @@ pub fn parse_request_info(body: &[u8]) -> OpenAiRequestInfo {
         model,
         stream,
         include_usage: stream_options.as_ref().and_then(|s| s.include_usage),
-        has_stream_options: stream_options.is_some(),
     }
 }
 

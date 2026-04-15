@@ -19,6 +19,7 @@ pub struct UpstreamProvider {
     pub priority: i32,
     pub weight: i32,
     pub supports_include_usage: bool,
+    pub websocket_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +43,16 @@ pub struct UpstreamKeyMeta {
     pub weight: i32,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct UpstreamKeyModel {
+    pub id: i64,
+    pub upstream_key_id: i64,
+    pub model_name: String,
+    pub enabled: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct UpstreamEndpoint {
     pub id: i64,
@@ -51,6 +62,25 @@ pub struct UpstreamEndpoint {
     pub enabled: bool,
     pub priority: i32,
     pub weight: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderModel {
+    pub id: i64,
+    pub provider_id: i64,
+    pub upstream_model: String,
+    pub alias: Option<String>,
+    pub enabled: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GatewayModelPolicy {
+    pub model_name: String,
+    pub enabled: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -89,12 +119,6 @@ pub struct Usage {
     pub output_tokens: i64,
     pub cache_read_input_tokens: i64,
     pub cache_creation_input_tokens: i64,
-}
-
-impl Usage {
-    pub fn total_tokens(&self) -> i64 {
-        self.input_tokens + self.output_tokens
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

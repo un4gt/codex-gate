@@ -10,8 +10,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool, postgres::Pg
 
 use crate::crypto;
 use crate::types::{
-    ApiKeyAuth, ModelPrice, ModelPriceData, ModelRoute, RequestLogRow, StatsDailyRow,
-    UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta, UpstreamProvider,
+    ApiKeyAuth, GatewayModelPolicy, ModelPrice, ModelPriceData, ModelRoute, ProviderModel,
+    RequestLogRow, StatsDailyRow, UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta, UpstreamKeyModel,
+    UpstreamProvider,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -435,6 +436,10 @@ WHERE id = $1
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "insert path mirrors upstream_providers table columns for explicit SQL binding"
+    )]
     pub async fn insert_upstream_provider(
         &self,
         name: &str,
@@ -443,14 +448,15 @@ WHERE id = $1
         priority: i32,
         weight: i32,
         supports_include_usage: bool,
+        websocket_enabled: bool,
         now_ms: i64,
     ) -> Result<i64, DbError> {
         match self {
             Database::Sqlite(pool) => {
                 let res = sqlx::query(
                     r#"
-INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, created_at_ms, updated_at_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, created_at_ms, updated_at_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
                 )
                 .bind(name)
@@ -459,6 +465,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 .bind(priority as i64)
                 .bind(weight as i64)
                 .bind(if supports_include_usage { 1_i64 } else { 0_i64 })
+                .bind(if websocket_enabled { 1_i64 } else { 0_i64 })
                 .bind(now_ms)
                 .bind(now_ms)
                 .execute(pool)
@@ -468,8 +475,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             Database::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, created_at_ms, updated_at_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, created_at_ms, updated_at_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING id
 "#,
                 )
@@ -479,6 +486,7 @@ RETURNING id
                 .bind(priority)
                 .bind(weight)
                 .bind(supports_include_usage)
+                .bind(websocket_enabled)
                 .bind(now_ms)
                 .bind(now_ms)
                 .fetch_one(pool)
@@ -498,7 +506,7 @@ RETURNING id
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, updated_at_ms = ?
+SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, websocket_enabled = ?, updated_at_ms = ?
 WHERE id = ?
 "#,
                 )
@@ -508,6 +516,7 @@ WHERE id = ?
                 .bind(provider.priority as i64)
                 .bind(provider.weight as i64)
                 .bind(if provider.supports_include_usage { 1_i64 } else { 0_i64 })
+                .bind(if provider.websocket_enabled { 1_i64 } else { 0_i64 })
                 .bind(now_ms)
                 .bind(provider.id)
                 .execute(pool)
@@ -518,8 +527,8 @@ WHERE id = ?
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, updated_at_ms = $7
-WHERE id = $8
+SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, websocket_enabled = $7, updated_at_ms = $8
+WHERE id = $9
 "#,
                 )
                 .bind(&provider.name)
@@ -528,6 +537,7 @@ WHERE id = $8
                 .bind(provider.priority)
                 .bind(provider.weight)
                 .bind(provider.supports_include_usage)
+                .bind(provider.websocket_enabled)
                 .bind(now_ms)
                 .bind(provider.id)
                 .execute(pool)
@@ -537,6 +547,10 @@ WHERE id = $8
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "insert path mirrors upstream_endpoints table columns for explicit SQL binding"
+    )]
     pub async fn insert_upstream_endpoint(
         &self,
         provider_id: i64,
@@ -695,6 +709,10 @@ WHERE id = $7
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "insert path mirrors upstream_keys table columns and encrypt context"
+    )]
     pub async fn insert_upstream_key(
         &self,
         master_key: &str,
@@ -1115,7 +1133,7 @@ RETURNING id
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1133,13 +1151,14 @@ ORDER BY priority ASC, id ASC
                         priority: row.get::<i64, _>("priority") as i32,
                         weight: row.get::<i64, _>("weight") as i32,
                         supports_include_usage: row.get::<i64, _>("supports_include_usage") != 0,
+                        websocket_enabled: row.get::<i64, _>("websocket_enabled") != 0,
                     })
                     .collect())
             }
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1157,6 +1176,7 @@ ORDER BY priority ASC, id ASC
                         priority: row.get::<i32, _>("priority"),
                         weight: row.get::<i32, _>("weight"),
                         supports_include_usage: row.get::<bool, _>("supports_include_usage"),
+                        websocket_enabled: row.get::<bool, _>("websocket_enabled"),
                     })
                     .collect())
             }
@@ -1281,6 +1301,571 @@ ORDER BY provider_id ASC, priority ASC, id ASC
         match self {
             Database::Sqlite(pool) => list_model_routes_sqlite(pool).await,
             Database::Postgres(pool) => list_model_routes_postgres(pool).await,
+        }
+    }
+
+    pub async fn list_provider_models_by_provider(
+        &self,
+        provider_id: i64,
+    ) -> Result<Vec<ProviderModel>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+FROM provider_models
+WHERE provider_id = ?
+ORDER BY upstream_model ASC, id ASC
+"#,
+                )
+                .bind(provider_id)
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ProviderModel {
+                        id: row.get::<i64, _>("id"),
+                        provider_id: row.get::<i64, _>("provider_id"),
+                        upstream_model: row.get::<String, _>("upstream_model"),
+                        alias: row.get::<Option<String>, _>("alias"),
+                        enabled: row.get::<i64, _>("enabled") != 0,
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+FROM provider_models
+WHERE provider_id = $1
+ORDER BY upstream_model ASC, id ASC
+"#,
+                )
+                .bind(provider_id)
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ProviderModel {
+                        id: row.get::<i64, _>("id"),
+                        provider_id: row.get::<i64, _>("provider_id"),
+                        upstream_model: row.get::<String, _>("upstream_model"),
+                        alias: row.get::<Option<String>, _>("alias"),
+                        enabled: row.get::<bool, _>("enabled"),
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    pub async fn list_all_provider_models(&self) -> Result<Vec<ProviderModel>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+FROM provider_models
+ORDER BY provider_id ASC, upstream_model ASC, id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ProviderModel {
+                        id: row.get::<i64, _>("id"),
+                        provider_id: row.get::<i64, _>("provider_id"),
+                        upstream_model: row.get::<String, _>("upstream_model"),
+                        alias: row.get::<Option<String>, _>("alias"),
+                        enabled: row.get::<i64, _>("enabled") != 0,
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+FROM provider_models
+ORDER BY provider_id ASC, upstream_model ASC, id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ProviderModel {
+                        id: row.get::<i64, _>("id"),
+                        provider_id: row.get::<i64, _>("provider_id"),
+                        upstream_model: row.get::<String, _>("upstream_model"),
+                        alias: row.get::<Option<String>, _>("alias"),
+                        enabled: row.get::<bool, _>("enabled"),
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    pub async fn upsert_provider_models(
+        &self,
+        provider_id: i64,
+        upstream_models: &[String],
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        if upstream_models.is_empty() {
+            return Ok(());
+        }
+
+        match self {
+            Database::Sqlite(pool) => {
+                let mut builder: QueryBuilder<Sqlite> = QueryBuilder::new(
+                    "INSERT INTO provider_models (provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms) ",
+                );
+                builder.push_values(upstream_models, |mut row, model| {
+                    row.push_bind(provider_id);
+                    row.push_bind(model);
+                    row.push_bind(Option::<String>::None);
+                    row.push_bind(1_i64);
+                    row.push_bind(now_ms);
+                    row.push_bind(now_ms);
+                });
+                builder.push(
+                    " ON CONFLICT(provider_id, upstream_model) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
+                );
+                builder.build().execute(pool).await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                    "INSERT INTO provider_models (provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms) ",
+                );
+                builder.push_values(upstream_models, |mut row, model| {
+                    row.push_bind(provider_id);
+                    row.push_bind(model);
+                    row.push_bind(Option::<String>::None);
+                    row.push_bind(true);
+                    row.push_bind(now_ms);
+                    row.push_bind(now_ms);
+                });
+                builder.push(
+                    " ON CONFLICT (provider_id, upstream_model) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
+                );
+                builder.build().execute(pool).await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn update_provider_model(
+        &self,
+        id: i64,
+        alias: Option<Option<String>>,
+        enabled: Option<bool>,
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        if alias.is_none() && enabled.is_none() {
+            return Ok(());
+        }
+
+        let alias = alias.map(|value| {
+            value.and_then(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        });
+
+        match self {
+            Database::Sqlite(pool) => {
+                if let Some(alias) = alias {
+                    sqlx::query(
+                        r#"
+UPDATE provider_models
+SET alias = ?, updated_at_ms = ?
+WHERE id = ?
+"#,
+                    )
+                    .bind(alias)
+                    .bind(now_ms)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
+                if let Some(enabled) = enabled {
+                    sqlx::query(
+                        r#"
+UPDATE provider_models
+SET enabled = ?, updated_at_ms = ?
+WHERE id = ?
+"#,
+                    )
+                    .bind(if enabled { 1_i64 } else { 0_i64 })
+                    .bind(now_ms)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                if let Some(alias) = alias {
+                    sqlx::query(
+                        r#"
+UPDATE provider_models
+SET alias = $1, updated_at_ms = $2
+WHERE id = $3
+"#,
+                    )
+                    .bind(alias)
+                    .bind(now_ms)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
+                if let Some(enabled) = enabled {
+                    sqlx::query(
+                        r#"
+UPDATE provider_models
+SET enabled = $1, updated_at_ms = $2
+WHERE id = $3
+"#,
+                    )
+                    .bind(enabled)
+                    .bind(now_ms)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn delete_provider_model(&self, id: i64) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query("DELETE FROM provider_models WHERE id = ?")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                sqlx::query("DELETE FROM provider_models WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn list_upstream_key_models_by_key(
+        &self,
+        upstream_key_id: i64,
+    ) -> Result<Vec<UpstreamKeyModel>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, upstream_key_id, model_name, enabled, created_at_ms, updated_at_ms
+FROM upstream_key_models
+WHERE upstream_key_id = ?
+ORDER BY model_name ASC, id ASC
+"#,
+                )
+                .bind(upstream_key_id)
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| UpstreamKeyModel {
+                        id: row.get::<i64, _>("id"),
+                        upstream_key_id: row.get::<i64, _>("upstream_key_id"),
+                        model_name: row.get::<String, _>("model_name"),
+                        enabled: row.get::<i64, _>("enabled") != 0,
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, upstream_key_id, model_name, enabled, created_at_ms, updated_at_ms
+FROM upstream_key_models
+WHERE upstream_key_id = $1
+ORDER BY model_name ASC, id ASC
+"#,
+                )
+                .bind(upstream_key_id)
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| UpstreamKeyModel {
+                        id: row.get::<i64, _>("id"),
+                        upstream_key_id: row.get::<i64, _>("upstream_key_id"),
+                        model_name: row.get::<String, _>("model_name"),
+                        enabled: row.get::<bool, _>("enabled"),
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    pub async fn list_all_upstream_key_models(&self) -> Result<Vec<UpstreamKeyModel>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, upstream_key_id, model_name, enabled, created_at_ms, updated_at_ms
+FROM upstream_key_models
+ORDER BY upstream_key_id ASC, model_name ASC, id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| UpstreamKeyModel {
+                        id: row.get::<i64, _>("id"),
+                        upstream_key_id: row.get::<i64, _>("upstream_key_id"),
+                        model_name: row.get::<String, _>("model_name"),
+                        enabled: row.get::<i64, _>("enabled") != 0,
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT id, upstream_key_id, model_name, enabled, created_at_ms, updated_at_ms
+FROM upstream_key_models
+ORDER BY upstream_key_id ASC, model_name ASC, id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| UpstreamKeyModel {
+                        id: row.get::<i64, _>("id"),
+                        upstream_key_id: row.get::<i64, _>("upstream_key_id"),
+                        model_name: row.get::<String, _>("model_name"),
+                        enabled: row.get::<bool, _>("enabled"),
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    pub async fn upsert_upstream_key_models(
+        &self,
+        upstream_key_id: i64,
+        model_names: &[String],
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        if model_names.is_empty() {
+            return Ok(());
+        }
+
+        match self {
+            Database::Sqlite(pool) => {
+                let mut builder: QueryBuilder<Sqlite> = QueryBuilder::new(
+                    "INSERT INTO upstream_key_models (upstream_key_id, model_name, enabled, created_at_ms, updated_at_ms) ",
+                );
+                builder.push_values(model_names, |mut row, model_name| {
+                    row.push_bind(upstream_key_id);
+                    row.push_bind(model_name);
+                    row.push_bind(1_i64);
+                    row.push_bind(now_ms);
+                    row.push_bind(now_ms);
+                });
+                builder.push(
+                    " ON CONFLICT(upstream_key_id, model_name) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
+                );
+                builder.build().execute(pool).await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                    "INSERT INTO upstream_key_models (upstream_key_id, model_name, enabled, created_at_ms, updated_at_ms) ",
+                );
+                builder.push_values(model_names, |mut row, model_name| {
+                    row.push_bind(upstream_key_id);
+                    row.push_bind(model_name);
+                    row.push_bind(true);
+                    row.push_bind(now_ms);
+                    row.push_bind(now_ms);
+                });
+                builder.push(
+                    " ON CONFLICT (upstream_key_id, model_name) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
+                );
+                builder.build().execute(pool).await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn update_upstream_key_model(
+        &self,
+        id: i64,
+        enabled: bool,
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    r#"
+UPDATE upstream_key_models
+SET enabled = ?, updated_at_ms = ?
+WHERE id = ?
+"#,
+                )
+                .bind(if enabled { 1_i64 } else { 0_i64 })
+                .bind(now_ms)
+                .bind(id)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+UPDATE upstream_key_models
+SET enabled = $1, updated_at_ms = $2
+WHERE id = $3
+"#,
+                )
+                .bind(enabled)
+                .bind(now_ms)
+                .bind(id)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn delete_upstream_key_model(&self, id: i64) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query("DELETE FROM upstream_key_models WHERE id = ?")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                sqlx::query("DELETE FROM upstream_key_models WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn list_gateway_model_policies(&self) -> Result<Vec<GatewayModelPolicy>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT model_name, enabled, created_at_ms, updated_at_ms
+FROM gateway_model_policies
+ORDER BY model_name ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| GatewayModelPolicy {
+                        model_name: row.get::<String, _>("model_name"),
+                        enabled: row.get::<i64, _>("enabled") != 0,
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT model_name, enabled, created_at_ms, updated_at_ms
+FROM gateway_model_policies
+ORDER BY model_name ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| GatewayModelPolicy {
+                        model_name: row.get::<String, _>("model_name"),
+                        enabled: row.get::<bool, _>("enabled"),
+                        created_at_ms: row.get::<i64, _>("created_at_ms"),
+                        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    pub async fn upsert_gateway_model_policy(
+        &self,
+        model_name: &str,
+        enabled: bool,
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    r#"
+INSERT INTO gateway_model_policies (model_name, enabled, created_at_ms, updated_at_ms)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(model_name) DO UPDATE SET enabled = excluded.enabled, updated_at_ms = excluded.updated_at_ms
+"#,
+                )
+                .bind(model_name)
+                .bind(if enabled { 1_i64 } else { 0_i64 })
+                .bind(now_ms)
+                .bind(now_ms)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+INSERT INTO gateway_model_policies (model_name, enabled, created_at_ms, updated_at_ms)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (model_name) DO UPDATE SET enabled = excluded.enabled, updated_at_ms = excluded.updated_at_ms
+"#,
+                )
+                .bind(model_name)
+                .bind(enabled)
+                .bind(now_ms)
+                .bind(now_ms)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
         }
     }
 
@@ -2597,6 +3182,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   priority INTEGER NOT NULL,
   weight INTEGER NOT NULL,
   supports_include_usage INTEGER NOT NULL,
+  websocket_enabled INTEGER NOT NULL DEFAULT 0,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
@@ -2640,6 +3226,59 @@ CREATE TABLE IF NOT EXISTS upstream_keys (
   FOREIGN KEY(provider_id) REFERENCES upstream_providers(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_upstream_keys_provider ON upstream_keys(provider_id);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS provider_models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER NOT NULL,
+  upstream_model TEXT NOT NULL,
+  alias TEXT,
+  enabled INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  FOREIGN KEY(provider_id) REFERENCES upstream_providers(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_models_provider_model ON provider_models(provider_id, upstream_model);
+CREATE INDEX IF NOT EXISTS idx_provider_models_provider ON provider_models(provider_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_models_alias_unique
+  ON provider_models(alias)
+  WHERE alias IS NOT NULL AND alias <> '';
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS upstream_key_models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  upstream_key_id INTEGER NOT NULL,
+  model_name TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  FOREIGN KEY(upstream_key_id) REFERENCES upstream_keys(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_upstream_key_models_key_model ON upstream_key_models(upstream_key_id, model_name);
+CREATE INDEX IF NOT EXISTS idx_upstream_key_models_key ON upstream_key_models(upstream_key_id);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS gateway_model_policies (
+  model_name TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
 "#,
     )
     .execute(pool)
@@ -2742,6 +3381,7 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key
     .execute(pool)
     .await?;
 
+    ensure_sqlite_upstream_providers_websocket_enabled(pool).await?;
     ensure_sqlite_model_prices_provider_scope(pool).await?;
     Ok(())
 }
@@ -2775,6 +3415,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   priority INTEGER NOT NULL,
   weight INTEGER NOT NULL,
   supports_include_usage BOOLEAN NOT NULL,
+  websocket_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL
 );
@@ -2816,6 +3457,57 @@ CREATE TABLE IF NOT EXISTS upstream_keys (
   updated_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_upstream_keys_provider ON upstream_keys(provider_id);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS provider_models (
+  id BIGSERIAL PRIMARY KEY,
+  provider_id BIGINT NOT NULL REFERENCES upstream_providers(id) ON DELETE CASCADE,
+  upstream_model TEXT NOT NULL,
+  alias TEXT,
+  enabled BOOLEAN NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  UNIQUE(provider_id, upstream_model)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_models_provider ON provider_models(provider_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_models_alias_unique
+  ON provider_models(alias)
+  WHERE alias IS NOT NULL AND alias <> '';
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS upstream_key_models (
+  id BIGSERIAL PRIMARY KEY,
+  upstream_key_id BIGINT NOT NULL REFERENCES upstream_keys(id) ON DELETE CASCADE,
+  model_name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  UNIQUE(upstream_key_id, model_name)
+);
+CREATE INDEX IF NOT EXISTS idx_upstream_key_models_key ON upstream_key_models(upstream_key_id);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS gateway_model_policies (
+  model_name TEXT PRIMARY KEY,
+  enabled BOOLEAN NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
 "#,
     )
     .execute(pool)
@@ -2915,6 +3607,7 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key
     .execute(pool)
     .await?;
 
+    ensure_postgres_upstream_providers_websocket_enabled(pool).await?;
     ensure_postgres_model_prices_provider_scope(pool).await?;
     Ok(())
 }
@@ -2945,12 +3638,36 @@ async fn ensure_sqlite_model_prices_provider_scope(pool: &SqlitePool) -> Result<
     Ok(())
 }
 
+async fn ensure_sqlite_upstream_providers_websocket_enabled(
+    pool: &SqlitePool,
+) -> Result<(), DbError> {
+    if !sqlite_column_exists(pool, "upstream_providers", "websocket_enabled").await? {
+        sqlx::query(
+            "ALTER TABLE upstream_providers ADD COLUMN websocket_enabled INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn ensure_postgres_model_prices_provider_scope(pool: &PgPool) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS provider_id BIGINT")
         .execute(pool)
         .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_model_prices_provider_model_created ON model_prices(provider_id, model_name, created_at_ms DESC, id DESC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_postgres_upstream_providers_websocket_enabled(
+    pool: &PgPool,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS websocket_enabled BOOLEAN NOT NULL DEFAULT FALSE",
     )
     .execute(pool)
     .await?;

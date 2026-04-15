@@ -15,6 +15,14 @@
 ## Coding Style & Naming Conventions
 Follow the existing style in each subproject: Rust uses 4-space indentation, snake_case modules, and small single-purpose files; run `cargo fmt` before committing and `cargo clippy --manifest-path backend/Cargo.toml` for lint checks. Frontend code uses TypeScript with Solid components in PascalCase (`ProvidersPage.tsx`), utilities in camelCase, and the `@/` alias for `frontend/src`. Keep new files close to the feature they support.
 
+## User-Facing Copy Rules
+Frontend UI copy must be written for end users and operators, not for developers.
+
+- Do not expose implementation details in UI text, including env var names, internal token/header names, raw API paths, protocol fallbacks, preview/mock/demo behavior, or internal routing/cache terminology unless the user must act on it directly.
+- Prefer concise Chinese wording such as “服务地址”、“管理员口令”、“访问密钥”、“节点”、“同步模型”. Keep labels and helper text short.
+- Explanations about architecture, constraints, fallback behavior, or debugging belong in code comments, docs, logs, or `_doc/`, not in the normal UI.
+- Before shipping frontend changes, scan newly added user-facing strings and remove developer-oriented wording.
+
 ## Testing Guidelines
 There is no large committed unit-test suite yet, so rely on focused validation. Run `cargo test --manifest-path backend/Cargo.toml` when adding backend logic, `npm --prefix frontend run build` for frontend smoke coverage, and the Python regression scripts for routing and failover behavior. Name new Rust tests after the behavior they prove, and keep fixtures in `data/tmp/` or temporary SQLite files instead of committed production data.
 
@@ -23,3 +31,34 @@ Git history currently starts with a single `Initial commit`, so there is no stri
 
 ## Security & Configuration Tips
 Copy `.env.example` to `.env` for local or Docker work. Always set `ADMIN_TOKEN`, prefer a separate `MASTER_KEY`, and do not commit populated `.env` files or live SQLite data. If you change archive behavior, double-check `REQUEST_LOG_ARCHIVE_DIR` and retention settings so tests do not write outside `data/`.
+
+## Active Product Decisions (Upstream Management, 2026-04-13)
+These decisions are confirmed and should be treated as implementation constraints for the current upstream-management iteration.
+
+- Keep upstream type as a fixed dropdown (`provider_type`) with exactly:
+  - `openai` (OpenAI)
+  - `openai_compatible` (OpenAI Compatible)
+  - `openai_codex_oauth` (OpenAI Codex OAuth)
+  - `openai_compatible_responses` (OpenAI Compatible (Responses))
+- Enforce strict backend validation for `provider_type` (reject unknown values).
+- Add/configure these core fields in the new-upstream flow: API key, Base URL, websocket transport toggle.
+- Websocket transport policy:
+  - Control granularity is **provider-level**.
+  - If websocket transport fails, automatically fallback to normal HTTP transport.
+- New-upstream UX:
+  - Keep creation form minimal.
+  - After creation, continue model operations in provider detail (not in the creation drawer).
+- Codex OAuth:
+  - Priority channel remains Codex.
+  - First-phase target is to align with Codex `/login` browser-callback style flow (local callback path), while keeping behavior operable in current architecture.
+- `openai_compatible_responses` behavior:
+  - Keep responses-only routing semantics.
+  - Also isolate model-list/sync behavior accordingly (do not treat it as a generic chat-completions upstream).
+- Model management requirements remain: sync from `/v1/models`, rename(alias), enable/disable, delete.
+- Product principle: stay minimal and controllable; avoid feature bloat unrelated to upstream management.
+
+### Reference Projects
+- https://github.com/router-for-me/CLIProxyAPI
+- https://github.com/bestruirui/octopus
+- https://github.com/atopos31/llmio
+- https://github.com/ding113/claude-code-hub

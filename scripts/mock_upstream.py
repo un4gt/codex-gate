@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 def parse_args():
@@ -16,6 +16,8 @@ def parse_args():
     parser.add_argument('--default-auth', default='')
     parser.add_argument('--default-delay-ms', type=int, default=0)
     parser.add_argument('--route', action='append', default=[], help='path_prefix|status|body_text|auth|delay_ms|format')
+    parser.add_argument('--models-chat', default='gpt-4o-mini,gpt-4.1-mini')
+    parser.add_argument('--models-responses', default='gpt-4.1-mini')
     return parser.parse_args()
 
 
@@ -83,6 +85,9 @@ class MockHandler(BaseHTTPRequestHandler):
     server_version = 'codex-gate-mock/0.1'
 
     def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/v1/models':
+            return self.handle_models(parsed.query)
         if self.path.startswith('/__admin/stats'):
             return self.handle_stats()
         self.respond_not_found()
@@ -130,6 +135,28 @@ class MockHandler(BaseHTTPRequestHandler):
         self.respond_json(200, {
             'routes': self.server.state.snapshot(),
             'time_ms': int(time.time() * 1000),
+        })
+
+    def handle_models(self, query_raw):
+        query = parse_qs(query_raw)
+        requested_format = (query.get('api_format') or ['chat'])[0]
+        models = (
+            self.server.responses_models
+            if requested_format == 'responses'
+            else self.server.chat_models
+        )
+        data = [
+            {
+                'id': model_id,
+                'object': 'model',
+                'created': 0,
+                'owned_by': 'mock-upstream',
+            }
+            for model_id in models
+        ]
+        self.respond_json(200, {
+            'object': 'list',
+            'data': data,
         })
 
     def respond_not_found(self):
@@ -213,6 +240,15 @@ def build_responses_body(body_text, request_body):
     }
 
 
+def parse_models(raw):
+    out = []
+    for item in raw.split(','):
+        model = item.strip()
+        if model:
+            out.append(model)
+    return out
+
+
 def main():
     args = parse_args()
     host, port = args.listen.rsplit(':', 1)
@@ -220,6 +256,8 @@ def main():
     routes = [parse_route(item, args.default_format) for item in args.route]
     server = ThreadingHTTPServer((host, int(port)), MockHandler)
     server.state = MockState(default_route, routes)
+    server.chat_models = parse_models(args.models_chat)
+    server.responses_models = parse_models(args.models_responses)
     print(f'mock upstream listening on http://{args.listen}', flush=True)
     try:
         server.serve_forever()

@@ -103,17 +103,6 @@ impl Telemetry {
     ) -> Result<mpsc::OwnedPermit<TelemetryEvent>, mpsc::error::SendError<()>> {
         self.tx.clone().reserve_owned().await
     }
-
-    pub fn sender(&self) -> mpsc::Sender<TelemetryEvent> {
-        self.tx.clone()
-    }
-
-    pub async fn submit(
-        &self,
-        event: TelemetryEvent,
-    ) -> Result<(), mpsc::error::SendError<TelemetryEvent>> {
-        self.tx.send(event).await
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -307,10 +296,10 @@ impl TelemetryWorker {
         if event.log_enabled {
             let id = util::new_ulid();
             let mut err_msg = event.error_message;
-            if let Some(ref mut s) = err_msg {
-                if s.len() > 512 {
-                    s.truncate(512);
-                }
+            if let Some(ref mut s) = err_msg
+                && s.len() > 512
+            {
+                s.truncate(512);
             }
 
             let log_row = RequestLogRow {

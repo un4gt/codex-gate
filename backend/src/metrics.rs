@@ -74,6 +74,16 @@ pub struct Metrics {
     responses: ApiCounters,
 }
 
+#[derive(Clone, Copy)]
+pub struct RequestMetric<'a> {
+    pub http_status: Option<i32>,
+    pub error_type: Option<&'a str>,
+    pub duration_ms: Option<i64>,
+    pub usage: Usage,
+    pub cost_in_usd: Decimal,
+    pub cost_out_usd: Decimal,
+}
+
 impl Metrics {
     pub fn new() -> Self {
         Self {
@@ -113,74 +123,32 @@ impl Metrics {
         }
     }
 
-    pub fn record_request(
-        &self,
-        api_format: ApiFormat,
-        http_status: Option<i32>,
-        error_type: Option<&str>,
-        duration_ms: Option<i64>,
-        usage: &Usage,
-        cost_in_usd: Decimal,
-        cost_out_usd: Decimal,
-    ) {
+    pub fn record_request(&self, api_format: ApiFormat, metric: RequestMetric<'_>) {
         let target = match api_format {
             ApiFormat::ChatCompletions => &self.chat,
             ApiFormat::Responses => &self.responses,
         };
-        Self::record_request_inner(
-            target,
-            http_status,
-            error_type,
-            duration_ms,
-            usage,
-            cost_in_usd,
-            cost_out_usd,
-        );
+        Self::record_request_inner(target, metric);
     }
 
-    pub fn record_request_str(
-        &self,
-        api_format: &str,
-        http_status: Option<i32>,
-        error_type: Option<&str>,
-        duration_ms: Option<i64>,
-        usage: &Usage,
-        cost_in_usd: Decimal,
-        cost_out_usd: Decimal,
-    ) {
+    pub fn record_request_str(&self, api_format: &str, metric: RequestMetric<'_>) {
         let target = if api_format == "responses" {
             &self.responses
         } else {
             &self.chat
         };
-        Self::record_request_inner(
-            target,
-            http_status,
-            error_type,
-            duration_ms,
-            usage,
-            cost_in_usd,
-            cost_out_usd,
-        );
+        Self::record_request_inner(target, metric);
     }
 
-    fn record_request_inner(
-        target: &ApiCounters,
-        http_status: Option<i32>,
-        error_type: Option<&str>,
-        duration_ms: Option<i64>,
-        usage: &Usage,
-        cost_in_usd: Decimal,
-        cost_out_usd: Decimal,
-    ) {
-        let ok = http_status.unwrap_or(500) < 400 && error_type.is_none();
+    fn record_request_inner(target: &ApiCounters, metric: RequestMetric<'_>) {
+        let ok = metric.http_status.unwrap_or(500) < 400 && metric.error_type.is_none();
         if ok {
             target.ok_total.fetch_add(1, Ordering::Relaxed);
         } else {
             target.error_total.fetch_add(1, Ordering::Relaxed);
         }
 
-        if let Some(duration_ms) = duration_ms.filter(|value| *value >= 0) {
+        if let Some(duration_ms) = metric.duration_ms.filter(|value| *value >= 0) {
             target
                 .duration_ms_sum
                 .fetch_add(duration_ms as u64, Ordering::Relaxed);
@@ -189,26 +157,28 @@ impl Metrics {
 
         target
             .input_tokens_total
-            .fetch_add(usage.input_tokens.max(0) as u64, Ordering::Relaxed);
+            .fetch_add(metric.usage.input_tokens.max(0) as u64, Ordering::Relaxed);
         target
             .output_tokens_total
-            .fetch_add(usage.output_tokens.max(0) as u64, Ordering::Relaxed);
+            .fetch_add(metric.usage.output_tokens.max(0) as u64, Ordering::Relaxed);
         target.cache_read_tokens_total.fetch_add(
-            usage.cache_read_input_tokens.max(0) as u64,
+            metric.usage.cache_read_input_tokens.max(0) as u64,
             Ordering::Relaxed,
         );
         target.cache_write_tokens_total.fetch_add(
-            usage.cache_creation_input_tokens.max(0) as u64,
+            metric.usage.cache_creation_input_tokens.max(0) as u64,
             Ordering::Relaxed,
         );
 
-        let cost_total = cost_in_usd + cost_out_usd;
-        target
-            .cost_in_micro_usd_total
-            .fetch_add(decimal_to_micro_units(cost_in_usd), Ordering::Relaxed);
-        target
-            .cost_out_micro_usd_total
-            .fetch_add(decimal_to_micro_units(cost_out_usd), Ordering::Relaxed);
+        let cost_total = metric.cost_in_usd + metric.cost_out_usd;
+        target.cost_in_micro_usd_total.fetch_add(
+            decimal_to_micro_units(metric.cost_in_usd),
+            Ordering::Relaxed,
+        );
+        target.cost_out_micro_usd_total.fetch_add(
+            decimal_to_micro_units(metric.cost_out_usd),
+            Ordering::Relaxed,
+        );
         target
             .cost_total_micro_usd_total
             .fetch_add(decimal_to_micro_units(cost_total), Ordering::Relaxed);

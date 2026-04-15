@@ -3,6 +3,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::Uri;
 use hyper::body::Bytes;
 use hyper::body::Incoming;
+use hyper::header::HOST;
 use hyper::{Method, Request, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,8 +20,15 @@ use crate::util;
 use rust_decimal::Decimal;
 use tokio::time as tokio_time;
 
+const ALLOWED_PROVIDER_TYPES: [&str; 4] = [
+    "openai",
+    "openai_compatible",
+    "openai_codex_oauth",
+    "openai_compatible_responses",
+];
+
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    if let Err(resp) = require_admin(&req, &state) {
+    if let Some(resp) = require_admin(&req, &state) {
         return resp;
     }
 
@@ -40,6 +48,8 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         (Method::GET, "/api/v1/prices") => return list_prices(req, state).await,
         (Method::POST, "/api/v1/prices") => return create_price(req, state).await,
         (Method::GET, "/api/v1/system/config") => return system_config(req, state).await,
+        (Method::GET, "/api/v1/gateway-models") => return list_gateway_models(req, state).await,
+        (Method::PATCH, "/api/v1/gateway-models") => return patch_gateway_model(req, state).await,
 
         (Method::GET, "/api/v1/stats/daily") => return stats_daily(req, state).await,
         (Method::GET, "/api/v1/stats/overview") => return stats_overview(req, state).await,
@@ -75,6 +85,15 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         if req.method() == Method::POST && path.ends_with("/keys") {
             return create_provider_key(req, state).await;
         }
+        if req.method() == Method::GET && path.ends_with("/models") {
+            return list_provider_models(req, state).await;
+        }
+        if req.method() == Method::POST && path.ends_with("/models/sync") {
+            return sync_provider_models(req, state).await;
+        }
+        if req.method() == Method::POST && path.ends_with("/codex-oauth/start") {
+            return start_codex_oauth(req, state).await;
+        }
     }
     if path.starts_with("/api/v1/endpoints/") && req.method() == Method::PATCH {
         return update_endpoint(req, state).await;
@@ -85,8 +104,38 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     {
         return test_endpoint(req, state).await;
     }
-    if path.starts_with("/api/v1/keys/") && req.method() == Method::PATCH {
-        return update_key(req, state).await;
+    if path.starts_with("/api/v1/keys/") {
+        if req.method() == Method::PATCH {
+            return update_key(req, state).await;
+        }
+        if req.method() == Method::GET && path.ends_with("/models") {
+            return list_key_models(req, state).await;
+        }
+        if req.method() == Method::POST && path.ends_with("/models/sync") {
+            return sync_key_models(req, state).await;
+        }
+        if req.method() == Method::POST && path.ends_with("/models") {
+            return add_key_models(req, state).await;
+        }
+    }
+    if path.starts_with("/api/v1/provider-models/") {
+        if req.method() == Method::PATCH {
+            return patch_provider_model(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return delete_provider_model(req, state).await;
+        }
+    }
+    if path.starts_with("/api/v1/key-models/") {
+        if req.method() == Method::PATCH {
+            return patch_key_model(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return delete_key_model(req, state).await;
+        }
+    }
+    if path.starts_with("/api/v1/codex-oauth/") && req.method() == Method::GET {
+        return get_codex_oauth_request(req, state).await;
     }
     if path.starts_with("/api/v1/routes/") && req.method() == Method::PUT {
         return upsert_route(req, state).await;
@@ -98,17 +147,588 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     http::json_error(StatusCode::NOT_FOUND, "not found")
 }
 
-fn require_admin(req: &Request<Incoming>, state: &SharedState) -> Result<(), HttpResponse> {
+fn require_admin(req: &Request<Incoming>, state: &SharedState) -> Option<HttpResponse> {
     let Some(token) = http::bearer_token(req) else {
-        return Err(http::json_error(
+        return Some(http::json_error(
             StatusCode::UNAUTHORIZED,
             "missing bearer token",
         ));
     };
     if token != state.config.admin_token {
-        return Err(http::json_error(StatusCode::UNAUTHORIZED, "invalid token"));
+        return Some(http::json_error(StatusCode::UNAUTHORIZED, "invalid token"));
     }
-    Ok(())
+    None
+}
+
+async fn list_provider_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(provider_id) = parse_provider_id_with_suffix(path, "/models") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
+    };
+
+    match state.db.list_provider_models_by_provider(provider_id).await {
+        Ok(items) => http::json(StatusCode::OK, &items),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(provider_id) = parse_provider_id_with_suffix(path, "/models/sync") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
+    };
+
+    let snap = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(items) => items,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    let Some(provider) = snap.providers.iter().find(|p| p.id == provider_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+    let models_path = provider_models_sync_path(&provider.provider_type);
+
+    let now_ms = util::now_ms();
+
+    let keys = snap
+        .keys_by_provider
+        .get(&provider_id)
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let ranked_keys =
+        crate::selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
+    let Some(key) = ranked_keys.first() else {
+        return http::json_error(StatusCode::CONFLICT, "no available upstream keys");
+    };
+
+    let endpoints = snap
+        .endpoints_by_provider
+        .get(&provider_id)
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let ranked_endpoints = crate::selector::rank_endpoint_refs_with_health(
+        &endpoints,
+        &state.endpoint_health,
+        state.config.endpoint_selector_strategy,
+        now_ms,
+    );
+    let Some(endpoint) = ranked_endpoints.first() else {
+        return http::json_error(StatusCode::CONFLICT, "no available upstream endpoints");
+    };
+
+    let uri = match build_upstream_uri(&endpoint.base_url, models_path) {
+        Ok(uri) => uri,
+        Err(e) => return http::json_error(StatusCode::BAD_REQUEST, e),
+    };
+
+    let upstream_req = match Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", key.secret))
+        .body(Full::new(Bytes::new()))
+    {
+        Ok(req) => req,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let response = match tokio_time::timeout(
+        state.config.upstream_request_timeout,
+        state.upstream.request(upstream_req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
+        Err(_) => {
+            return http::json_error(
+                StatusCode::BAD_GATEWAY,
+                format!("timeout after {:?}", state.config.upstream_request_timeout),
+            );
+        }
+    };
+
+    let status = response.status();
+    let body_bytes = match response.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+
+    if status != StatusCode::OK {
+        let body = String::from_utf8_lossy(&body_bytes).trim().to_string();
+        return http::json_error(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "upstream {models_path} failed: {} {}",
+                status.as_u16(),
+                body
+            ),
+        );
+    }
+
+    let parsed: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, format!("invalid json: {e}")),
+    };
+
+    let mut models: Vec<String> = parsed
+        .get("data")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    models.sort();
+    models.dedup();
+
+    if models.is_empty() {
+        return http::json_error(StatusCode::BAD_GATEWAY, "empty model list");
+    }
+
+    if let Err(e) = state
+        .db
+        .upsert_provider_models(provider_id, &models, util::now_ms())
+        .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+
+    state.caches.upstream.invalidate();
+
+    match state.db.list_provider_models_by_provider(provider_id).await {
+        Ok(items) => http::json(StatusCode::OK, &items),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchProviderModelReq {
+    alias: Option<Option<String>>,
+    enabled: Option<bool>,
+}
+
+async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(model_id) = parse_id_suffix(path, "/api/v1/provider-models/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid model id");
+    };
+
+    let (_, patch, _raw) =
+        match http::read_json_limited::<PatchProviderModelReq>(req, state.config.max_request_bytes)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+    if let Err(e) = state
+        .db
+        .update_provider_model(model_id, patch.alias, patch.enabled, util::now_ms())
+        .await
+    {
+        let message = e.to_string();
+        if message.contains("idx_provider_models_alias_unique")
+            || message.contains("provider_models.alias")
+            || message.contains("UNIQUE constraint failed")
+        {
+            return http::json_error(StatusCode::CONFLICT, "alias already exists");
+        }
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, message);
+    }
+
+    state.caches.upstream.invalidate();
+    http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+}
+
+async fn delete_provider_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(model_id) = parse_id_suffix(path, "/api/v1/provider-models/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid model id");
+    };
+
+    match state.db.delete_provider_model(model_id).await {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::empty(StatusCode::NO_CONTENT)
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn list_key_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(upstream_key_id) = parse_id_suffix(path, "/api/v1/keys/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid key id");
+    };
+
+    match state
+        .db
+        .list_upstream_key_models_by_key(upstream_key_id)
+        .await
+    {
+        Ok(items) => http::json(StatusCode::OK, &items),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn sync_key_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(upstream_key_id) = parse_id_suffix(path, "/api/v1/keys/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid key id");
+    };
+
+    let snap = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(items) => items,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    let mut provider_id: Option<i64> = None;
+    let mut key_secret: Option<String> = None;
+    for (pid, keys) in &snap.keys_by_provider {
+        for key in keys {
+            if key.id == upstream_key_id {
+                provider_id = Some(*pid);
+                key_secret = Some(key.secret.clone());
+                break;
+            }
+        }
+        if provider_id.is_some() {
+            break;
+        }
+    }
+
+    let Some(provider_id) = provider_id else {
+        return http::json_error(StatusCode::NOT_FOUND, "key not found");
+    };
+    let Some(key_secret) = key_secret else {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to resolve key");
+    };
+    let Some(provider) = snap.providers.iter().find(|p| p.id == provider_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+    let models_path = provider_models_sync_path(&provider.provider_type);
+
+    let now_ms = util::now_ms();
+    let endpoints = snap
+        .endpoints_by_provider
+        .get(&provider_id)
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let ranked_endpoints = crate::selector::rank_endpoint_refs_with_health(
+        &endpoints,
+        &state.endpoint_health,
+        state.config.endpoint_selector_strategy,
+        now_ms,
+    );
+    let Some(endpoint) = ranked_endpoints.first() else {
+        return http::json_error(StatusCode::CONFLICT, "no available upstream endpoints");
+    };
+
+    let uri = match build_upstream_uri(&endpoint.base_url, models_path) {
+        Ok(uri) => uri,
+        Err(e) => return http::json_error(StatusCode::BAD_REQUEST, e),
+    };
+
+    let upstream_req = match Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", key_secret))
+        .body(Full::new(Bytes::new()))
+    {
+        Ok(req) => req,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let response = match tokio_time::timeout(
+        state.config.upstream_request_timeout,
+        state.upstream.request(upstream_req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
+        Err(_) => {
+            return http::json_error(
+                StatusCode::BAD_GATEWAY,
+                format!("timeout after {:?}", state.config.upstream_request_timeout),
+            );
+        }
+    };
+
+    let status = response.status();
+    let body_bytes = match response.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    if status != StatusCode::OK {
+        let body = String::from_utf8_lossy(&body_bytes).trim().to_string();
+        return http::json_error(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "upstream {models_path} failed: {} {}",
+                status.as_u16(),
+                body
+            ),
+        );
+    }
+
+    let parsed: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, format!("invalid json: {e}")),
+    };
+
+    let mut models: Vec<String> = parsed
+        .get("data")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    models.sort();
+    models.dedup();
+
+    if models.is_empty() {
+        return http::json_error(StatusCode::BAD_GATEWAY, "empty model list");
+    }
+
+    if let Err(e) = state
+        .db
+        .upsert_upstream_key_models(upstream_key_id, &models, util::now_ms())
+        .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    state.caches.upstream.invalidate();
+
+    match state
+        .db
+        .list_upstream_key_models_by_key(upstream_key_id)
+        .await
+    {
+        Ok(items) => http::json(StatusCode::OK, &items),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AddKeyModelsReq {
+    models: Vec<String>,
+}
+
+async fn add_key_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(upstream_key_id) = parse_id_suffix(path, "/api/v1/keys/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid key id");
+    };
+
+    let (_, body, _raw) =
+        match http::read_json_limited::<AddKeyModelsReq>(req, state.config.max_request_bytes).await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+    let mut models = body
+        .models
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+
+    if models.is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "models is empty");
+    }
+
+    if let Err(e) = state
+        .db
+        .upsert_upstream_key_models(upstream_key_id, &models, util::now_ms())
+        .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+
+    state.caches.upstream.invalidate();
+    match state
+        .db
+        .list_upstream_key_models_by_key(upstream_key_id)
+        .await
+    {
+        Ok(items) => http::json(StatusCode::OK, &items),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchKeyModelReq {
+    enabled: bool,
+}
+
+async fn patch_key_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(model_id) = parse_id_suffix(path, "/api/v1/key-models/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid model id");
+    };
+
+    let (_, patch, _raw) = match http::read_json_limited::<PatchKeyModelReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    if let Err(e) = state
+        .db
+        .update_upstream_key_model(model_id, patch.enabled, util::now_ms())
+        .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    state.caches.upstream.invalidate();
+    http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+}
+
+async fn delete_key_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(model_id) = parse_id_suffix(path, "/api/v1/key-models/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid model id");
+    };
+
+    match state.db.delete_upstream_key_model(model_id).await {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::empty(StatusCode::NO_CONTENT)
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn list_gateway_models(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    match state.db.list_gateway_model_policies().await {
+        Ok(items) => http::json(StatusCode::OK, &items),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchGatewayModelReq {
+    model_name: String,
+    enabled: bool,
+}
+
+async fn patch_gateway_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let (_, patch, _raw) =
+        match http::read_json_limited::<PatchGatewayModelReq>(req, state.config.max_request_bytes)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+    if patch.model_name.trim().is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "model_name is empty");
+    }
+
+    if let Err(e) = state
+        .db
+        .upsert_gateway_model_policy(patch.model_name.trim(), patch.enabled, util::now_ms())
+        .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+
+    state.caches.upstream.invalidate();
+    http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+}
+
+async fn start_codex_oauth(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(provider_id) = parse_provider_id_with_suffix(path, "/codex-oauth/start") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
+    };
+    let redirect_uri = format!("{}/api/v1/codex-oauth/callback", request_origin(&req));
+
+    let snap = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(items) => items,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let Some(provider) = snap.providers.iter().find(|p| p.id == provider_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if provider.provider_type != "openai_codex_oauth" {
+        return http::json_error(
+            StatusCode::CONFLICT,
+            "provider type is not openai_codex_oauth",
+        );
+    }
+
+    match state.codex_oauth.start(provider_id, redirect_uri).await {
+        Ok(resp) => http::json(StatusCode::OK, &resp),
+        Err(message) => http::json_error(StatusCode::BAD_GATEWAY, message),
+    }
+}
+
+async fn get_codex_oauth_request(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(request_id) = parse_string_suffix(path, "/api/v1/codex-oauth/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid request id");
+    };
+
+    match state.codex_oauth.get_view(&request_id, util::now_ms()) {
+        Some(view) => http::json(StatusCode::OK, &view),
+        None => http::json_error(StatusCode::NOT_FOUND, "request not found"),
+    }
+}
+
+fn build_upstream_uri(base_url: &str, path: &str) -> Result<Uri, String> {
+    let trimmed_base = base_url.trim_end_matches('/');
+    let base = if path.starts_with("/v1/") {
+        trimmed_base.strip_suffix("/v1").unwrap_or(trimmed_base)
+    } else {
+        trimmed_base
+    };
+
+    let mut out = String::with_capacity(base_url.len() + 64);
+    out.push_str(base);
+    out.push_str(path);
+    out.parse::<Uri>().map_err(|e| e.to_string())
+}
+
+fn provider_models_sync_path(provider_type: &str) -> &'static str {
+    if provider_type == "openai_compatible_responses" {
+        "/v1/models?api_format=responses"
+    } else {
+        "/v1/models"
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +892,8 @@ struct CreateProviderReq {
     weight: Option<i32>,
     #[serde(alias = "supportsIncludeUsage")]
     supports_include_usage: Option<bool>,
+    #[serde(alias = "websocketEnabled")]
+    websocket_enabled: Option<bool>,
 }
 
 async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -325,10 +947,14 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     if body.name.trim().is_empty() || body.provider_type.trim().is_empty() {
         return http::json_error(StatusCode::BAD_REQUEST, "name/provider_type is empty");
     }
+    if !is_valid_provider_type(body.provider_type.trim()) {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider_type");
+    }
     let enabled = body.enabled.unwrap_or(true);
     let priority = body.priority.unwrap_or(100);
     let weight = body.weight.unwrap_or(1);
     let supports_include_usage = body.supports_include_usage.unwrap_or(true);
+    let websocket_enabled = body.websocket_enabled.unwrap_or(false);
 
     let now_ms = util::now_ms();
     let id = match state
@@ -340,6 +966,7 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
             priority,
             weight,
             supports_include_usage,
+            websocket_enabled,
             now_ms,
         )
         .await
@@ -362,6 +989,8 @@ struct PatchProviderReq {
     weight: Option<i32>,
     #[serde(alias = "supportsIncludeUsage")]
     supports_include_usage: Option<bool>,
+    #[serde(alias = "websocketEnabled")]
+    websocket_enabled: Option<bool>,
 }
 
 async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -398,6 +1027,9 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         if t.trim().is_empty() {
             return http::json_error(StatusCode::BAD_REQUEST, "provider_type is empty");
         }
+        if !is_valid_provider_type(t.trim()) {
+            return http::json_error(StatusCode::BAD_REQUEST, "invalid provider_type");
+        }
         current.provider_type = t.trim().to_string();
     }
     if let Some(v) = patch.enabled {
@@ -411,6 +1043,9 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     }
     if let Some(v) = patch.supports_include_usage {
         current.supports_include_usage = v;
+    }
+    if let Some(v) = patch.websocket_enabled {
+        current.websocket_enabled = v;
     }
 
     if let Err(e) = state
@@ -976,7 +1611,6 @@ async fn system_config(_req: Request<Incoming>, state: SharedState) -> HttpRespo
             "healthz_path": "/healthz",
             "readyz_path": "/readyz",
             "metrics_path": "/metrics",
-            "preview_mode": false,
         },
         "basic": {
             "db_dsn": config.db_dsn,
@@ -990,7 +1624,9 @@ async fn system_config(_req: Request<Incoming>, state: SharedState) -> HttpRespo
             "endpoint_selector_strategy": format!("{:?}", config.endpoint_selector_strategy).to_ascii_lowercase(),
             "inject_include_usage": config.inject_include_usage,
             "upstream_cache_ttl_ms": config.upstream_cache_ttl.as_millis() as u64,
+            "upstream_cache_stale_grace_ms": config.upstream_cache_stale_grace.as_millis() as u64,
             "api_key_cache_ttl_ms": config.api_key_cache_ttl.as_millis() as u64,
+            "api_key_cache_max_entries": config.api_key_cache_max_entries,
         },
         "stability": {
             "circuit_breaker_failure_threshold": config.circuit_breaker_failure_threshold,
@@ -1333,63 +1969,61 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let cache_creation_input_tokens_max =
         query_i64(req.uri().query(), "cache_creation_input_tokens_max");
 
-    if let Some(format) = api_format.as_deref() {
-        if !matches!(format, "chat_completions" | "responses") {
-            return http::json_error(StatusCode::BAD_REQUEST, "invalid api_format");
-        }
+    if let Some(format) = api_format.as_deref()
+        && !matches!(format, "chat_completions" | "responses")
+    {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid api_format");
     }
-    if let (Some(from_ms), Some(to_ms)) = (time_from_ms, time_to_ms) {
-        if from_ms > to_ms {
-            return http::json_error(
-                StatusCode::BAD_REQUEST,
-                "time_from_ms must be <= time_to_ms",
-            );
-        }
+    if let (Some(from_ms), Some(to_ms)) = (time_from_ms, time_to_ms)
+        && from_ms > to_ms
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "time_from_ms must be <= time_to_ms",
+        );
     }
-    if let (Some(min_ms), Some(max_ms)) = (duration_ms_min, duration_ms_max) {
-        if min_ms > max_ms {
-            return http::json_error(
-                StatusCode::BAD_REQUEST,
-                "duration_ms_min must be <= duration_ms_max",
-            );
-        }
+    if let (Some(min_ms), Some(max_ms)) = (duration_ms_min, duration_ms_max)
+        && min_ms > max_ms
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "duration_ms_min must be <= duration_ms_max",
+        );
     }
-    if let (Some(min_tokens), Some(max_tokens)) = (total_tokens_min, total_tokens_max) {
-        if min_tokens > max_tokens {
-            return http::json_error(
-                StatusCode::BAD_REQUEST,
-                "total_tokens_min must be <= total_tokens_max",
-            );
-        }
+    if let (Some(min_tokens), Some(max_tokens)) = (total_tokens_min, total_tokens_max)
+        && min_tokens > max_tokens
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "total_tokens_min must be <= total_tokens_max",
+        );
     }
-    if let (Some(min_cost), Some(max_cost)) = (cost_total_min, cost_total_max) {
-        if min_cost > max_cost {
-            return http::json_error(
-                StatusCode::BAD_REQUEST,
-                "cost_total_min must be <= cost_total_max",
-            );
-        }
+    if let (Some(min_cost), Some(max_cost)) = (cost_total_min, cost_total_max)
+        && min_cost > max_cost
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "cost_total_min must be <= cost_total_max",
+        );
     }
     if let (Some(min_tokens), Some(max_tokens)) =
         (cache_read_input_tokens_min, cache_read_input_tokens_max)
+        && min_tokens > max_tokens
     {
-        if min_tokens > max_tokens {
-            return http::json_error(
-                StatusCode::BAD_REQUEST,
-                "cache_read_input_tokens_min must be <= cache_read_input_tokens_max",
-            );
-        }
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "cache_read_input_tokens_min must be <= cache_read_input_tokens_max",
+        );
     }
     if let (Some(min_tokens), Some(max_tokens)) = (
         cache_creation_input_tokens_min,
         cache_creation_input_tokens_max,
-    ) {
-        if min_tokens > max_tokens {
-            return http::json_error(
-                StatusCode::BAD_REQUEST,
-                "cache_creation_input_tokens_min must be <= cache_creation_input_tokens_max",
-            );
-        }
+    ) && min_tokens > max_tokens
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "cache_creation_input_tokens_min must be <= cache_creation_input_tokens_max",
+        );
     }
 
     let filter = RequestLogFilter {
@@ -1441,8 +2075,13 @@ fn provider_to_json(p: &UpstreamProvider, health: ProviderHealthView) -> Value {
         "priority": p.priority,
         "weight": p.weight,
         "supports_include_usage": p.supports_include_usage,
+        "websocket_enabled": p.websocket_enabled,
         "health": health
     })
+}
+
+fn is_valid_provider_type(provider_type: &str) -> bool {
+    ALLOWED_PROVIDER_TYPES.contains(&provider_type)
 }
 
 fn endpoint_to_json(e: &UpstreamEndpoint, health: EndpointHealthView) -> Value {
@@ -1476,6 +2115,15 @@ fn parse_id_suffix(path: &str, prefix: &str) -> Option<i64> {
     // If there are more segments (like /endpoints), ignore here.
     let id_str = rest.split('/').next()?;
     id_str.parse::<i64>().ok()
+}
+
+fn parse_string_suffix(path: &str, prefix: &str) -> Option<String> {
+    let rest = path.strip_prefix(prefix)?;
+    let rest = rest.trim_matches('/');
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 fn parse_provider_id_with_suffix(path: &str, suffix: &str) -> Option<i64> {
@@ -1568,6 +2216,33 @@ fn query_f64(q: Option<&str>, key: &str) -> Option<f64> {
 
 fn normalize_base_url(input: &str) -> String {
     input.trim_end_matches('/').to_string()
+}
+
+fn request_origin(req: &Request<Incoming>) -> String {
+    let scheme = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.split(',').next())
+        .map(|raw| raw.trim())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or("http");
+
+    let host = req
+        .headers()
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.split(',').next())
+        .map(|raw| raw.trim())
+        .filter(|raw| !raw.is_empty())
+        .or_else(|| {
+            req.headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or("localhost");
+
+    format!("{scheme}://{host}")
 }
 
 fn generate_api_key_plaintext() -> String {

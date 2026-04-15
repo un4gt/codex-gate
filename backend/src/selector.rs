@@ -21,22 +21,6 @@ impl EndpointSelectorStrategy {
     }
 }
 
-pub fn pick_provider<'a>(items: &'a [UpstreamProvider]) -> Option<&'a UpstreamProvider> {
-    pick_by_priority_weight(items, |provider| {
-        (provider.enabled, provider.priority, provider.weight)
-    })
-}
-
-pub fn pick_provider_ref<'a>(items: &'a [&'a UpstreamProvider]) -> Option<&'a UpstreamProvider> {
-    rank_provider_refs(items).into_iter().next()
-}
-
-pub fn rank_provider_refs<'a>(items: &'a [&'a UpstreamProvider]) -> Vec<&'a UpstreamProvider> {
-    order_by_priority_weight_refs(items, |provider| {
-        (provider.enabled, provider.priority, provider.weight)
-    })
-}
-
 pub fn rank_provider_refs_with_health<'a>(
     items: &'a [&'a UpstreamProvider],
     keys_by_provider: &HashMap<i64, Vec<UpstreamKey>>,
@@ -66,18 +50,6 @@ pub fn rank_provider_refs_with_health<'a>(
     })
 }
 
-pub fn pick_key<'a>(items: &'a [UpstreamKey]) -> Option<&'a UpstreamKey> {
-    pick_by_priority_weight(items, |key| (key.enabled, key.priority, key.weight))
-}
-
-pub fn pick_key_ref<'a>(items: &'a [&'a UpstreamKey]) -> Option<&'a UpstreamKey> {
-    rank_key_refs(items).into_iter().next()
-}
-
-pub fn rank_key_refs<'a>(items: &'a [&'a UpstreamKey]) -> Vec<&'a UpstreamKey> {
-    order_by_priority_weight_refs(items, |key| (key.enabled, key.priority, key.weight))
-}
-
 pub fn rank_key_refs_with_health<'a>(
     items: &'a [&'a UpstreamKey],
     health: &UpstreamKeyHealthBook,
@@ -95,31 +67,6 @@ pub fn rank_key_refs_with_health<'a>(
     })
 }
 
-pub fn pick_endpoint<'a>(items: &'a [UpstreamEndpoint]) -> Option<&'a UpstreamEndpoint> {
-    pick_by_priority_weight(items, |endpoint| {
-        (endpoint.enabled, endpoint.priority, endpoint.weight)
-    })
-}
-
-pub fn pick_endpoint_ref<'a>(items: &'a [&'a UpstreamEndpoint]) -> Option<&'a UpstreamEndpoint> {
-    order_by_priority_weight_refs(items, |endpoint| {
-        (endpoint.enabled, endpoint.priority, endpoint.weight)
-    })
-    .into_iter()
-    .next()
-}
-
-pub fn pick_endpoint_ref_with_health<'a>(
-    items: &'a [&'a UpstreamEndpoint],
-    health: &EndpointHealthBook,
-    strategy: EndpointSelectorStrategy,
-    now_ms: i64,
-) -> Option<&'a UpstreamEndpoint> {
-    rank_endpoint_refs_with_health(items, health, strategy, now_ms)
-        .into_iter()
-        .next()
-}
-
 pub fn rank_endpoint_refs_with_health<'a>(
     items: &'a [&'a UpstreamEndpoint],
     health: &EndpointHealthBook,
@@ -133,7 +80,7 @@ pub fn rank_endpoint_refs_with_health<'a>(
         return Vec::new();
     }
 
-    let mut out = Vec::new();
+    let mut ordered_endpoints = Vec::new();
     let mut start = 0usize;
     while start < prioritized.len() {
         let priority = prioritized[start].priority;
@@ -154,16 +101,16 @@ pub fn rank_endpoint_refs_with_health<'a>(
             }
         }
 
-        out.extend(order_endpoints_by_strategy(
+        ordered_endpoints.extend(order_endpoints_by_strategy(
             &closed, health, strategy, now_ms,
         ));
-        out.extend(order_endpoints_by_strategy(
+        ordered_endpoints.extend(order_endpoints_by_strategy(
             &half_open, health, strategy, now_ms,
         ));
         start = end;
     }
 
-    out
+    ordered_endpoints
 }
 
 fn rank_by_priority_and_health<'a, T, F>(items: &'a [&'a T], describe: F) -> Vec<&'a T>
@@ -299,7 +246,7 @@ where
     weighted_order_pairs(pairs)
 }
 
-fn weighted_order_pairs<'a, T>(mut items: Vec<(&'a T, i32)>) -> Vec<&'a T> {
+fn weighted_order_pairs<T>(mut items: Vec<(&T, i32)>) -> Vec<&T> {
     let mut out = Vec::with_capacity(items.len());
 
     while !items.is_empty() {
@@ -325,40 +272,4 @@ fn weighted_order_pairs<'a, T>(mut items: Vec<(&'a T, i32)>) -> Vec<&'a T> {
     }
 
     out
-}
-
-fn pick_by_priority_weight<'a, T, F>(items: &'a [T], f: F) -> Option<&'a T>
-where
-    F: Fn(&T) -> (bool, i32, i32),
-{
-    let mut best_priority: Option<i32> = None;
-    let mut candidates: Vec<(&'a T, i32)> = Vec::new();
-
-    for item in items {
-        let (enabled, priority, weight) = f(item);
-        if !enabled {
-            continue;
-        }
-        match best_priority {
-            None => {
-                best_priority = Some(priority);
-                candidates.clear();
-                candidates.push((item, weight));
-            }
-            Some(current) if priority < current => {
-                best_priority = Some(priority);
-                candidates.clear();
-                candidates.push((item, weight));
-            }
-            Some(current) if priority == current => candidates.push((item, weight)),
-            _ => {}
-        }
-    }
-
-    if candidates.is_empty() {
-        return None;
-    }
-
-    let ordered = weighted_order_pairs(candidates);
-    ordered.into_iter().next()
 }

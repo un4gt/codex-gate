@@ -16,8 +16,6 @@ pub struct ArchiveWriteResult {
     pub row_count: usize,
     pub file_size_bytes: u64,
     pub uncompressed_bytes: u64,
-    pub min_time_ms: Option<i64>,
-    pub max_time_ms: Option<i64>,
     pub compressed: bool,
 }
 
@@ -138,8 +136,6 @@ fn archive_request_logs_jsonl_sync(
         row_count: rows.len(),
         file_size_bytes,
         uncompressed_bytes,
-        min_time_ms,
-        max_time_ms,
         compressed: compress,
     }))
 }

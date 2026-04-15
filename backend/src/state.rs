@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::cache::Caches;
+use crate::codex_oauth::CodexOauthManager;
 use crate::config::Config;
 use crate::db::Database;
 use crate::health::{EndpointHealthBook, UpstreamKeyHealthBook};
@@ -17,6 +18,7 @@ pub struct AppState {
     pub endpoint_health: Arc<EndpointHealthBook>,
     pub upstream_key_health: Arc<UpstreamKeyHealthBook>,
     pub metrics: Arc<Metrics>,
+    pub codex_oauth: CodexOauthManager,
 }
 
 pub type SharedState = Arc<AppState>;

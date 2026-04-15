@@ -15,7 +15,9 @@ pub struct Config {
     pub circuit_breaker_failure_threshold: u32,
     pub circuit_breaker_open_ms: i64,
     pub api_key_cache_ttl: Duration,
+    pub api_key_cache_max_entries: usize,
     pub upstream_cache_ttl: Duration,
+    pub upstream_cache_stale_grace: Duration,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     pub log_queue_capacity: usize,
@@ -65,8 +67,13 @@ impl Config {
 
         let api_key_cache_ttl =
             Duration::from_millis(getenv_u64("API_KEY_CACHE_TTL_MS").unwrap_or(30_000));
+        let api_key_cache_max_entries = getenv_usize("API_KEY_CACHE_MAX_ENTRIES")
+            .unwrap_or(100_000)
+            .max(1);
         let upstream_cache_ttl =
             Duration::from_millis(getenv_u64("UPSTREAM_CACHE_TTL_MS").unwrap_or(2_000));
+        let upstream_cache_stale_grace =
+            Duration::from_millis(getenv_u64("UPSTREAM_CACHE_STALE_GRACE_MS").unwrap_or(30_000));
 
         let max_request_bytes = getenv_usize("MAX_REQUEST_BYTES").unwrap_or(10 * 1024 * 1024);
         let max_response_bytes = getenv_usize("MAX_RESPONSE_BYTES").unwrap_or(20 * 1024 * 1024);
@@ -115,7 +122,9 @@ impl Config {
             circuit_breaker_failure_threshold,
             circuit_breaker_open_ms,
             api_key_cache_ttl,
+            api_key_cache_max_entries,
             upstream_cache_ttl,
+            upstream_cache_stale_grace,
             max_request_bytes,
             max_response_bytes,
             log_queue_capacity,
