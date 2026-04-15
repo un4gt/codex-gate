@@ -8,19 +8,17 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { createPrice } from '../lib/api';
-import { formatDateTime, formatMs } from '../lib/format';
-import type { ConnectionSettings, CreatePriceInput, DashboardSnapshot, ModelPrice, ProviderWorkspace, SystemConfigResponse } from '../lib/types';
+import { formatDateTime, formatMs, formatRoutingStrategy } from '../lib/format';
+import type { ConnectionSettings, CreatePriceInput, ModelPrice, ProviderWorkspace, SystemConfigResponse } from '../lib/types';
 
 interface SettingsPageProps {
   settings: ConnectionSettings;
-  snapshot: DashboardSnapshot;
   systemConfig: SystemConfigResponse | null;
   prices: ModelPrice[];
   providers: ProviderWorkspace[];
   onApiBaseChange: (value: string) => void;
   onAdminTokenChange: (value: string) => void;
   onRefresh: (successMessage?: string) => Promise<void>;
-  onPreview: () => void;
   onMessage: (message: string) => void;
 }
 
@@ -38,8 +36,8 @@ export function SettingsPage(props: SettingsPageProps) {
 
   const submitPrice = async (event: SubmitEvent) => {
     event.preventDefault();
-    if (props.snapshot.source !== 'live' || !props.settings.adminToken.trim()) {
-      props.onMessage('当前是预览模式；如需维护价格，请先连接真实后台。');
+    if (!props.settings.adminToken.trim()) {
+      props.onMessage('请先填写管理员口令。');
       return;
     }
 
@@ -91,10 +89,10 @@ export function SettingsPage(props: SettingsPageProps) {
           <div class="flex items-center justify-between gap-3">
             <div>
               <CardTitle>基础连接</CardTitle>
-              <CardDescription>只保留当前页面需要的连接入口。</CardDescription>
+              <CardDescription>更新当前控制台的连接信息。</CardDescription>
             </div>
-            <StatusBadge tone={props.snapshot.source === 'live' ? 'normal' : 'warning'}>
-              {props.snapshot.source === 'live' ? '实时' : '预览'}
+            <StatusBadge tone={props.settings.adminToken.trim() ? 'normal' : 'warning'}>
+              {props.settings.adminToken.trim() ? '已连接' : '未连接'}
             </StatusBadge>
           </div>
         </CardHeader>
@@ -108,20 +106,17 @@ export function SettingsPage(props: SettingsPageProps) {
           >
             <FieldGroup>
               <Field>
-                <FieldLabel>API Base URL</FieldLabel>
+                <FieldLabel>服务地址</FieldLabel>
                 <Input value={props.settings.apiBase} onInput={(event) => props.onApiBaseChange(event.currentTarget.value)} />
               </Field>
               <Field>
-                <FieldLabel>Admin Token</FieldLabel>
+                <FieldLabel>管理员口令</FieldLabel>
                 <Input type="password" value={props.settings.adminToken} onInput={(event) => props.onAdminTokenChange(event.currentTarget.value)} />
                 <FieldDescription>只保存在当前标签页。</FieldDescription>
               </Field>
             </FieldGroup>
             <div class="flex flex-col gap-2">
               <Button type="submit">刷新连接</Button>
-              <Button type="button" variant="outline" onClick={props.onPreview}>
-                切到预览
-              </Button>
             </div>
           </form>
         </CardContent>
@@ -135,25 +130,27 @@ export function SettingsPage(props: SettingsPageProps) {
       >
         <div class="grid gap-4 md:grid-cols-2">
           <InfoTile label="健康检查" value={`${props.systemConfig?.connection.healthz_path ?? '/healthz'} · ${props.systemConfig?.connection.readyz_path ?? '/readyz'}`} />
-          <InfoTile label="Metrics" value={props.systemConfig?.connection.metrics_path ?? '/metrics'} />
-          <InfoTile label="静态目录" value={props.systemConfig?.basic.static_dir ?? '预览模式不可用'} />
-          <InfoTile label="数据库" value={props.systemConfig?.basic.db_dsn ?? '预览模式不可用'} />
+          <InfoTile label="监控地址" value={props.systemConfig?.connection.metrics_path ?? '/metrics'} />
+          <InfoTile label="静态目录" value={props.systemConfig?.basic.static_dir ?? '—'} />
+          <InfoTile label="数据库" value={props.systemConfig?.basic.db_dsn ?? '—'} />
           <InfoTile label="请求大小限制" value={props.systemConfig ? `${props.systemConfig.basic.max_request_bytes} / ${props.systemConfig.basic.max_response_bytes}` : '—'} />
           <InfoTile label="统计刷新" value={props.systemConfig ? `${props.systemConfig.basic.stats_flush_interval_ms}ms` : '—'} />
         </div>
       </SettingsSection>
 
       <SettingsSection
-        title="高级路由"
-        description="仅在需要调优时展开。"
+        title="请求路由"
+        description="查看分配与缓存设置。"
         open={openSection() === 'routing'}
         onToggle={() => toggleSection('routing')}
       >
         <div class="grid gap-4 md:grid-cols-2">
-          <InfoTile label="Endpoint Strategy" value={props.systemConfig?.routing.endpoint_selector_strategy ?? 'weighted'} />
-          <InfoTile label="Usage 注入" value={props.systemConfig?.routing.inject_include_usage ? '开启' : '关闭'} />
-          <InfoTile label="Upstream Cache TTL" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_ttl_ms) : '—'} />
-          <InfoTile label="API Key Cache TTL" value={props.systemConfig ? formatMs(props.systemConfig.routing.api_key_cache_ttl_ms) : '—'} />
+          <InfoTile label="分配策略" value={formatRoutingStrategy(props.systemConfig?.routing.endpoint_selector_strategy)} />
+          <InfoTile label="返回用量" value={props.systemConfig?.routing.inject_include_usage ? '开启' : '关闭'} />
+          <InfoTile label="上游缓存" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_ttl_ms) : '—'} />
+          <InfoTile label="缓存宽限期" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_stale_grace_ms) : '—'} />
+          <InfoTile label="密钥缓存" value={props.systemConfig ? formatMs(props.systemConfig.routing.api_key_cache_ttl_ms) : '—'} />
+          <InfoTile label="缓存容量" value={props.systemConfig ? String(props.systemConfig.routing.api_key_cache_max_entries) : '—'} />
         </div>
       </SettingsSection>
 
@@ -165,8 +162,8 @@ export function SettingsPage(props: SettingsPageProps) {
         warning
       >
         <div class="grid gap-4 md:grid-cols-2">
-          <InfoTile label="Failure Threshold" value={String(props.systemConfig?.stability.circuit_breaker_failure_threshold ?? '—')} />
-          <InfoTile label="Circuit Open" value={props.systemConfig ? formatMs(props.systemConfig.stability.circuit_breaker_open_ms) : '—'} />
+          <InfoTile label="失败阈值" value={String(props.systemConfig?.stability.circuit_breaker_failure_threshold ?? '—')} />
+          <InfoTile label="熔断时长" value={props.systemConfig ? formatMs(props.systemConfig.stability.circuit_breaker_open_ms) : '—'} />
         </div>
       </SettingsSection>
 
@@ -201,7 +198,7 @@ export function SettingsPage(props: SettingsPageProps) {
               <form class="flex flex-col gap-4" onSubmit={(event) => void submitPrice(event)}>
                 <FieldGroup>
                   <Field>
-                    <FieldLabel>Provider</FieldLabel>
+                    <FieldLabel>上游</FieldLabel>
                     <select
                       name="provider_id"
                       class="flex h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground"
@@ -219,19 +216,19 @@ export function SettingsPage(props: SettingsPageProps) {
                 </FieldGroup>
                 <FieldGroup class="grid gap-4 md:grid-cols-2">
                   <Field>
-                    <FieldLabel>Input / token</FieldLabel>
+                    <FieldLabel>输入 / token</FieldLabel>
                     <Input name="input_cost_per_token" type="number" step="0.000000001" />
                   </Field>
                   <Field>
-                    <FieldLabel>Output / token</FieldLabel>
+                    <FieldLabel>输出 / token</FieldLabel>
                     <Input name="output_cost_per_token" type="number" step="0.000000001" />
                   </Field>
                   <Field>
-                    <FieldLabel>Cache Read</FieldLabel>
+                    <FieldLabel>缓存读取</FieldLabel>
                     <Input name="cache_read_input_token_cost" type="number" step="0.000000001" />
                   </Field>
                   <Field>
-                    <FieldLabel>Cache Write</FieldLabel>
+                    <FieldLabel>缓存写入</FieldLabel>
                     <Input name="cache_creation_input_token_cost" type="number" step="0.000000001" />
                   </Field>
                 </FieldGroup>

@@ -3,6 +3,8 @@ import type {
   ApiKeySummary,
   ApiKeyWorkspace,
   ConnectionSettings,
+  CodexOauthRequestView,
+  CodexOauthStartResponse,
   CreateApiKeyInput,
   CreateEndpointInput,
   CreatePriceInput,
@@ -10,8 +12,10 @@ import type {
   CreateProviderKeyInput,
   CreatedApiKey,
   DashboardResponseBundle,
+  GatewayModelPolicy,
   ModelPrice,
   ModelRoute,
+  ProviderModel,
   ProviderSummary,
   ProviderWorkspace,
   RequestLogRow,
@@ -26,6 +30,7 @@ import type {
   UpdateProviderKeyInput,
   UpstreamEndpointSummary,
   UpstreamKeyMeta,
+  UpstreamKeyModel,
 } from './types';
 
 function normalizeBase(apiBase: string): string {
@@ -37,10 +42,10 @@ function requireConnection(settings: ConnectionSettings) {
   const adminToken = settings.adminToken.trim();
 
   if (!apiBase) {
-    throw new Error('API Base URL 不能为空');
+    throw new Error('服务地址不能为空');
   }
   if (!adminToken) {
-    throw new Error('Admin Token 不能为空');
+    throw new Error('管理员口令不能为空');
   }
 
   return { apiBase, adminToken };
@@ -343,4 +348,77 @@ export async function testEndpointConnection(settings: ConnectionSettings, endpo
     adminToken,
     {},
   );
+}
+
+export async function startCodexOauth(settings: ConnectionSettings, providerId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<CodexOauthStartResponse>(apiBase, `/api/v1/providers/${providerId}/codex-oauth/start`, adminToken, {});
+}
+
+export async function getCodexOauthRequest(settings: ConnectionSettings, requestId: string) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  const encoded = encodeURIComponent(requestId.trim());
+  return fetchJson<CodexOauthRequestView>(apiBase, `/api/v1/codex-oauth/${encoded}`, adminToken);
+}
+
+export async function loadUpstreamKeyModels(settings: ConnectionSettings, upstreamKeyId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<UpstreamKeyModel[]>(apiBase, `/api/v1/keys/${upstreamKeyId}/models`, adminToken);
+}
+
+export async function syncUpstreamKeyModels(settings: ConnectionSettings, upstreamKeyId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<UpstreamKeyModel[]>(apiBase, `/api/v1/keys/${upstreamKeyId}/models/sync`, adminToken, {});
+}
+
+export async function addUpstreamKeyModels(settings: ConnectionSettings, upstreamKeyId: number, models: string[]) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<UpstreamKeyModel[]>(apiBase, `/api/v1/keys/${upstreamKeyId}/models`, adminToken, { models });
+}
+
+export async function updateUpstreamKeyModel(settings: ConnectionSettings, modelId: number, payload: { enabled: boolean }) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{ ok: boolean }>(apiBase, `/api/v1/key-models/${modelId}`, adminToken, payload);
+}
+
+export async function deleteUpstreamKeyModel(settings: ConnectionSettings, modelId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/key-models/${modelId}`, adminToken);
+}
+
+export async function loadProviderModels(settings: ConnectionSettings, providerId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<ProviderModel[]>(apiBase, `/api/v1/providers/${providerId}/models`, adminToken);
+}
+
+export async function syncProviderModels(settings: ConnectionSettings, providerId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<ProviderModel[]>(apiBase, `/api/v1/providers/${providerId}/models/sync`, adminToken, {});
+}
+
+export async function updateProviderModel(
+  settings: ConnectionSettings,
+  modelId: number,
+  payload: { alias?: string | null; enabled?: boolean },
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{ ok: boolean }>(apiBase, `/api/v1/provider-models/${modelId}`, adminToken, payload);
+}
+
+export async function deleteProviderModel(settings: ConnectionSettings, modelId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/provider-models/${modelId}`, adminToken);
+}
+
+export async function loadGatewayModelPolicies(settings: ConnectionSettings) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<GatewayModelPolicy[]>(apiBase, '/api/v1/gateway-models', adminToken);
+}
+
+export async function updateGatewayModelPolicy(
+  settings: ConnectionSettings,
+  payload: { model_name: string; enabled: boolean },
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{ ok: boolean }>(apiBase, '/api/v1/gateway-models', adminToken, payload);
 }

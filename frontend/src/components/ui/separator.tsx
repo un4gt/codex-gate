@@ -13,7 +13,7 @@ export function Separator(props: SeparatorProps) {
     <div
       role="separator"
       aria-orientation={vertical ? 'vertical' : 'horizontal'}
-      class={cn(vertical ? 'h-full w-px shrink-0 bg-border' : 'h-px w-full shrink-0 bg-border', local.class)}
+      class={cn(vertical ? 'h-full w-px shrink-0 bg-border/40' : 'h-px w-full shrink-0 bg-border/40', local.class)}
       {...rest}
     />
   );

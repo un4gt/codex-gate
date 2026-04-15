@@ -23,23 +23,30 @@ function trendVariant(tone?: StatItem['tone']) {
 
 export function StatsGrid(props: StatsGridProps) {
   return (
-    <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-4 border-t border-border/40 pt-8 mt-2">
       <For each={props.items.slice(0, 4)}>
         {(item) => (
-          <Card class="border-border/80 bg-card/95">
-            <CardContent class="flex flex-col gap-3 p-5">
-              <div class="flex items-center justify-between gap-3">
-                <span class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{item.label}</span>
-                <Show when={item.trend}>
-                  <Badge variant={trendVariant(item.tone)}>{item.trend}</Badge>
-                </Show>
-              </div>
-              <div class="text-3xl font-semibold tracking-[-0.05em] text-foreground">{item.value}</div>
-              <Show when={item.hint}>
-                <p class="text-sm text-muted-foreground">{item.hint}</p>
+          <div class="flex flex-col gap-1 pr-6 border-r border-border/40 last:border-r-0">
+            <div class="flex items-center justify-between">
+              <span class="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground">{item.label}</span>
+              <Show when={item.trend}>
+                <Badge variant={trendVariant(item.tone)}>{item.trend}</Badge>
               </Show>
-            </CardContent>
-          </Card>
+              <Show when={!item.trend && item.tone === 'success'}>
+                <span class="size-1.5 rounded-full bg-emerald-500" />
+              </Show>
+              <Show when={!item.trend && item.tone === 'warning'}>
+                <span class="size-1.5 rounded-full bg-amber-500" />
+              </Show>
+              <Show when={!item.trend && item.tone === 'destructive'}>
+                <span class="size-1.5 rounded-full bg-red-500" />
+              </Show>
+            </div>
+            <div class="mt-2 text-4xl font-medium tracking-tight text-foreground">{item.value}</div>
+            <Show when={item.hint}>
+              <div class="mt-1 font-mono text-[0.65rem] text-muted-foreground opacity-70 uppercase tracking-widest">{item.hint}</div>
+            </Show>
+          </div>
         )}
       </For>
     </div>

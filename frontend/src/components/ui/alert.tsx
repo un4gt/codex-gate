@@ -2,12 +2,12 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { splitProps, type JSX } from 'solid-js';
 import { cn } from '@/lib/utils';
 
-const alertVariants = cva('relative w-full rounded-[1.35rem] border px-4 py-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]', {
+const alertVariants = cva('relative w-full border px-5 py-4 shadow-none bg-transparent', {
   variants: {
     variant: {
-      default: 'border-border bg-card/85 text-foreground',
-      destructive: 'border-red-600/20 bg-red-50/85 text-red-800',
-      success: 'border-emerald-600/20 bg-emerald-50/85 text-emerald-800',
+      default: 'border-border text-foreground',
+      destructive: 'border-red-500/50 text-red-600',
+      success: 'border-emerald-500/50 text-emerald-600',
     },
   },
   defaultVariants: {
@@ -24,10 +24,10 @@ export function Alert(props: AlertProps) {
 
 export function AlertTitle(props: JSX.HTMLAttributes<HTMLHeadingElement>) {
   const [local, rest] = splitProps(props, ['class']);
-  return <h5 class={cn('mb-1 font-medium leading-none tracking-tight', local.class)} {...rest} />;
+  return <h5 class={cn('mb-2 text-sm font-medium leading-none tracking-tight', local.class)} {...rest} />;
 }
 
 export function AlertDescription(props: JSX.HTMLAttributes<HTMLDivElement>) {
   const [local, rest] = splitProps(props, ['class']);
-  return <div class={cn('text-sm leading-6 text-muted-foreground [&_p]:leading-6', local.class)} {...rest} />;
+  return <div class={cn('text-[0.8rem] leading-relaxed text-muted-foreground', local.class)} {...rest} />;
 }

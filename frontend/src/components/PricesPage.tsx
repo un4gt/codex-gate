@@ -12,7 +12,6 @@ import { formatDateTime } from '../lib/format';
 import type { ConnectionSettings, CreatePriceInput, ModelPrice, ProviderWorkspace } from '../lib/types';
 
 interface PricesPageProps {
-  source: 'live' | 'preview';
   settings: ConnectionSettings;
   providers: ProviderWorkspace[];
   items: ModelPrice[];
@@ -65,8 +64,8 @@ export function PricesPage(props: PricesPageProps) {
   );
 
   const ensureLive = () => {
-    if (props.source !== 'live' || !props.settings.adminToken.trim()) {
-      props.onMessage('当前是预览模式；如需维护价格，请先连接真实后台。');
+    if (!props.settings.adminToken.trim()) {
+      props.onMessage('请先填写管理员口令。');
       return false;
     }
     return true;
@@ -121,7 +120,7 @@ export function PricesPage(props: PricesPageProps) {
     try {
       await createPrice(props.settings, payload);
       form.reset();
-      await props.onRefresh(`价格 ${payload.model_name} 已写入${payload.provider_id ? ' Provider 作用域' : '全局作用域'}。`);
+      await props.onRefresh(`价格 ${payload.model_name} 已写入${payload.provider_id ? '上游作用域' : '全局作用域'}。`);
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建价格失败。');
     } finally {
@@ -135,19 +134,19 @@ export function PricesPage(props: PricesPageProps) {
         <CardHeader>
           <div class="flex items-center justify-between gap-3">
             <div>
-              <p class="panel__eyebrow">Prices</p>
+              <p class="panel__eyebrow">价格</p>
               <CardTitle>模型价格与成本换算</CardTitle>
             </div>
-            <Badge variant={props.source === 'live' ? 'success' : 'warning'}>{props.source === 'live' ? 'LIVE' : 'PREVIEW'}</Badge>
+            <Badge variant="success">已生效</Badge>
           </div>
-          <CardDescription>代理平面优先命中 Provider 级价格，缺失时再回退到全局默认价；这里就是整套成本换算的维护入口。</CardDescription>
+          <CardDescription>优先使用上游专属价格，缺失时回退到全局默认价格。</CardDescription>
         </CardHeader>
         <CardContent class="flex flex-col gap-4">
           <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-            <SummaryTile label="Total Entries" value={String(props.items.length)} />
-            <SummaryTile label="Provider Scoped" value={String(props.items.filter((item) => item.provider_id !== null).length)} />
-            <SummaryTile label="Global Defaults" value={String(props.items.filter((item) => item.provider_id === null).length)} />
-            <SummaryTile label="Providers Linked" value={String(new Set(props.items.map((item) => item.provider_id).filter((id) => id !== null)).size)} hint="当前已有专属价格覆盖的 Provider 数。" />
+            <SummaryTile label="价格项" value={String(props.items.length)} />
+            <SummaryTile label="上游专属" value={String(props.items.filter((item) => item.provider_id !== null).length)} />
+            <SummaryTile label="全局默认" value={String(props.items.filter((item) => item.provider_id === null).length)} />
+            <SummaryTile label="已覆盖上游" value={String(new Set(props.items.map((item) => item.provider_id).filter((id) => id !== null)).size)} hint="当前已有专属价格的上游数。" />
           </div>
 
           <Separator />
@@ -155,39 +154,39 @@ export function PricesPage(props: PricesPageProps) {
           <form class="flex flex-col gap-4" onSubmit={(event) => void submitCreate(event)}>
             <FieldGroup>
               <Field>
-                <FieldLabel>Provider Scope</FieldLabel>
+                <FieldLabel>作用范围</FieldLabel>
                 <Select name="provider_id" value="">
-                  <option value="">Global Default</option>
+                  <option value="">全局默认</option>
                   <For each={props.providers}>{(item) => <option value={item.provider.id}>{item.provider.name}</option>}</For>
                 </Select>
               </Field>
               <Field>
-                <FieldLabel>Model Name</FieldLabel>
+                <FieldLabel>模型名称</FieldLabel>
                 <Input name="model_name" placeholder="gpt-4.1-mini" />
               </Field>
             </FieldGroup>
             <FieldGroup class="grid gap-4 md:grid-cols-2">
               <Field>
-                <FieldLabel>Input Cost / token</FieldLabel>
+                <FieldLabel>输入单价 / token</FieldLabel>
                 <Input name="input_cost_per_token" type="number" min="0" step="0.000000001" placeholder="0.000001200" />
               </Field>
               <Field>
-                <FieldLabel>Output Cost / token</FieldLabel>
+                <FieldLabel>输出单价 / token</FieldLabel>
                 <Input name="output_cost_per_token" type="number" min="0" step="0.000000001" placeholder="0.000004800" />
               </Field>
               <Field>
-                <FieldLabel>Cache Read / token</FieldLabel>
+                <FieldLabel>缓存读取 / token</FieldLabel>
                 <Input name="cache_read_input_token_cost" type="number" min="0" step="0.000000001" placeholder="0.000000200" />
               </Field>
               <Field>
-                <FieldLabel>Cache Write / token</FieldLabel>
+                <FieldLabel>缓存写入 / token</FieldLabel>
                 <Input name="cache_creation_input_token_cost" type="number" min="0" step="0.000000001" placeholder="0.000000900" />
               </Field>
             </FieldGroup>
             <Field>
-              <FieldLabel>Cache Write &gt; 1h</FieldLabel>
+              <FieldLabel>缓存写入 &gt; 1h</FieldLabel>
               <Input name="cache_creation_input_token_cost_above_1hr" type="number" min="0" step="0.000000001" placeholder="0.000000400" />
-              <FieldDescription>为了对齐 metadata 里的 cache read / cache write 维度，价格表也保留对应字段。</FieldDescription>
+              <FieldDescription>用于长时间缓存场景。</FieldDescription>
             </Field>
             <Button type="submit" disabled={busy()}>
               {busy() ? '写入中…' : '新增价格'}
@@ -200,25 +199,25 @@ export function PricesPage(props: PricesPageProps) {
         <CardHeader>
           <div class="flex items-center justify-between gap-3">
             <div>
-              <p class="panel__eyebrow">Resolved Prices</p>
+              <p class="panel__eyebrow">价格结果</p>
               <CardTitle>当前可用价格项</CardTitle>
             </div>
-            <Badge variant="outline">Provider + Global Fallback</Badge>
+            <Badge variant="outline">上游优先，全局兜底</Badge>
           </div>
-          <CardDescription>同一 `Provider + Model` 只展示最新版本；`Global Default` 用于兜底。</CardDescription>
+          <CardDescription>同一上游和模型只展示最新版本，全局默认价格用于兜底。</CardDescription>
         </CardHeader>
         <CardContent>
           <Show when={sortedItems().length > 0} fallback={<div class="empty-state">当前还没有价格项。</div>}>
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Model</TableHead>
-                  <TableHead>Scope</TableHead>
-                  <TableHead>Input</TableHead>
-                  <TableHead>Output</TableHead>
-                  <TableHead>Cache Read</TableHead>
-                  <TableHead>Cache Write</TableHead>
-                  <TableHead>Updated</TableHead>
+                  <TableHead>模型</TableHead>
+                  <TableHead>范围</TableHead>
+                  <TableHead>输入</TableHead>
+                  <TableHead>输出</TableHead>
+                  <TableHead>缓存读取</TableHead>
+                  <TableHead>缓存写入</TableHead>
+                  <TableHead>更新时间</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -228,7 +227,7 @@ export function PricesPage(props: PricesPageProps) {
                       <TableCell class="font-medium text-foreground">{item.model_name}</TableCell>
                       <TableCell>
                         <Badge variant={item.provider_id === null ? 'outline' : 'success'}>
-                          {item.provider_id === null ? 'Global Default' : providerNameMap().get(item.provider_id) ?? `provider #${item.provider_id}`}
+                          {item.provider_id === null ? '全局默认' : providerNameMap().get(item.provider_id) ?? `上游 #${item.provider_id}`}
                         </Badge>
                       </TableCell>
                       <TableCell>{formatUnitCost(item.price_data.input_cost_per_token)}</TableCell>

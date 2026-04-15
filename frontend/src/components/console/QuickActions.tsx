@@ -14,17 +14,17 @@ interface QuickActionsProps {
 
 export function QuickActions(props: QuickActionsProps) {
   return (
-    <Card class="border-border/80 bg-card/95">
+    <Card class="rounded-none border border-border bg-background shadow-none">
       <CardHeader class="pb-4">
-        <CardTitle>{props.title ?? '快捷操作'}</CardTitle>
+        <CardTitle class="text-xl font-medium tracking-tight">{props.title ?? '快捷操作'}</CardTitle>
       </CardHeader>
-      <CardContent class="grid gap-3">
+      <CardContent class="grid gap-0">
         <For each={props.items}>
           {(item) => (
-            <div class="flex items-center justify-between gap-4 rounded-xl border border-border/70 bg-muted/30 px-4 py-3">
+            <div class="flex items-center justify-between gap-4 border-b border-border/40 py-4 last:border-0 last:pb-0 first:pt-0">
               <div class="flex min-w-0 flex-col gap-1">
                 <strong class="text-sm font-medium text-foreground">{item.title}</strong>
-                <span class="text-sm text-muted-foreground">{item.description}</span>
+                <span class="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-widest truncate">{item.description}</span>
               </div>
               <div class="shrink-0">{item.action}</div>
             </div>

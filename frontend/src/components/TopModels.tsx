@@ -15,12 +15,12 @@ export function TopModels(props: TopModelsProps) {
       <CardHeader class="gap-4">
         <div class="flex items-center justify-between gap-3">
           <div>
-            <p class="panel__eyebrow">Model Mix</p>
+            <p class="panel__eyebrow">模型分布</p>
             <CardTitle>模型热度排行</CardTitle>
           </div>
-          <Badge variant="outline">Top 5</Badge>
+          <Badge variant="outline">前 5</Badge>
         </div>
-        <CardDescription>先按请求数排序，再用 cost 打破并列；进度条只负责表达相对热度。</CardDescription>
+        <CardDescription>先按请求数排序，再按成本打破并列；进度条仅表示相对热度。</CardDescription>
       </CardHeader>
       <CardContent>
         <Show when={props.items.length > 0} fallback={<div class="empty-state">还没有模型分布数据，等日志写入后这里会显示最热模型。</div>}>

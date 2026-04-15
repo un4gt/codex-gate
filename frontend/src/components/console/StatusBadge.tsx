@@ -16,5 +16,8 @@ function badgeVariant(tone: StatusTone) {
 }
 
 export function StatusBadge(props: StatusBadgeProps) {
-  return <Badge variant={badgeVariant(props.tone)}>{props.children}</Badge>;
+  return <Badge variant={badgeVariant(props.tone)}>
+      <span class={`size-1.5 rounded-full mr-2 ${props.tone === 'normal' ? 'bg-emerald-500' : props.tone === 'warning' ? 'bg-amber-500' : props.tone === 'error' ? 'bg-red-500' : 'bg-muted-foreground/50'}`} />
+      {props.children}
+    </Badge>;
 }

@@ -151,6 +151,7 @@ export interface ProviderSummary {
   priority: number;
   weight: number;
   supports_include_usage: boolean;
+  websocket_enabled: boolean;
   health?: ProviderHealthSummary;
 }
 
@@ -178,6 +179,32 @@ export interface UpstreamKeyMeta {
   health?: UpstreamKeyHealthSummary;
 }
 
+export interface UpstreamKeyModel {
+  id: number;
+  upstream_key_id: number;
+  model_name: string;
+  enabled: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface ProviderModel {
+  id: number;
+  provider_id: number;
+  upstream_model: string;
+  alias: string | null;
+  enabled: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface GatewayModelPolicy {
+  model_name: string;
+  enabled: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
 export interface ProviderWorkspace {
   provider: ProviderSummary;
   endpoints: UpstreamEndpointSummary[];
@@ -191,6 +218,7 @@ export interface CreateProviderInput {
   priority: number;
   weight: number;
   supports_include_usage: boolean;
+  websocket_enabled: boolean;
 }
 
 export interface UpdateProviderInput {
@@ -200,6 +228,7 @@ export interface UpdateProviderInput {
   priority?: number;
   weight?: number;
   supports_include_usage?: boolean;
+  websocket_enabled?: boolean;
 }
 
 export interface CreateEndpointInput {
@@ -232,6 +261,26 @@ export interface UpdateProviderKeyInput {
   enabled?: boolean;
   priority?: number;
   weight?: number;
+}
+
+export interface CodexOauthStartResponse {
+  request_id: string;
+  login_url: string;
+  expires_at_ms: number;
+}
+
+export type CodexOauthStatusView =
+  | { state: 'pending' }
+  | { state: 'completed'; key_id: number }
+  | { state: 'failed'; message: string };
+
+export interface CodexOauthRequestView {
+  request_id: string;
+  provider_id: number;
+  created_at_ms: number;
+  expires_at_ms: number;
+  login_url: string;
+  status: CodexOauthStatusView;
 }
 
 export interface ModelRoute {
@@ -267,7 +316,6 @@ export interface SystemConfigResponse {
     healthz_path: string;
     readyz_path: string;
     metrics_path: string;
-    preview_mode: boolean;
   };
   basic: {
     db_dsn: string;
@@ -281,7 +329,9 @@ export interface SystemConfigResponse {
     endpoint_selector_strategy: string;
     inject_include_usage: boolean;
     upstream_cache_ttl_ms: number;
+    upstream_cache_stale_grace_ms: number;
     api_key_cache_ttl_ms: number;
+    api_key_cache_max_entries: number;
   };
   stability: {
     circuit_breaker_failure_threshold: number;
@@ -311,7 +361,6 @@ export interface HeatmapDay {
 export type HeatmapMetric = 'requests' | 'tokens' | 'cost';
 
 export interface DashboardSnapshot {
-  source: 'live' | 'preview';
   hero: {
     providers: number;
     routes: number;

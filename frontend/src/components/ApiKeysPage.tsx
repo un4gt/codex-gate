@@ -16,7 +16,6 @@ import { formatCompactInteger, formatCost, formatDateTime, formatDateTimeLocalIn
 import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, UpdateApiKeyInput } from '../lib/types';
 
 interface ApiKeysPageProps {
-  source: 'live' | 'preview';
   settings: ConnectionSettings;
   items: ApiKeyWorkspace[];
   onRefresh: (successMessage?: string) => Promise<void>;
@@ -50,8 +49,8 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
   const selected = createMemo(() => props.items.find((item) => item.apiKey.id === selectedId()) ?? null);
 
   const ensureLive = () => {
-    if (props.source !== 'live' || !props.settings.adminToken.trim()) {
-      props.onMessage('当前是预览模式；如需管理 API Key，请先连接真实后台。');
+    if (!props.settings.adminToken.trim()) {
+      props.onMessage('请先填写管理员口令。');
       return false;
     }
     return true;
@@ -70,7 +69,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     };
 
     if (!payload.name) {
-      props.onMessage('Key 名称不能为空。');
+      props.onMessage('密钥名称不能为空。');
       return;
     }
 
@@ -79,9 +78,9 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       const result = await createApiKey(props.settings, payload);
       setCreated(result);
       setCreateOpen(false);
-      await props.onRefresh(`API Key ${payload.name} 已创建。`);
+      await props.onRefresh(`密钥 ${payload.name} 已创建。`);
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '创建 API Key 失败。');
+      props.onMessage(error instanceof Error ? error.message : '创建密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -101,16 +100,16 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     };
 
     if (!payload.name) {
-      props.onMessage('Key 名称不能为空。');
+      props.onMessage('密钥名称不能为空。');
       return;
     }
 
     setBusy(`update-${current.apiKey.id}`);
     try {
       await updateApiKey(props.settings, current.apiKey.id, payload);
-      await props.onRefresh(`API Key ${payload.name} 已更新。`);
+      await props.onRefresh(`密钥 ${payload.name} 已更新。`);
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新 API Key 失败。');
+      props.onMessage(error instanceof Error ? error.message : '更新密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -121,7 +120,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     setBusy(`toggle-${item.apiKey.id}`);
     try {
       await updateApiKey(props.settings, item.apiKey.id, { enabled });
-      await props.onRefresh(`API Key ${item.apiKey.name} 已${enabled ? '启用' : '停用'}。`);
+      await props.onRefresh(`密钥 ${item.apiKey.name} 已${enabled ? '启用' : '停用'}。`);
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新状态失败。');
     } finally {
@@ -131,23 +130,23 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
 
   const handleDelete = async (item: ApiKeyWorkspace) => {
     if (!ensureLive()) return;
-    const confirmed = window.confirm(`删除 API Key “${item.apiKey.name}”？该操作不可撤销。`);
+    const confirmed = window.confirm(`删除密钥“${item.apiKey.name}”？该操作不可撤销。`);
     if (!confirmed) return;
 
     setBusy(`delete-${item.apiKey.id}`);
     try {
       await deleteApiKey(props.settings, item.apiKey.id);
       setSelectedId((current) => (current === item.apiKey.id ? null : current));
-      await props.onRefresh(`API Key ${item.apiKey.name} 已删除。`);
+      await props.onRefresh(`密钥 ${item.apiKey.name} 已删除。`);
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除 API Key 失败。');
+      props.onMessage(error instanceof Error ? error.message : '删除密钥失败。');
     } finally {
       setBusy(null);
     }
   };
 
   const stats = createMemo(() => [
-    { label: 'Key 总数', value: formatCompactInteger(props.items.length), hint: '当前已创建的访问密钥' },
+    { label: '密钥总数', value: formatCompactInteger(props.items.length), hint: '当前已创建的访问密钥' },
     {
       label: '启用中',
       value: formatCompactInteger(props.items.filter((item) => item.apiKey.enabled).length),
@@ -161,19 +160,19 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     {
       label: '累计成本',
       value: formatCost(props.items.reduce((sum, item) => sum + item.totals.cost, 0)),
-      hint: '按所有 Key 汇总',
+      hint: '按所有密钥汇总',
     },
   ]);
 
   return (
     <div class="flex flex-col gap-6">
       <PageHeader
-        title="API Keys"
+        title="密钥"
         description="创建和管理访问密钥。"
         actions={
           <Button type="button" onClick={() => setCreateOpen(true)}>
             <Plus />
-            创建 API Key
+            创建密钥
           </Button>
         }
       />
@@ -182,19 +181,19 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
 
       <Card class="border-border/80 bg-card/95">
         <CardHeader>
-          <CardTitle>Key 列表</CardTitle>
-          <CardDescription>优先展示哪些 key 在用、用得怎么样。</CardDescription>
+          <CardTitle>密钥列表</CardTitle>
+          <CardDescription>优先展示正在使用的密钥。</CardDescription>
         </CardHeader>
         <CardContent>
           <Show
             when={props.items.length > 0}
             fallback={
               <EmptyState
-                title="还没有 API Key"
+                title="还没有密钥"
                 description="先创建第一条访问密钥，再提供给接入方使用。"
                 action={
                   <Button type="button" onClick={() => setCreateOpen(true)}>
-                    创建 API Key
+                    创建密钥
                   </Button>
                 }
               />
@@ -203,11 +202,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Key</TableHead>
+                  <TableHead>密钥</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead>最近模型</TableHead>
                   <TableHead>请求量</TableHead>
-                  <TableHead>Tokens</TableHead>
+                  <TableHead>用量</TableHead>
                   <TableHead>成本</TableHead>
                   <TableHead>到期</TableHead>
                   <TableHead class="text-right">操作</TableHead>
@@ -270,7 +269,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         </CardContent>
       </Card>
 
-      <DetailDrawer open={createOpen()} title="创建 API Key" description="创建流程保持最短路径。" onClose={() => setCreateOpen(false)}>
+      <DetailDrawer open={createOpen()} title="创建密钥" description="填写必要信息后立即生成。" onClose={() => setCreateOpen(false)}>
         <form class="flex flex-col gap-4" onSubmit={(event) => void submitCreate(event)}>
           <FieldGroup>
             <Field>
@@ -294,7 +293,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
             </label>
           </div>
           <Button type="submit" disabled={busy() === 'create'}>
-            {busy() === 'create' ? '创建中…' : '创建 API Key'}
+            {busy() === 'create' ? '创建中…' : '创建密钥'}
           </Button>
           <Show when={created()}>
             {(createdKey) => (
@@ -307,7 +306,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       type="button"
                       size="sm"
                       variant="outline"
-                      onClick={() => void navigator.clipboard.writeText(createdKey().api_key).then(() => props.onMessage('新 Key 已复制。'))}
+                      onClick={() => void navigator.clipboard.writeText(createdKey().api_key).then(() => props.onMessage('新密钥已复制。'))}
                     >
                       <Copy />
                       复制
@@ -322,7 +321,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
 
       <DetailDrawer
         open={!!selected()}
-        title={selected()?.apiKey.name ?? 'Key 详情'}
+        title={selected()?.apiKey.name ?? '密钥详情'}
         description={selected() ? `查看并维护 #${selected()!.apiKey.id}` : undefined}
         onClose={() => setSelectedId(null)}
       >
@@ -370,7 +369,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   <div class="grid gap-3 md:grid-cols-2">
                     <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
                       <Checkbox name="enabled" checked={data.apiKey.enabled} />
-                      <span>启用 Key</span>
+                      <span>启用密钥</span>
                     </label>
                     <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
                       <Checkbox name="log_enabled" checked={data.apiKey.log_enabled} />

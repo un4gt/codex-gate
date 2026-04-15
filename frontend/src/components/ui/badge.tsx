@@ -3,16 +3,16 @@ import { splitProps, type JSX } from 'solid-js';
 import { cn } from '@/lib/utils';
 
 const badgeVariants = cva(
-  'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.2em] transition-colors duration-200 ease-out',
+  'inline-flex items-center gap-1 border border-border px-3 py-1 font-mono text-[0.65rem] uppercase tracking-widest font-medium transition-colors bg-transparent text-foreground',
   {
     variants: {
       variant: {
         default: 'border-primary/20 bg-primary/10 text-primary',
-        secondary: 'border-border bg-secondary/80 text-secondary-foreground',
-        outline: 'border-border bg-card/80 text-muted-foreground',
-        success: 'border-emerald-600/20 bg-emerald-50/85 text-emerald-700',
-        warning: 'border-amber-600/20 bg-amber-50/90 text-amber-700',
-        destructive: 'border-red-600/20 bg-red-50/85 text-red-700',
+        secondary: 'border-border bg-transparent text-muted-foreground',
+        outline: 'border-border bg-transparent text-muted-foreground',
+        success: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600',
+        warning: 'border-amber-500/50 bg-amber-500/10 text-amber-600',
+        destructive: 'border-red-500/50 bg-red-500/10 text-red-600',
       },
     },
     defaultVariants: {

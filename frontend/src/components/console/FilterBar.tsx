@@ -1,5 +1,5 @@
 import { Show, type JSX } from 'solid-js';
-import { ChevronDown } from 'lucide-solid';
+import { Filter } from 'lucide-solid';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 
@@ -13,22 +13,22 @@ interface FilterBarProps {
 
 export function FilterBar(props: FilterBarProps) {
   return (
-    <Card class="border-border/80 bg-card/95">
-      <CardContent class="flex flex-col gap-4 p-4">
+    <Card class="rounded-none border border-border bg-background shadow-none mb-6">
+      <CardContent class="flex flex-col gap-6 p-6">
         <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-          <div class="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-5">{props.primary}</div>
-          <div class="flex flex-wrap gap-2">
+          <div class="grid flex-1 gap-4 md:grid-cols-2 xl:grid-cols-5">{props.primary}</div>
+          <div class="flex flex-wrap gap-2 items-center">
+            {props.actions}
             <Show when={props.advanced}>
-              <Button type="button" variant="outline" size="sm" onClick={props.onToggleAdvanced}>
-                <ChevronDown class={props.advancedOpen ? 'rotate-180 transition-transform' : 'transition-transform'} />
-                高级筛选
+              <Button type="button" variant="ghost" size="sm" onClick={props.onToggleAdvanced} class="font-mono text-[0.65rem] tracking-widest px-3 ml-2">
+                <Filter class="mr-2 size-3" />
+                {props.advancedOpen ? 'HIDE FILTERS' : 'ADVANCED'}
               </Button>
             </Show>
-            {props.actions}
           </div>
         </div>
         <Show when={props.advanced && props.advancedOpen}>
-          <div class="grid gap-3 border-t border-border pt-4 md:grid-cols-2 xl:grid-cols-4">{props.advanced}</div>
+          <div class="grid gap-4 border-t border-border/40 pt-6 md:grid-cols-2 xl:grid-cols-4">{props.advanced}</div>
         </Show>
       </CardContent>
     </Card>

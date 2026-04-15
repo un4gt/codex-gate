@@ -8,9 +8,9 @@ function createDivComponent(baseClass: string) {
   };
 }
 
-export const Card = createDivComponent('rounded-[1.75rem] border border-border bg-card/92 text-card-foreground shadow-[0_22px_56px_-44px_rgba(29,24,16,0.42)] backdrop-blur-sm');
+export const Card = createDivComponent('rounded-none border border-border bg-background shadow-none');
 export const CardHeader = createDivComponent('flex flex-col gap-3 p-6');
 export const CardContent = createDivComponent('p-6 pt-0');
 export const CardFooter = createDivComponent('flex items-center gap-3 p-6 pt-0');
-export const CardTitle = createDivComponent('text-lg font-semibold tracking-[-0.03em]');
-export const CardDescription = createDivComponent('text-sm leading-6 text-muted-foreground');
+export const CardTitle = createDivComponent('text-lg font-medium tracking-tight');
+export const CardDescription = createDivComponent('text-xs uppercase tracking-widest font-mono text-muted-foreground');

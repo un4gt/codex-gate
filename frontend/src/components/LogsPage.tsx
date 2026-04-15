@@ -11,12 +11,10 @@ import { FilterBar } from '@/components/console/FilterBar';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { loadRequestLogs } from '../lib/api';
-import { createDemoLogs } from '../lib/demo';
-import { formatCompactInteger, formatCost, formatDateTime, formatMs, parseDecimal } from '../lib/format';
+import { formatCompactInteger, formatCost, formatDateTime, formatModelName, formatMs, formatRequestType, parseDecimal } from '../lib/format';
 import type { ApiKeyWorkspace, ConnectionSettings, ProviderWorkspace, RequestLogRow } from '../lib/types';
 
 interface LogsPageProps {
-  source: 'live' | 'preview';
   settings: ConnectionSettings;
   providers: ProviderWorkspace[];
   apiKeys: ApiKeyWorkspace[];
@@ -93,31 +91,32 @@ export function LogsPage(props: LogsPageProps) {
   const loadLogs = async () => {
     setLoading(true);
     try {
-      if (props.source === 'live' && props.settings.adminToken.trim()) {
-        const current = filters();
-        const result = await loadRequestLogs(props.settings, {
-          page: 1,
-          page_size: 50,
-          model: current.model || current.query || undefined,
-          api_key_id: current.apiKeyId ? Number(current.apiKeyId) : undefined,
-          provider_id: current.providerId ? Number(current.providerId) : undefined,
-          endpoint_id: current.endpointId ? Number(current.endpointId) : undefined,
-          api_format: current.apiFormat || undefined,
-          status_class: current.statusClass ? Number(current.statusClass) : undefined,
-          duration_ms_min: current.durationMin ? Number(current.durationMin) : undefined,
-          duration_ms_max: current.durationMax ? Number(current.durationMax) : undefined,
-          total_tokens_min: current.tokenMin ? Number(current.tokenMin) : undefined,
-          total_tokens_max: current.tokenMax ? Number(current.tokenMax) : undefined,
-          cost_total_min: current.costMin ? Number(current.costMin) : undefined,
-          cost_total_max: current.costMax ? Number(current.costMax) : undefined,
-        });
-        setRows(result);
-      } else {
-        setRows(createDemoLogs());
+      if (!props.settings.adminToken.trim()) {
+        setRows([]);
+        return;
       }
+
+      const current = filters();
+      const result = await loadRequestLogs(props.settings, {
+        page: 1,
+        page_size: 50,
+        model: current.model || current.query || undefined,
+        api_key_id: current.apiKeyId ? Number(current.apiKeyId) : undefined,
+        provider_id: current.providerId ? Number(current.providerId) : undefined,
+        endpoint_id: current.endpointId ? Number(current.endpointId) : undefined,
+        api_format: current.apiFormat || undefined,
+        status_class: current.statusClass ? Number(current.statusClass) : undefined,
+        duration_ms_min: current.durationMin ? Number(current.durationMin) : undefined,
+        duration_ms_max: current.durationMax ? Number(current.durationMax) : undefined,
+        total_tokens_min: current.tokenMin ? Number(current.tokenMin) : undefined,
+        total_tokens_max: current.tokenMax ? Number(current.tokenMax) : undefined,
+        cost_total_min: current.costMin ? Number(current.costMin) : undefined,
+        cost_total_max: current.costMax ? Number(current.costMax) : undefined,
+      });
+      setRows(result);
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '读取日志失败。');
-      setRows(createDemoLogs());
+      setRows([]);
     } finally {
       setLoading(false);
     }
@@ -163,7 +162,7 @@ export function LogsPage(props: LogsPageProps) {
           <>
             <Input
               value={filters().query}
-              placeholder="搜索 request id、模型或错误"
+              placeholder="搜索请求 ID、模型或错误"
               onInput={(event) => setFilters((current) => ({ ...current, query: event.currentTarget.value }))}
             />
             <Select value={filters().statusClass} onChange={(event) => setFilters((current) => ({ ...current, statusClass: event.currentTarget.value }))}>
@@ -173,7 +172,7 @@ export function LogsPage(props: LogsPageProps) {
               <option value="2">2xx</option>
             </Select>
             <Select value={filters().apiKeyId} onChange={(event) => setFilters((current) => ({ ...current, apiKeyId: event.currentTarget.value }))}>
-              <option value="">全部 API Key</option>
+              <option value="">全部密钥</option>
               <For each={props.apiKeys}>
                 {(item) => <option value={item.apiKey.id}>{item.apiKey.name}</option>}
               </For>
@@ -185,8 +184,8 @@ export function LogsPage(props: LogsPageProps) {
             />
             <Select value={filters().apiFormat} onChange={(event) => setFilters((current) => ({ ...current, apiFormat: event.currentTarget.value as LogFilters['apiFormat'] }))}>
               <option value="">全部请求类型</option>
-              <option value="chat_completions">Chat Completions</option>
-              <option value="responses">Responses</option>
+              <option value="chat_completions">对话请求</option>
+              <option value="responses">响应请求</option>
             </Select>
           </>
         }
@@ -204,8 +203,8 @@ export function LogsPage(props: LogsPageProps) {
             </Select>
             <Input value={filters().durationMin} placeholder="延迟下限 ms" onInput={(event) => setFilters((current) => ({ ...current, durationMin: event.currentTarget.value }))} />
             <Input value={filters().durationMax} placeholder="延迟上限 ms" onInput={(event) => setFilters((current) => ({ ...current, durationMax: event.currentTarget.value }))} />
-            <Input value={filters().tokenMin} placeholder="Token 下限" onInput={(event) => setFilters((current) => ({ ...current, tokenMin: event.currentTarget.value }))} />
-            <Input value={filters().tokenMax} placeholder="Token 上限" onInput={(event) => setFilters((current) => ({ ...current, tokenMax: event.currentTarget.value }))} />
+            <Input value={filters().tokenMin} placeholder="用量下限" onInput={(event) => setFilters((current) => ({ ...current, tokenMin: event.currentTarget.value }))} />
+            <Input value={filters().tokenMax} placeholder="用量上限" onInput={(event) => setFilters((current) => ({ ...current, tokenMax: event.currentTarget.value }))} />
             <Input value={filters().costMin} placeholder="成本下限" onInput={(event) => setFilters((current) => ({ ...current, costMin: event.currentTarget.value }))} />
             <Input value={filters().costMax} placeholder="成本上限" onInput={(event) => setFilters((current) => ({ ...current, costMax: event.currentTarget.value }))} />
           </>
@@ -213,25 +212,25 @@ export function LogsPage(props: LogsPageProps) {
         advancedOpen={advancedOpen()}
         onToggleAdvanced={() => setAdvancedOpen((value) => !value)}
         actions={
-          <>
+          <div class="flex gap-2">
             <Button type="button" size="sm" onClick={() => void loadLogs()} disabled={loading()}>
-              <Search />
-              {loading() ? '查询中' : '查询'}
+              <Search class="mr-2 size-3" />
+              {loading() ? 'SEARCHING' : 'SEARCH'}
             </Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => { setFilters(EMPTY_FILTERS); void loadLogs(); }}>
-              重置
+            <Button type="button" size="sm" variant="ghost" onClick={() => { setFilters(EMPTY_FILTERS); void loadLogs(); }}>
+              RESET
             </Button>
-          </>
+          </div>
         }
       />
 
       <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <Card class="border-border/80 bg-card/95">
-          <CardHeader>
+        <Card class="rounded-none border border-border bg-background shadow-none">
+          <CardHeader class="pb-6">
             <div class="flex items-center justify-between gap-3">
               <div>
-                <CardTitle>结果</CardTitle>
-                <CardDescription>默认按最近时间排序，优先暴露错误请求。</CardDescription>
+                <CardTitle class="text-xl font-medium tracking-tight">结果</CardTitle>
+                <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">默认按最近时间排序，优先暴露错误请求。</CardDescription>
               </div>
               <div class="flex gap-2">
                 <StatusBadge tone={errorCount() > 0 ? 'warning' : 'normal'}>{`${errorCount()} 条异常`}</StatusBadge>
@@ -239,61 +238,73 @@ export function LogsPage(props: LogsPageProps) {
               </div>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent class="p-0 border-t border-border/40">
             <Show
               when={filteredRows().length > 0}
-              fallback={<EmptyState title="没有匹配结果" description="调整筛选条件后重试。" />}
+              fallback={<EmptyState title="NO LOGS" description="Awaiting telemetry." />}
             >
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>时间</TableHead>
-                    <TableHead>模型</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead>Key</TableHead>
-                    <TableHead>延迟</TableHead>
-                    <TableHead>Tokens</TableHead>
-                    <TableHead>成本</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  <For each={filteredRows()}>
-                    {(row) => {
-                      const status = rowStatus(row);
-                      return (
-                        <TableRow class="cursor-pointer" onClick={() => setSelected(row)}>
-                          <TableCell>{formatDateTime(row.time_ms)}</TableCell>
-                          <TableCell>{row.model ?? 'unknown'}</TableCell>
-                          <TableCell>
-                            <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                          </TableCell>
-                          <TableCell>{apiKeyNameMap().get(row.api_key_id) ?? `#${row.api_key_id}`}</TableCell>
-                          <TableCell>{formatMs(row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? 0)}</TableCell>
-                          <TableCell>{formatCompactInteger(totalTokens(row))}</TableCell>
-                          <TableCell>{formatCost(parseDecimal(row.cost_total_usd))}</TableCell>
-                        </TableRow>
-                      );
-                    }}
-                  </For>
-                </TableBody>
-              </Table>
+          <div class="logs-table">
+            <div class="hidden xl:grid gap-4 px-4 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20 py-3 mb-2" style={{ 'grid-template-columns': 'minmax(160px, 1.15fr) minmax(180px, 1.1fr) minmax(120px, 0.8fr) minmax(160px, 1fr) minmax(140px, 0.85fr) minmax(130px, 0.82fr)' }}>
+              <div>时间</div>
+              <div>模型</div>
+              <div>状态</div>
+              <div>耗时</div>
+              <div>用量</div>
+              <div>密钥</div>
+            </div>
+            <Show
+              when={filteredRows().length > 0}
+              fallback={
+                <EmptyState
+                  title="NO LOGS FOUND"
+                  description="尝试放宽筛选条件。"
+                  action={
+                    <Button type="button" variant="ghost" onClick={() => { setFilters(EMPTY_FILTERS); void loadLogs(); }}>
+                      CLEAR FILTERS
+                    </Button>
+                  }
+                />
+              }
+            >
+              <For each={filteredRows()}>
+                {(row) => {
+                  const status = rowStatus(row);
+                  return (
+                  <div
+                    class="cursor-pointer border-b border-border bg-transparent px-4 py-5 transition-colors duration-200 ease-out hover:bg-muted/50 grid gap-4 xl:grid-cols-[minmax(160px,1.15fr)_minmax(180px,1.1fr)_minmax(120px,0.8fr)_minmax(160px,1fr)_minmax(140px,0.85fr)_minmax(130px,0.82fr)]"
+                    onClick={() => setSelected(row)}
+                  >
+                    <div class="font-mono text-xs truncate">{formatDateTime(row.time_ms)}</div>
+                    <div class="font-mono text-xs truncate max-w-[150px]" title={formatModelName(row.model)}>{formatModelName(row.model)}</div>
+                    <div>
+                      <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+                    </div>
+                    <div class="font-mono text-xs">{formatMs(row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? 0)}</div>
+                    <div class="font-mono text-xs">{formatCompactInteger(totalTokens(row))}</div>
+                    <div class="font-mono text-xs text-muted-foreground">{apiKeyNameMap().get(row.api_key_id) ?? `#${row.api_key_id}`}</div>
+                  </div>
+                  );
+                }}
+              </For>
+            </Show>
+          </div>
             </Show>
           </CardContent>
         </Card>
 
-        <Card class="border-border/80 bg-card/95">
-          <CardHeader>
-            <CardTitle>排障提示</CardTitle>
-            <CardDescription>从结果直接进入详情，不再混入概念说明。</CardDescription>
+        <Card class="rounded-none border border-border bg-background shadow-none">
+          <CardHeader class="pb-6">
+            <CardTitle class="text-xl font-medium tracking-tight">排障提示</CardTitle>
+            <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">从结果直接进入详情，不再混入概念说明。</CardDescription>
           </CardHeader>
-          <CardContent class="flex flex-col gap-3">
-            <div class="rounded-xl border border-border/70 bg-muted/30 p-4">
-              <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">默认视角</div>
-              <p class="mt-2 text-sm text-muted-foreground">先看 4xx/5xx，再按模型或 API Key 缩小范围。</p>
+          <CardContent class="flex flex-col gap-6 border-t border-border/40 pt-6">
+            <div class="border-l-2 border-primary/20 pl-4 py-1">
+              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">默认视角</div>
+              <p class="mt-2 text-sm text-foreground opacity-90">先看 4xx/5xx，再按模型或密钥缩小范围。</p>
             </div>
-            <div class="rounded-xl border border-border/70 bg-muted/30 p-4">
-              <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">常用筛选</div>
-              <p class="mt-2 text-sm text-muted-foreground">状态、模型、API Key、延迟区间、Token 区间、成本区间。</p>
+            <div class="border-l-2 border-primary/20 pl-4 py-1">
+              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">常用筛选</div>
+              <p class="mt-2 text-sm text-foreground opacity-90">状态、模型、密钥、延迟区间、用量区间、成本区间。</p>
             </div>
           </CardContent>
         </Card>
@@ -302,7 +313,7 @@ export function LogsPage(props: LogsPageProps) {
       <DetailDrawer
         open={!!selected()}
         title={selected()?.id ?? '日志详情'}
-        description={selected() ? `${formatDateTime(selected()!.time_ms)} · ${selected()!.model ?? 'unknown'}` : undefined}
+        description={selected() ? `${formatDateTime(selected()!.time_ms)} · ${formatModelName(selected()!.model)}` : undefined}
         onClose={() => setSelected(null)}
       >
         <Show when={selected()}>
@@ -311,46 +322,50 @@ export function LogsPage(props: LogsPageProps) {
             const status = rowStatus(row);
             return (
               <div class="grid gap-6">
-                <div class="grid gap-3 md:grid-cols-3">
+                <div class="flex flex-col gap-6 md:flex-row border-t border-border/40 pt-8 mt-2 pb-6">
                   <MetricCard label="状态" value={status.label} badge={<StatusBadge tone={status.tone}>{status.label}</StatusBadge>} />
                   <MetricCard label="延迟" value={formatMs(row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? 0)} />
                   <MetricCard label="成本" value={formatCost(parseDecimal(row.cost_total_usd))} />
                 </div>
 
-                <Card class="border-border/70 bg-muted/25">
-                  <CardHeader>
-                    <CardTitle>请求信息</CardTitle>
+                <Card class="rounded-none border border-border bg-background shadow-none">
+                  <CardHeader class="pb-4">
+                    <CardTitle class="text-lg font-medium tracking-tight">请求信息</CardTitle>
                   </CardHeader>
-                  <CardContent class="grid gap-4 md:grid-cols-2">
-                    <DetailItem label="时间" value={formatDateTime(row.time_ms)} onCopy={() => void copyField(String(row.time_ms), '时间')} />
-                    <DetailItem label="模型" value={row.model ?? 'unknown'} onCopy={() => void copyField(row.model ?? 'unknown', '模型')} />
-                    <DetailItem label="API Key" value={apiKeyNameMap().get(row.api_key_id) ?? `#${row.api_key_id}`} onCopy={() => void copyField(String(row.api_key_id), 'API Key')} />
-                    <DetailItem label="请求类型" value={row.api_format} onCopy={() => void copyField(row.api_format, '请求类型')} />
-                    <DetailItem label="Request ID" value={row.id} onCopy={() => void copyField(row.id, 'Request ID')} />
-                    <DetailItem
-                      label="上游"
-                      value={row.provider_id ? providerNameMap().get(row.provider_id) ?? `#${row.provider_id}` : '—'}
-                      onCopy={() => void copyField(String(row.provider_id ?? ''), '上游')}
-                    />
-                    <DetailItem
-                      label="目标"
-                      value={row.endpoint_id ? endpointNameMap().get(row.endpoint_id) ?? `#${row.endpoint_id}` : '—'}
-                      onCopy={() => void copyField(String(row.endpoint_id ?? ''), '目标')}
-                    />
-                    <DetailItem label="错误类型" value={row.error_type ?? '—'} onCopy={() => void copyField(row.error_type ?? '', '错误类型')} />
+                  <CardContent class="grid gap-0 border-t border-border/40 pt-0">
+                    <div class="grid md:grid-cols-2">
+                      <DetailItem label="时间" value={formatDateTime(row.time_ms)} onCopy={() => void copyField(String(row.time_ms), '时间')} />
+                      <DetailItem label="模型" value={formatModelName(row.model)} onCopy={() => void copyField(formatModelName(row.model), '模型')} />
+                      <DetailItem label="密钥" value={apiKeyNameMap().get(row.api_key_id) ?? `#${row.api_key_id}`} onCopy={() => void copyField(String(row.api_key_id), '密钥')} />
+                      <DetailItem label="请求类型" value={formatRequestType(row.api_format)} onCopy={() => void copyField(formatRequestType(row.api_format), '请求类型')} />
+                      <DetailItem label="请求 ID" value={row.id} onCopy={() => void copyField(row.id, '请求 ID')} />
+                      <DetailItem
+                        label="上游"
+                        value={row.provider_id ? providerNameMap().get(row.provider_id) ?? `#${row.provider_id}` : '—'}
+                        onCopy={() => void copyField(String(row.provider_id ?? ''), '上游')}
+                      />
+                      <DetailItem
+                        label="目标"
+                        value={row.endpoint_id ? endpointNameMap().get(row.endpoint_id) ?? `#${row.endpoint_id}` : '—'}
+                        onCopy={() => void copyField(String(row.endpoint_id ?? ''), '目标')}
+                      />
+                      <DetailItem label="错误类型" value={row.error_type ?? '—'} onCopy={() => void copyField(row.error_type ?? '', '错误类型')} />
+                    </div>
                   </CardContent>
                 </Card>
 
-                <Card class="border-border/70 bg-muted/25">
-                  <CardHeader>
-                    <CardTitle>用量信息</CardTitle>
+                <Card class="rounded-none border border-border bg-background shadow-none">
+                  <CardHeader class="pb-4">
+                    <CardTitle class="text-lg font-medium tracking-tight">用量信息</CardTitle>
                   </CardHeader>
-                  <CardContent class="grid gap-4 md:grid-cols-2">
-                    <DetailItem label="输入 Tokens" value={formatCompactInteger(row.input_tokens)} onCopy={() => void copyField(String(row.input_tokens), '输入 Tokens')} />
-                    <DetailItem label="输出 Tokens" value={formatCompactInteger(row.output_tokens)} onCopy={() => void copyField(String(row.output_tokens), '输出 Tokens')} />
-                    <DetailItem label="Cache Read" value={formatCompactInteger(row.cache_read_input_tokens)} onCopy={() => void copyField(String(row.cache_read_input_tokens), 'Cache Read')} />
-                    <DetailItem label="Cache Write" value={formatCompactInteger(row.cache_creation_input_tokens)} onCopy={() => void copyField(String(row.cache_creation_input_tokens), 'Cache Write')} />
-                    <DetailItem label="元数据" value={row.error_message ?? '无'} onCopy={() => void copyField(row.error_message ?? '', '错误信息')} />
+                  <CardContent class="grid gap-0 border-t border-border/40 pt-0">
+                    <div class="grid md:grid-cols-2">
+                      <DetailItem label="输入用量" value={formatCompactInteger(row.input_tokens)} onCopy={() => void copyField(String(row.input_tokens), '输入用量')} />
+                      <DetailItem label="输出用量" value={formatCompactInteger(row.output_tokens)} onCopy={() => void copyField(String(row.output_tokens), '输出用量')} />
+                      <DetailItem label="缓存读取" value={formatCompactInteger(row.cache_read_input_tokens)} onCopy={() => void copyField(String(row.cache_read_input_tokens), '缓存读取')} />
+                      <DetailItem label="缓存写入" value={formatCompactInteger(row.cache_creation_input_tokens)} onCopy={() => void copyField(String(row.cache_creation_input_tokens), '缓存写入')} />
+                      <DetailItem label="元数据" value={row.error_message ?? '无'} onCopy={() => void copyField(row.error_message ?? '', '错误信息')} />
+                    </div>
                   </CardContent>
                 </Card>
               </div>
@@ -364,7 +379,7 @@ export function LogsPage(props: LogsPageProps) {
 
 function BadgeSummary(props: { label: string; value: number }) {
   return (
-    <div class="rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
+    <div class="border border-border bg-transparent px-3 py-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
       {props.label} {formatCompactInteger(props.value)}
     </div>
   );
@@ -372,27 +387,27 @@ function BadgeSummary(props: { label: string; value: number }) {
 
 function MetricCard(props: { label: string; value: string; badge?: any }) {
   return (
-    <Card class="border-border/70 bg-muted/25">
-      <CardContent class="p-4">
-        <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{props.label}</div>
-        <Show when={props.badge} fallback={<div class="mt-2 text-xl font-semibold text-foreground">{props.value}</div>}>
-          <div class="mt-2">{props.badge}</div>
-        </Show>
-      </CardContent>
-    </Card>
+    <div class="flex flex-col gap-1 pr-6 border-r border-border/40 last:border-r-0">
+      <div class="flex items-center justify-between">
+        <span class="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground">{props.label}</span>
+      </div>
+      <Show when={props.badge} fallback={<div class="mt-2 text-2xl font-medium tracking-tight text-foreground">{props.value}</div>}>
+        <div class="mt-2">{props.badge}</div>
+      </Show>
+    </div>
   );
 }
 
 function DetailItem(props: { label: string; value: string; onCopy: () => void }) {
   return (
-    <div class="rounded-xl border border-border/70 bg-background px-4 py-3">
-      <div class="mb-2 flex items-center justify-between gap-2">
-        <span class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{props.label}</span>
-        <Button type="button" size="sm" variant="ghost" onClick={props.onCopy}>
-          <Copy />
-        </Button>
+    <div class="flex flex-col gap-2 border-b border-r border-border/40 p-4 relative group hover:bg-muted/10 transition-colors">
+      <div class="flex items-center justify-between gap-2">
+        <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{props.label}</span>
       </div>
-      <div class="break-all text-sm text-foreground">{props.value}</div>
+      <div class="break-all font-mono text-sm text-foreground pr-8 truncate" title={props.value}>{props.value}</div>
+      <Button type="button" size="icon" variant="ghost" class="absolute right-2 bottom-2 size-6 opacity-0 group-hover:opacity-100 transition-opacity h-auto" onClick={props.onCopy}>
+        <Copy class="size-3" />
+      </Button>
     </div>
   );
 }

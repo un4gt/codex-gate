@@ -1,4 +1,3 @@
-import { createDemoSnapshot } from './demo';
 import { parseDecimal } from './format';
 import type { DashboardResponseBundle, DashboardSnapshot, HeatmapDay, RequestLogRow, StatsDailyRow } from './types';
 
@@ -93,7 +92,6 @@ export function buildDashboardSnapshot(bundle: DashboardResponseBundle): Dashboa
   const costByDate = new Map(statsDaily.map((row) => [row.date, parseDecimal(row.cost_total_usd)]));
 
   return {
-    source: 'live',
     hero: {
       providers: bundle.providers.filter((provider) => provider.enabled).length,
       routes: bundle.routes.filter((route) => route.enabled).length,
@@ -124,6 +122,13 @@ export function buildDashboardSnapshot(bundle: DashboardResponseBundle): Dashboa
   };
 }
 
-export function createPreviewSnapshot(): DashboardSnapshot {
-  return createDemoSnapshot();
+export function createEmptyDashboardSnapshot(): DashboardSnapshot {
+  return buildDashboardSnapshot({
+    statsDaily: [],
+    requestLogs: [],
+    providers: [],
+    routes: [],
+    prices: [],
+    apiKeys: [],
+  });
 }

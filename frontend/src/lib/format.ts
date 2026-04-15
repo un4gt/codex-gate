@@ -74,3 +74,21 @@ export function parseDecimal(value: string | null | undefined): number {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
+
+export function formatModelName(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : '未识别';
+}
+
+export function formatRequestType(value: string | null | undefined): string {
+  if (value === 'responses') return '响应请求';
+  if (value === 'chat_completions') return '对话请求';
+  return '—';
+}
+
+export function formatRoutingStrategy(value: string | null | undefined): string {
+  if (value === 'weighted') return '加权';
+  if (value === 'priority') return '优先级';
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : '—';
+}

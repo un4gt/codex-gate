@@ -1,7 +1,7 @@
 import { For, Show } from 'solid-js';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { formatCompactInteger, formatCost, formatDateTime, formatMs, parseDecimal } from '../lib/format';
+import { formatCompactInteger, formatCost, formatDateTime, formatModelName, formatMs, formatRequestType, parseDecimal } from '../lib/format';
 import type { RequestLogRow } from '../lib/types';
 
 interface RecentLogsProps {
@@ -14,12 +14,12 @@ export function RecentLogs(props: RecentLogsProps) {
       <CardHeader class="gap-4">
         <div class="flex items-center justify-between gap-3">
           <div>
-            <p class="panel__eyebrow">Recent Logs</p>
-            <CardTitle>最新请求元数据</CardTitle>
+            <p class="panel__eyebrow">最近请求</p>
+            <CardTitle>最新请求摘要</CardTitle>
           </div>
-          <Badge variant="outline">metadata only</Badge>
+          <Badge variant="outline">仅摘要</Badge>
         </div>
-        <CardDescription>只展示 metadata，不落请求/响应正文；更适合快速排查状态码、模型和时延。</CardDescription>
+        <CardDescription>只保留摘要字段，不保存请求或响应正文；更适合快速排查状态码、模型和时延。</CardDescription>
       </CardHeader>
       <CardContent>
         <Show when={props.rows.length > 0} fallback={<div class="empty-state">还没有可展示的日志，等第一批流量进来后这里会自动出现。</div>}>
@@ -29,13 +29,13 @@ export function RecentLogs(props: RecentLogsProps) {
                 <article class="grid gap-4 rounded-[1.35rem] border border-border bg-background/70 p-4 md:grid-cols-[1fr_auto]">
                   <div>
                     <div class="flex flex-wrap items-center justify-between gap-3">
-                      <strong class="text-sm font-semibold tracking-[-0.02em] text-foreground">{row.model ?? 'unknown-model'}</strong>
+                      <strong class="text-sm font-semibold tracking-[-0.02em] text-foreground">{formatModelName(row.model)}</strong>
                       <Badge variant={(row.http_status ?? 500) >= 400 ? 'destructive' : 'success'}>{row.http_status ?? '—'}</Badge>
                     </div>
                     <div class="log-row__meta mt-3 flex flex-wrap gap-3 text-xs uppercase tracking-[0.14em] text-muted-foreground">
-                      <span>{row.api_format === 'responses' ? 'Responses' : 'Chat Completions'}</span>
+                      <span>{formatRequestType(row.api_format)}</span>
                       <span>{formatDateTime(row.time_ms)}</span>
-                      <span>{formatCompactInteger(row.input_tokens + row.output_tokens)} tokens</span>
+                      <span>{formatCompactInteger(row.input_tokens + row.output_tokens)} 用量</span>
                     </div>
                   </div>
                   <div class="flex flex-col items-start gap-2 text-sm md:items-end">
