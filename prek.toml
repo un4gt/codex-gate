@@ -1,0 +1,42 @@
+#:schema https://www.schemastore.org/prek.json
+
+default_install_hook_types = ["pre-commit", "pre-push"]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "frontend-solid-init-order"
+name = "frontend solid init order"
+entry = "node scripts/check_frontend_solid_init_order.mjs"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["pre-commit", "pre-push"]
+
+[[repos.hooks]]
+id = "frontend-build"
+name = "frontend build"
+entry = "npm --prefix frontend run build"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["pre-commit", "pre-push"]
+
+[[repos.hooks]]
+id = "backend-build"
+name = "backend build"
+entry = "cargo build --manifest-path backend/Cargo.toml"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "docker-compose-up-check"
+name = "docker compose up check"
+entry = "bash scripts/prek-compose-up-check.sh"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["manual"]
