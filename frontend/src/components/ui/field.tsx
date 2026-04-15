@@ -1,4 +1,5 @@
-import { splitProps, type JSX } from 'solid-js';
+import { children, createMemo, splitProps, type JSX } from 'solid-js';
+import { translateJsx } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 export function FieldGroup(props: JSX.HTMLAttributes<HTMLDivElement>) {
@@ -12,13 +13,17 @@ export function Field(props: JSX.HTMLAttributes<HTMLDivElement>) {
 }
 
 export function FieldLabel(props: JSX.LabelHTMLAttributes<HTMLLabelElement>) {
-  const [local, rest] = splitProps(props, ['class']);
-  return <label class={cn('font-mono text-[0.65rem] uppercase tracking-widest text-foreground font-medium', local.class)} {...rest} />;
+  const [local, rest] = splitProps(props, ['children', 'class']);
+  const resolvedChildren = children(() => local.children);
+  const content = createMemo(() => translateJsx(resolvedChildren()));
+  return <label class={cn('font-mono text-[0.65rem] uppercase tracking-widest text-foreground font-medium', local.class)} {...rest}>{content()}</label>;
 }
 
 export function FieldDescription(props: JSX.HTMLAttributes<HTMLParagraphElement>) {
-  const [local, rest] = splitProps(props, ['class']);
-  return <p class={cn('font-mono text-[0.65rem] text-muted-foreground opacity-70', local.class)} {...rest} />;
+  const [local, rest] = splitProps(props, ['children', 'class']);
+  const resolvedChildren = children(() => local.children);
+  const content = createMemo(() => translateJsx(resolvedChildren()));
+  return <p class={cn('font-mono text-[0.65rem] text-muted-foreground opacity-70', local.class)} {...rest}>{content()}</p>;
 }
 
 export function FieldSet(props: JSX.FieldsetHTMLAttributes<HTMLFieldSetElement>) {
@@ -27,6 +32,8 @@ export function FieldSet(props: JSX.FieldsetHTMLAttributes<HTMLFieldSetElement>)
 }
 
 export function FieldLegend(props: JSX.HTMLAttributes<HTMLLegendElement>) {
-  const [local, rest] = splitProps(props, ['class']);
-  return <legend class={cn('px-2 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground', local.class)} {...rest} />;
+  const [local, rest] = splitProps(props, ['children', 'class']);
+  const resolvedChildren = children(() => local.children);
+  const content = createMemo(() => translateJsx(resolvedChildren()));
+  return <legend class={cn('px-2 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground', local.class)} {...rest}>{content()}</legend>;
 }

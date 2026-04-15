@@ -1,5 +1,6 @@
 import type { Component, JSX } from 'solid-js';
 import { Card, CardContent } from '@/components/ui/card';
+import { t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 interface StatCardProps {
@@ -29,9 +30,9 @@ export function StatCard(props: StatCardProps) {
             <div class="flex flex-col gap-3">
               <div class="panel__eyebrow mb-0 flex items-center gap-2">
                 <span class="size-2 rounded-full bg-primary" />
-                {props.eyebrow}
+                {t(props.eyebrow)}
               </div>
-              <p class="text-sm font-medium text-muted-foreground">{props.title}</p>
+              <p class="text-sm font-medium text-muted-foreground">{t(props.title)}</p>
             </div>
             <div class={cn('flex size-12 items-center justify-center rounded-2xl border', accentClasses[accent()])}>{props.icon}</div>
           </div>
@@ -41,7 +42,7 @@ export function StatCard(props: StatCardProps) {
               {props.unit && <span class="pb-1 text-sm text-muted-foreground">{props.unit}</span>}
             </div>
             <div class="h-px bg-border" />
-            <p class="panel__muted">{props.meta}</p>
+            <p class="panel__muted">{t(props.meta)}</p>
           </div>
         </div>
       </CardContent>

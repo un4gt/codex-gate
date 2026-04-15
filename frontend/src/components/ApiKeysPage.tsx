@@ -11,6 +11,7 @@ import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import { t } from '@/lib/i18n';
 import { createApiKey, deleteApiKey, updateApiKey } from '../lib/api';
 import { formatCompactInteger, formatCost, formatDateTime, formatDateTimeLocalInput, parseDateTimeLocalInput } from '../lib/format';
 import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, UpdateApiKeyInput } from '../lib/types';
@@ -78,7 +79,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       const result = await createApiKey(props.settings, payload);
       setCreated(result);
       setCreateOpen(false);
-      await props.onRefresh(`密钥 ${payload.name} 已创建。`);
+      await props.onRefresh(t('密钥 {{name}} 已创建。', { name: payload.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建密钥失败。');
     } finally {
@@ -107,7 +108,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     setBusy(`update-${current.apiKey.id}`);
     try {
       await updateApiKey(props.settings, current.apiKey.id, payload);
-      await props.onRefresh(`密钥 ${payload.name} 已更新。`);
+      await props.onRefresh(t('密钥 {{name}} 已更新。', { name: payload.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新密钥失败。');
     } finally {
@@ -120,7 +121,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     setBusy(`toggle-${item.apiKey.id}`);
     try {
       await updateApiKey(props.settings, item.apiKey.id, { enabled });
-      await props.onRefresh(`密钥 ${item.apiKey.name} 已${enabled ? '启用' : '停用'}。`);
+      await props.onRefresh(t(enabled ? '密钥 {{name}} 已启用。' : '密钥 {{name}} 已停用。', { name: item.apiKey.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新状态失败。');
     } finally {
@@ -130,14 +131,14 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
 
   const handleDelete = async (item: ApiKeyWorkspace) => {
     if (!ensureLive()) return;
-    const confirmed = window.confirm(`删除密钥“${item.apiKey.name}”？该操作不可撤销。`);
+    const confirmed = window.confirm(t('删除密钥“{{name}}”？该操作不可撤销。', { name: item.apiKey.name }));
     if (!confirmed) return;
 
     setBusy(`delete-${item.apiKey.id}`);
     try {
       await deleteApiKey(props.settings, item.apiKey.id);
       setSelectedId((current) => (current === item.apiKey.id ? null : current));
-      await props.onRefresh(`密钥 ${item.apiKey.name} 已删除。`);
+      await props.onRefresh(t('密钥 {{name}} 已删除。', { name: item.apiKey.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '删除密钥失败。');
     } finally {
@@ -285,11 +286,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
           <div class="grid gap-3 md:grid-cols-2">
             <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
               <Checkbox name="enabled" checked />
-              <span>创建后立即启用</span>
+              <span>{t('创建后立即启用')}</span>
             </label>
             <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
               <Checkbox name="log_enabled" checked />
-              <span>记录请求元数据</span>
+              <span>{t('记录请求元数据')}</span>
             </label>
           </div>
           <Button type="submit" disabled={busy() === 'create'}>
@@ -299,15 +300,15 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
             {(createdKey) => (
               <Card class="border-emerald-200 bg-emerald-50">
                 <CardContent class="flex flex-col gap-2 p-4">
-                  <div class="text-sm font-medium text-emerald-900">明文密钥只展示一次</div>
-                  <code class="break-all text-sm text-emerald-900">{createdKey().api_key}</code>
-                  <div>
+                    <div class="text-sm font-medium text-emerald-900">{t('明文密钥只展示一次')}</div>
+                    <code class="break-all text-sm text-emerald-900">{createdKey().api_key}</code>
+                    <div>
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      onClick={() => void navigator.clipboard.writeText(createdKey().api_key).then(() => props.onMessage('新密钥已复制。'))}
-                    >
+                        onClick={() => void navigator.clipboard.writeText(createdKey().api_key).then(() => props.onMessage(t('新密钥已复制。')))}
+                      >
                       <Copy />
                       复制
                     </Button>
@@ -334,7 +335,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 <div class="grid gap-3 md:grid-cols-3">
                   <Card class="border-border/70 bg-muted/25">
                     <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">状态</div>
+                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('状态')}</div>
                       <div class="mt-2">
                         <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                       </div>
@@ -342,13 +343,13 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   </Card>
                   <Card class="border-border/70 bg-muted/25">
                     <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">请求量</div>
+                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('请求量')}</div>
                       <div class="mt-2 text-xl font-semibold text-foreground">{formatCompactInteger(data.totals.requests)}</div>
                     </CardContent>
                   </Card>
                   <Card class="border-border/70 bg-muted/25">
                     <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">成本</div>
+                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('成本')}</div>
                       <div class="mt-2 text-xl font-semibold text-foreground">{formatCost(data.totals.cost)}</div>
                     </CardContent>
                   </Card>
@@ -369,18 +370,18 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   <div class="grid gap-3 md:grid-cols-2">
                     <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
                       <Checkbox name="enabled" checked={data.apiKey.enabled} />
-                      <span>启用密钥</span>
+                      <span>{t('启用密钥')}</span>
                     </label>
                     <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
                       <Checkbox name="log_enabled" checked={data.apiKey.log_enabled} />
-                      <span>记录请求元数据</span>
+                      <span>{t('记录请求元数据')}</span>
                     </label>
                   </div>
 
                   <Card class="border-border/70 bg-muted/25">
                     <CardContent class="grid gap-2 p-4">
-                      <div class="text-sm text-muted-foreground">最近使用模型</div>
-                      <div class="text-sm text-foreground">{data.recentModels.length > 0 ? data.recentModels.join(', ') : '暂无记录'}</div>
+                      <div class="text-sm text-muted-foreground">{t('最近使用模型')}</div>
+                      <div class="text-sm text-foreground">{data.recentModels.length > 0 ? data.recentModels.join(', ') : t('暂无记录')}</div>
                     </CardContent>
                   </Card>
 

@@ -2,6 +2,7 @@ import { Portal } from 'solid-js/web';
 import { Show, type JSX } from 'solid-js';
 import { X } from 'lucide-solid';
 import { Button } from '@/components/ui/button';
+import { t } from '@/lib/i18n';
 
 interface DetailDrawerProps {
   open: boolean;
@@ -23,12 +24,12 @@ export function DetailDrawer(props: DetailDrawerProps) {
           >
             <div class="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border/40 bg-background/95 px-8 py-6 backdrop-blur-md">
               <div class="flex min-w-0 flex-col gap-2">
-                <h2 class="text-3xl font-medium tracking-tight text-foreground truncate" title={props.title}>{props.title}</h2>
+                <h2 class="text-3xl font-medium tracking-tight text-foreground truncate" title={t(props.title)}>{t(props.title)}</h2>
                 <Show when={props.description}>
-                  <p class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70 truncate">{props.description}</p>
+                  <p class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70 truncate">{t(props.description!)}</p>
                 </Show>
               </div>
-              <Button type="button" variant="ghost" size="icon" onClick={props.onClose} aria-label="关闭" class="-mr-2">
+              <Button type="button" variant="ghost" size="icon" onClick={props.onClose} aria-label={t('关闭')} class="-mr-2">
                 <X class="size-5" />
               </Button>
             </div>

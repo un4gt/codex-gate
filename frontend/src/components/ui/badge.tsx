@@ -1,5 +1,6 @@
 import { cva, type VariantProps } from 'class-variance-authority';
-import { splitProps, type JSX } from 'solid-js';
+import { children, createMemo, splitProps, type JSX } from 'solid-js';
+import { translateJsx } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 const badgeVariants = cva(
@@ -24,6 +25,8 @@ const badgeVariants = cva(
 export interface BadgeProps extends JSX.HTMLAttributes<HTMLSpanElement>, VariantProps<typeof badgeVariants> {}
 
 export function Badge(props: BadgeProps) {
-  const [local, rest] = splitProps(props, ['class', 'variant']);
-  return <span class={cn(badgeVariants({ variant: local.variant }), local.class)} {...rest} />;
+  const [local, rest] = splitProps(props, ['children', 'class', 'variant']);
+  const resolvedChildren = children(() => local.children);
+  const content = createMemo(() => translateJsx(resolvedChildren()));
+  return <span class={cn(badgeVariants({ variant: local.variant }), local.class)} {...rest}>{content()}</span>;
 }

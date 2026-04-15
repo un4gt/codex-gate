@@ -1,4 +1,5 @@
 import { For, createMemo } from 'solid-js';
+import { getIntlLocale, t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import type { HeatmapDay } from '../lib/types';
 
@@ -35,7 +36,7 @@ export function ActivityHeatmap(props: ActivityHeatmapProps) {
         return '';
       }
       previousMonth = month;
-      return `${Number(month)}月`;
+      return new Intl.DateTimeFormat(getIntlLocale(), { month: 'short' }).format(new Date(Date.UTC(2024, Number(month) - 1, 1)));
     });
   });
 
@@ -48,9 +49,9 @@ export function ActivityHeatmap(props: ActivityHeatmapProps) {
       </div>
       <div class="grid min-w-[820px] grid-cols-[36px_1fr] gap-3">
         <div class="grid grid-rows-7 gap-1.5 pt-4 text-[0.72rem] uppercase tracking-[0.16em] text-muted-foreground">
-          <span class="row-start-2">周一</span>
-          <span class="row-start-4">周三</span>
-          <span class="row-start-6">周五</span>
+          <span class="row-start-2">{t('周一')}</span>
+          <span class="row-start-4">{t('周三')}</span>
+          <span class="row-start-6">{t('周五')}</span>
         </div>
         <div class="grid grid-cols-[repeat(54,minmax(12px,1fr))] gap-1.5">
           <For each={weeks()}>

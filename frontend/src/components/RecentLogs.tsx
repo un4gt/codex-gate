@@ -1,6 +1,7 @@
 import { For, Show } from 'solid-js';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { t } from '@/lib/i18n';
 import { formatCompactInteger, formatCost, formatDateTime, formatModelName, formatMs, formatRequestType, parseDecimal } from '../lib/format';
 import type { RequestLogRow } from '../lib/types';
 
@@ -14,7 +15,7 @@ export function RecentLogs(props: RecentLogsProps) {
       <CardHeader class="gap-4">
         <div class="flex items-center justify-between gap-3">
           <div>
-            <p class="panel__eyebrow">最近请求</p>
+            <p class="panel__eyebrow">{t('最近请求')}</p>
             <CardTitle>最新请求摘要</CardTitle>
           </div>
           <Badge variant="outline">仅摘要</Badge>
@@ -22,7 +23,7 @@ export function RecentLogs(props: RecentLogsProps) {
         <CardDescription>只保留摘要字段，不保存请求或响应正文；更适合快速排查状态码、模型和时延。</CardDescription>
       </CardHeader>
       <CardContent>
-        <Show when={props.rows.length > 0} fallback={<div class="empty-state">还没有可展示的日志，等第一批流量进来后这里会自动出现。</div>}>
+        <Show when={props.rows.length > 0} fallback={<div class="empty-state">{t('还没有可展示的日志，等第一批流量进来后这里会自动出现。')}</div>}>
           <div class="flex flex-col gap-3">
             <For each={props.rows.slice(0, 8)}>
               {(row) => (
@@ -35,7 +36,7 @@ export function RecentLogs(props: RecentLogsProps) {
                     <div class="log-row__meta mt-3 flex flex-wrap gap-3 text-xs uppercase tracking-[0.14em] text-muted-foreground">
                       <span>{formatRequestType(row.api_format)}</span>
                       <span>{formatDateTime(row.time_ms)}</span>
-                      <span>{formatCompactInteger(row.input_tokens + row.output_tokens)} 用量</span>
+                      <span>{`${formatCompactInteger(row.input_tokens + row.output_tokens)} ${t('用量')}`}</span>
                     </div>
                   </div>
                   <div class="flex flex-col items-start gap-2 text-sm md:items-end">

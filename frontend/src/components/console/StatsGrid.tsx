@@ -1,6 +1,7 @@
 import { For, Show } from 'solid-js';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
+import { t } from '@/lib/i18n';
 
 export interface StatItem {
   label: string;
@@ -28,7 +29,7 @@ export function StatsGrid(props: StatsGridProps) {
         {(item) => (
           <div class="flex flex-col gap-1 pr-6 border-r border-border/40 last:border-r-0">
             <div class="flex items-center justify-between">
-              <span class="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground">{item.label}</span>
+              <span class="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground">{t(item.label)}</span>
               <Show when={item.trend}>
                 <Badge variant={trendVariant(item.tone)}>{item.trend}</Badge>
               </Show>
@@ -44,7 +45,7 @@ export function StatsGrid(props: StatsGridProps) {
             </div>
             <div class="mt-2 text-4xl font-medium tracking-tight text-foreground">{item.value}</div>
             <Show when={item.hint}>
-              <div class="mt-1 font-mono text-[0.65rem] text-muted-foreground opacity-70 uppercase tracking-widest">{item.hint}</div>
+              <div class="mt-1 font-mono text-[0.65rem] text-muted-foreground opacity-70 uppercase tracking-widest">{t(item.hint!)}</div>
             </Show>
           </div>
         )}

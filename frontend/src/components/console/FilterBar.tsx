@@ -2,6 +2,7 @@ import { Show, type JSX } from 'solid-js';
 import { Filter } from 'lucide-solid';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { t } from '@/lib/i18n';
 
 interface FilterBarProps {
   primary: JSX.Element;
@@ -22,7 +23,7 @@ export function FilterBar(props: FilterBarProps) {
             <Show when={props.advanced}>
               <Button type="button" variant="ghost" size="sm" onClick={props.onToggleAdvanced} class="font-mono text-[0.65rem] tracking-widest px-3 ml-2">
                 <Filter class="mr-2 size-3" />
-                {props.advancedOpen ? 'HIDE FILTERS' : 'ADVANCED'}
+                {props.advancedOpen ? t('HIDE FILTERS') : t('ADVANCED')}
               </Button>
             </Show>
           </div>

@@ -1,5 +1,6 @@
 import { For, createMemo } from 'solid-js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { t } from '@/lib/i18n';
 
 interface TrendPoint {
   label: string;
@@ -52,17 +53,17 @@ export function TrendChart(props: TrendChartProps) {
       <CardHeader class="gap-4">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p class="panel__eyebrow">趋势</p>
+            <p class="panel__eyebrow">{t('趋势')}</p>
             <CardTitle>最近 14 天请求波形</CardTitle>
             <CardDescription>用单条轨迹快速看出峰值、回落和最近一天的节奏。</CardDescription>
           </div>
           <div class="grid gap-3 sm:grid-cols-2">
             <div class="rounded-xl border border-border bg-background/70 px-4 py-3">
-              <div class="panel__eyebrow mb-1">峰值</div>
+              <div class="panel__eyebrow mb-1">{t('峰值')}</div>
               <div class="text-2xl font-semibold tracking-[-0.04em] text-foreground">{peak()}</div>
             </div>
             <div class="rounded-xl border border-border bg-background/70 px-4 py-3">
-              <div class="panel__eyebrow mb-1">最新</div>
+              <div class="panel__eyebrow mb-1">{t('最新')}</div>
               <div class="text-2xl font-semibold tracking-[-0.04em] text-foreground">{latest()}</div>
             </div>
           </div>

@@ -1,5 +1,6 @@
 import { cva, type VariantProps } from 'class-variance-authority';
-import { splitProps, type JSX } from 'solid-js';
+import { children, createMemo, splitProps, type JSX } from 'solid-js';
+import { translateJsx } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 const buttonVariants = cva(
@@ -31,9 +32,11 @@ const buttonVariants = cva(
 export interface ButtonProps extends JSX.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {}
 
 export function Button(props: ButtonProps) {
-  const [local, rest] = splitProps(props, ['class', 'variant', 'size']);
+  const [local, rest] = splitProps(props, ['children', 'class', 'variant', 'size']);
+  const resolvedChildren = children(() => local.children);
+  const content = createMemo(() => translateJsx(resolvedChildren()));
 
-  return <button class={cn(buttonVariants({ variant: local.variant, size: local.size }), local.class)} {...rest} />;
+  return <button class={cn(buttonVariants({ variant: local.variant, size: local.size }), local.class)} {...rest}>{content()}</button>;
 }
 
 export { buttonVariants };

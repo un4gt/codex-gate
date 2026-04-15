@@ -1,4 +1,5 @@
-import { splitProps, type JSX } from 'solid-js';
+import { children, createMemo, splitProps, type JSX } from 'solid-js';
+import { translateJsx } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 export function Table(props: JSX.HTMLAttributes<HTMLTableElement>) {
@@ -31,8 +32,10 @@ export function TableRow(props: JSX.HTMLAttributes<HTMLTableRowElement>) {
 }
 
 export function TableHead(props: JSX.ThHTMLAttributes<HTMLTableCellElement>) {
-  const [local, rest] = splitProps(props, ['class']);
-  return <th class={cn('h-12 px-5 text-left align-middle font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20', local.class)} {...rest} />;
+  const [local, rest] = splitProps(props, ['children', 'class']);
+  const resolvedChildren = children(() => local.children);
+  const content = createMemo(() => translateJsx(resolvedChildren()));
+  return <th class={cn('h-12 px-5 text-left align-middle font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20', local.class)} {...rest}>{content()}</th>;
 }
 
 export function TableCell(props: JSX.TdHTMLAttributes<HTMLTableCellElement>) {
@@ -41,6 +44,8 @@ export function TableCell(props: JSX.TdHTMLAttributes<HTMLTableCellElement>) {
 }
 
 export function TableCaption(props: JSX.HTMLAttributes<HTMLTableCaptionElement>) {
-  const [local, rest] = splitProps(props, ['class']);
-  return <caption class={cn('mt-4 text-sm text-muted-foreground', local.class)} {...rest} />;
+  const [local, rest] = splitProps(props, ['children', 'class']);
+  const resolvedChildren = children(() => local.children);
+  const content = createMemo(() => translateJsx(resolvedChildren()));
+  return <caption class={cn('mt-4 text-sm text-muted-foreground', local.class)} {...rest}>{content()}</caption>;
 }

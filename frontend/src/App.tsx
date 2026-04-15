@@ -24,10 +24,12 @@ import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { QuickActions } from '@/components/console/QuickActions';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { EmptyState } from '@/components/console/EmptyState';
+import { LocaleSwitch } from '@/components/LocaleSwitch';
 import { ApiKeysPage } from '@/components/ApiKeysPage';
 import { LogsPage } from '@/components/LogsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
+import { installLocaleEffect, t } from '@/lib/i18n';
 import {
   loadApiKeyWorkspace,
   loadDashboardData,
@@ -107,11 +109,11 @@ function persistSettings(settings: ConnectionSettings) {
 
 async function copyText(value: string, success: string, onMessage: (message: string) => void) {
   if (!navigator?.clipboard) {
-    onMessage('当前环境不支持剪贴板。');
+    onMessage(t('当前环境不支持剪贴板。'));
     return;
   }
   await navigator.clipboard.writeText(value);
-  onMessage(success);
+  onMessage(t(success));
 }
 
 function pageDescription(pathname: string) {
@@ -153,7 +155,7 @@ function TopShell(props: { data: AppDataContext; children: any }) {
                     }`}
                   >
                     <span class="relative z-10 flex items-center gap-3">
-                      <span>{item.label}</span>
+                      <span>{t(item.label)}</span>
                     </span>
                     <span class="relative z-10 text-[0.6rem] text-muted-foreground opacity-40 font-mono">{String(NAV_ITEMS.indexOf(item) + 1).padStart(2, '0')}</span>
                     {active() && (
@@ -166,7 +168,7 @@ function TopShell(props: { data: AppDataContext; children: any }) {
           </nav>
           <div class="mt-16 flex flex-col gap-4 pt-8 border-t border-border/40 px-3">
               <div class="flex items-center justify-between">
-                <span class="text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground font-mono">SYSTEM STATUS</span>
+                <span class="text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground font-mono">{t('SYSTEM STATUS')}</span>
                 <span class="flex h-2 w-2 relative">
                   <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
                   <span class="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
@@ -182,16 +184,17 @@ function TopShell(props: { data: AppDataContext; children: any }) {
               <div class="min-w-0">
                 <div class="mb-3 flex items-center gap-3">
                   <span class="size-1.5 rounded-full bg-primary" />
-                  <p class="text-[0.65rem] uppercase tracking-[0.25em] text-muted-foreground font-mono">{currentItem().label} MODULE</p>
+                  <p class="text-[0.65rem] uppercase tracking-[0.25em] text-muted-foreground font-mono">{`${t(currentItem().label)} ${t('MODULE')}`}</p>
                 </div>
-                <h1 class="text-5xl font-bold tracking-tight text-foreground">{currentItem().label}</h1>
-                <p class="mt-6 text-[0.95rem] text-muted-foreground max-w-2xl leading-relaxed font-mono">{pageDescription(location.pathname)}</p>
+                <h1 class="text-5xl font-bold tracking-tight text-foreground">{t(currentItem().label)}</h1>
+                <p class="mt-6 text-[0.95rem] text-muted-foreground max-w-2xl leading-relaxed font-mono">{t(pageDescription(location.pathname))}</p>
               </div>
               <div class="flex items-center gap-4 pb-1">
+                <LocaleSwitch />
                 <StatusBadge tone="normal">实时</StatusBadge>
                 <div class="flex items-center gap-2">
                   <span class="size-1.5 rounded-full bg-primary animate-pulse" />
-                  <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">已连接</span>
+                  <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">{t('已连接')}</span>
                 </div>
                 <Button
                 type="button"
@@ -225,13 +228,16 @@ function ConnectionGate(props: {
   return (
     <div class="min-h-screen bg-background px-4 py-10 sm:px-6 lg:px-8">
       <div class="mx-auto flex max-w-xl flex-col gap-10 mt-12">
+        <div class="flex justify-end">
+          <LocaleSwitch />
+        </div>
         <div class="flex flex-col gap-4 text-center items-center">
           <div class="flex size-12 items-center justify-center bg-foreground text-background">
             <SquareTerminal class="size-6" />
           </div>
           <div>
             <h1 class="text-4xl font-medium tracking-tight text-foreground mt-6">CODEX GATE</h1>
-            <p class="mt-2 text-sm text-muted-foreground font-mono tracking-widest uppercase">ADMIN CONSOLE INITIALIZATION</p>
+            <p class="mt-2 text-sm text-muted-foreground font-mono tracking-widest uppercase">{t('ADMIN CONSOLE INITIALIZATION')}</p>
           </div>
         </div>
 
@@ -250,7 +256,7 @@ function ConnectionGate(props: {
             >
               <div class="grid gap-6">
                 <label class="flex flex-col gap-3">
-                  <span class="font-mono text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">服务地址</span>
+                  <span class="font-mono text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">{t('服务地址')}</span>
                   <Input
                     value={props.settings().apiBase}
                     onInput={(event) => props.onApiBaseChange(event.currentTarget.value)}
@@ -259,7 +265,7 @@ function ConnectionGate(props: {
                   />
                 </label>
                 <label class="flex flex-col gap-3">
-                  <span class="font-mono text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">管理员口令</span>
+                  <span class="font-mono text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">{t('管理员口令')}</span>
                   <Input
                     type="password"
                     value={props.settings().adminToken}
@@ -277,7 +283,7 @@ function ConnectionGate(props: {
 
               <div class="flex flex-wrap gap-2 pt-2">
                 <Button type="submit" disabled={props.status() === 'loading'} class="w-full sm:w-auto">
-                  {props.status() === 'loading' ? 'CONNECTING...' : 'ENTER CONSOLE'}
+                  {props.status() === 'loading' ? t('CONNECTING...') : t('ENTER CONSOLE')}
                 </Button>
               </div>
             </form>
@@ -302,7 +308,7 @@ function OverviewPage(props: { data: AppDataContext }) {
       const data = await loadStatsOverview(current, period());
       setOverview(data);
     } catch (error) {
-      props.data.onMessage(error instanceof Error ? `${error.message}；暂时显示当前数据。` : '读取总览失败。');
+      props.data.onMessage(error instanceof Error ? t('{{message}}；暂时显示当前数据。', { message: error.message }) : '读取总览失败。');
       setOverview(null);
     }
   };
@@ -318,7 +324,7 @@ function OverviewPage(props: { data: AppDataContext }) {
         {
           label: '今日请求',
           value: formatCompactInteger(live.kpis.requests),
-          hint: `失败 ${formatCompactInteger(live.kpis.failed)}`,
+          hint: t('失败 {{count}}', { count: formatCompactInteger(live.kpis.failed) }),
         },
         {
           label: '错误率',
@@ -341,9 +347,9 @@ function OverviewPage(props: { data: AppDataContext }) {
 
     const snapshot = props.data.snapshot();
     const errorRate = snapshot.totals.requests > 0 ? (snapshot.totals.failed / snapshot.totals.requests) * 100 : 0;
-    return [
-      { label: '今日请求', value: formatCompactInteger(snapshot.totals.requestsToday), hint: `累计 ${formatCompactInteger(snapshot.totals.requests)}` },
-      { label: '错误率', value: `${errorRate.toFixed(1)}%`, hint: `失败 ${formatCompactInteger(snapshot.totals.failed)}` },
+      return [
+      { label: '今日请求', value: formatCompactInteger(snapshot.totals.requestsToday), hint: t('累计 {{count}}', { count: formatCompactInteger(snapshot.totals.requests) }) },
+      { label: '错误率', value: `${errorRate.toFixed(1)}%`, hint: t('失败 {{count}}', { count: formatCompactInteger(snapshot.totals.failed) }) },
       { label: 'P95 延迟', value: formatMs(snapshot.totals.averageWaitMs), hint: '使用平均耗时回退' },
       { label: '今日成本', value: formatCost(snapshot.totals.cost), hint: '来自本地汇总' },
     ];
@@ -442,26 +448,33 @@ function OverviewPage(props: { data: AppDataContext }) {
             <div class="border-l-2 border-primary/20 pl-4 py-1">
               <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">上游健康</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
-                {overview() ? `${overview()?.service_health.healthy ?? 0} 正常` : `${props.data.providers().filter((item) => item.provider.enabled).length} 已启用`}
+                {overview()
+                  ? t('{{count}} 正常', { count: overview()?.service_health.healthy ?? 0 })
+                  : t('{{count}} 已启用', { count: props.data.providers().filter((item) => item.provider.enabled).length })}
               </div>
               <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">
-                {overview() ? `${overview()?.service_health.warning ?? 0} 警告 · ${overview()?.service_health.error ?? 0} 异常` : '暂无实时数据'}
+                {overview()
+                  ? t('{{warning}} 警告 · {{error}} 异常', {
+                      warning: overview()?.service_health.warning ?? 0,
+                      error: overview()?.service_health.error ?? 0,
+                    })
+                  : t('暂无实时数据')}
               </p>
             </div>
             <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">最近 24h 错误</div>
+              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('最近 24h 错误')}</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">{formatCompactInteger(anomalies().length)}</div>
-              <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">点击右侧列表可直接进入日志详情。</p>
+              <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">{t('点击右侧列表可直接进入日志详情。')}</p>
             </div>
             <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">活跃密钥</div>
+              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('活跃密钥')}</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">{formatCompactInteger(props.data.apiKeys().filter((item) => item.apiKey.enabled).length)}</div>
-              <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">当前已启用的访问密钥。</p>
+              <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">{t('当前已启用的访问密钥。')}</p>
             </div>
             <div class="md:col-span-3 pt-2">
               <A href="/upstreams">
                 <Button type="button" variant="ghost" class="w-full justify-start pl-0 hover:bg-transparent hover:text-primary">
-                  [ 查看上游 DETAILS ]
+                  {`[ ${t('查看上游详情')} ]`}
                 </Button>
               </A>
             </div>
@@ -482,7 +495,10 @@ function OverviewPage(props: { data: AppDataContext }) {
             },
             {
               title: '访问密钥',
-              description: `共 ${formatCompactInteger(props.data.apiKeys().length)} 个 · 最近 ${latestKey() ? formatDateTime(latestKey()!.id) : '暂无'}`,
+              description: t('共 {{count}} 个 · 最近 {{last}}', {
+                count: formatCompactInteger(props.data.apiKeys().length),
+                last: latestKey() ? formatDateTime(latestKey()!.id) : t('暂无'),
+              }),
               action: (
                 <A href="/keys">
                   <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0">
@@ -538,7 +554,7 @@ function OverviewPage(props: { data: AppDataContext }) {
                   fallback={
                     <TableRow class="hover:bg-transparent">
                       <TableCell colspan={5} class="text-center font-mono text-xs text-muted-foreground opacity-50 h-24">
-                        ALL SYSTEMS NOMINAL.
+                        {t('ALL SYSTEMS NOMINAL.')}
                       </TableCell>
                     </TableRow>
                   }
@@ -578,8 +594,9 @@ function OverviewPage(props: { data: AppDataContext }) {
                     <div class="min-w-0">
                       <div class="truncate text-sm font-medium text-foreground">{item.key}</div>
                       <div class="mt-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">
-                        {formatCompactInteger(item.requests)} REQ / ERR{' '}
-                        {item.requests > 0 ? `${((item.failed / item.requests) * 100).toFixed(1)}%` : '0%'}
+                        {t('REQ / ERR {{rate}}', {
+                          rate: item.requests > 0 ? `${((item.failed / item.requests) * 100).toFixed(1)}%` : '0%',
+                        })}
                       </div>
                     </div>
                     <div class="text-xl font-medium tracking-tight text-foreground">{formatCost(parseDecimal(item.cost_total_usd))}</div>
@@ -651,15 +668,15 @@ res = requests.post(
             <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">接入只需要服务地址和访问密钥。</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-6">
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">服务地址</div>
-              <code class="mt-2 block break-all text-sm font-mono text-foreground">{props.data.settings().apiBase}</code>
-            </div>
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">管理状态</div>
-              <div class="mt-2 flex items-center gap-3">
-                <StatusBadge tone={props.data.settings().adminToken.trim() ? 'normal' : 'warning'}>
-                  {props.data.settings().adminToken.trim() ? '已连接' : '未连接'}
+              <div class="border-l-2 border-primary/20 pl-4 py-1">
+                <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('服务地址')}</div>
+                <code class="mt-2 block break-all text-sm font-mono text-foreground">{props.data.settings().apiBase}</code>
+              </div>
+              <div class="border-l-2 border-primary/20 pl-4 py-1">
+                <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('管理状态')}</div>
+                <div class="mt-2 flex items-center gap-3">
+                  <StatusBadge tone={props.data.settings().adminToken.trim() ? 'normal' : 'warning'}>
+                    {props.data.settings().adminToken.trim() ? '已连接' : '未连接'}
                 </StatusBadge>
                 <span class="font-mono text-xs text-muted-foreground opacity-70">{props.data.message()}</span>
               </div>
@@ -771,7 +788,7 @@ function UsagePage(props: { data: AppDataContext }) {
 
       <StatsGrid
         items={[
-          { label: '总成本', value: formatCost(totalCost()), hint: `窗口 ${period() === 'today' ? '今日' : period() === '7d' ? '7 天' : '30 天'}` },
+          { label: '总成本', value: formatCost(totalCost()), hint: t('窗口 {{window}}', { window: period() === 'today' ? t('今日') : period() === '7d' ? t('7 天') : t('30 天') }) },
           { label: '总请求', value: formatCompactInteger(totalRequests()), hint: '当前窗口内请求总量' },
           { label: '活跃模型', value: formatCompactInteger(modelRows().length), hint: '按成本或请求排序' },
           {
@@ -816,12 +833,15 @@ function UsagePage(props: { data: AppDataContext }) {
           <CardContent class="flex flex-col gap-4">
             <Alert variant={topConsumer() && parseDecimal(topConsumer()!.cost_total_usd) > totalCost() * 0.45 ? 'destructive' : 'default'} class="rounded-none border-border/40 bg-muted/20">
               <AlertTitle class="font-mono text-[0.65rem] uppercase tracking-widest">高消耗项</AlertTitle>
-              <AlertDescription class="font-mono text-xs mt-2 opacity-80">
-                {topConsumer()
-                  ? `${topConsumer()!.key} 占用 ${((parseDecimal(topConsumer()!.cost_total_usd) / Math.max(totalCost(), 0.01)) * 100).toFixed(1)}% 成本。`
-                  : '暂无足够数据。'}
-              </AlertDescription>
-            </Alert>
+                <AlertDescription class="font-mono text-xs mt-2 opacity-80">
+                  {topConsumer()
+                    ? t('{{model}} 占用 {{percent}}% 成本。', {
+                        model: topConsumer()!.key,
+                        percent: ((parseDecimal(topConsumer()!.cost_total_usd) / Math.max(totalCost(), 0.01)) * 100).toFixed(1),
+                      })
+                    : t('暂无足够数据。')}
+                </AlertDescription>
+              </Alert>
             <Alert class="rounded-none border-border/40 bg-muted/20">
               <AlertTitle class="font-mono text-[0.65rem] uppercase tracking-widest">排查路径</AlertTitle>
               <AlertDescription class="font-mono text-xs mt-2 opacity-80">去日志页按模型和密钥筛选。</AlertDescription>
@@ -853,7 +873,7 @@ function UsagePage(props: { data: AppDataContext }) {
                   fallback={
                     <TableRow class="hover:bg-transparent">
                       <TableCell colspan={5} class="text-center font-mono text-xs text-muted-foreground opacity-50 h-24">
-                        NO USAGE DATA.
+                        {t('NO USAGE DATA.')}
                       </TableCell>
                     </TableRow>
                   }
@@ -897,7 +917,7 @@ function UsagePage(props: { data: AppDataContext }) {
                   fallback={
                     <TableRow class="hover:bg-transparent">
                       <TableCell colspan={5} class="text-center font-mono text-xs text-muted-foreground opacity-50 h-24">
-                        NO KEY USAGE DATA.
+                        {t('NO KEY USAGE DATA.')}
                       </TableCell>
                     </TableRow>
                   }
@@ -984,6 +1004,7 @@ function SettingsRoutePage(props: { data: AppDataContext }) {
 }
 
 function Root() {
+  installLocaleEffect();
   const [settings, setSettings] = createSignal<ConnectionSettings>(readSettings());
   const [snapshot, setSnapshot] = createSignal<DashboardSnapshot>(createEmptyDashboardSnapshot());
   const [providers, setProviders] = createSignal<ProviderWorkspace[]>([]);
@@ -991,7 +1012,7 @@ function Root() {
   const [prices, setPrices] = createSignal<ModelPrice[]>([]);
   const [systemConfig, setSystemConfig] = createSignal<SystemConfigResponse | null>(null);
   const [status, setStatus] = createSignal<LoadState>('idle');
-  const [message, setMessage] = createSignal('未连接后台。');
+  const [message, setMessage] = createSignal(t('未连接后台。'));
   const [refreshKey, setRefreshKey] = createSignal(0);
   const [accessMode, setAccessMode] = createSignal<ConsoleAccessMode>(
     settings().adminToken.trim() ? 'console' : 'connect',
@@ -1008,7 +1029,7 @@ function Root() {
       setApiKeys([]);
       setPrices([]);
       setSystemConfig(null);
-      setMessage('请输入管理员口令。');
+      setMessage(t('请输入管理员口令。'));
       setAccessMode('connect');
       setRefreshKey((value) => value + 1);
       setStatus('ready');
@@ -1028,7 +1049,7 @@ function Root() {
       setApiKeys(apiKeyWorkspace);
       setPrices(priceItems);
       setSystemConfig(config);
-      setMessage(successMessage ?? '已连接。');
+      setMessage(successMessage ? t(successMessage) : t('已连接。'));
       setAccessMode('console');
     } catch (error) {
       console.error('Failed to load admin console data', error);
@@ -1037,7 +1058,7 @@ function Root() {
       setApiKeys([]);
       setPrices([]);
       setSystemConfig(null);
-      setMessage(error instanceof Error ? `${error.message}；请检查服务地址和管理员口令。` : '连接失败；请检查服务地址和管理员口令。');
+      setMessage(error instanceof Error ? t('{{message}}；请检查服务地址和管理员口令。', { message: error.message }) : t('连接失败；请检查服务地址和管理员口令。'));
       setAccessMode('connect');
     } finally {
       setRefreshKey((value) => value + 1);
@@ -1062,7 +1083,7 @@ function Root() {
     onApiBaseChange: (value) => setSettings((current) => ({ ...current, apiBase: value })),
     onAdminTokenChange: (value) => setSettings((current) => ({ ...current, adminToken: value })),
     onRefresh: refreshData,
-    onMessage: setMessage,
+    onMessage: (message) => setMessage(t(message)),
   };
 
   if (accessMode() === 'connect') {

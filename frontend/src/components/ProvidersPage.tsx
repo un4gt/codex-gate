@@ -13,6 +13,7 @@ import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import { t } from '@/lib/i18n';
 import {
   addUpstreamKeyModels,
   createEndpoint,
@@ -149,12 +150,12 @@ export function ProvidersPage(props: ProvidersPageProps) {
 
   const createFormHint = createMemo(() => {
     if (!isLive()) {
-      return '请先连接后台。';
+      return t('请先连接后台。');
     }
     if (createMissingFields().length === 0) {
-      return '名称、服务地址和首个密钥会一起创建。';
+      return t('名称、服务地址和首个密钥会一起创建。');
     }
-    return `请先填写：${createMissingFields().join('、')}。`;
+    return t('请先填写：{{fields}}。', { fields: createMissingFields().map((field) => t(field)).join(', ') });
   });
 
   const [providerModels, setProviderModels] = createSignal<ProviderModel[] | null>(null);
@@ -186,7 +187,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     const healthy = props.items.filter((item) => item.provider.health?.state === 'closed' && item.provider.health.available).length;
     return [
       { label: '上游总数', value: String(props.items.length), hint: '已配置的连接目标' },
-      { label: '健康', value: String(healthy), hint: `${degraded} 警告`, tone: healthy > 0 ? 'success' : 'default' as const },
+      { label: '健康', value: String(healthy), hint: t('{{count}} 警告', { count: degraded }), tone: healthy > 0 ? 'success' : 'default' as const },
       { label: '异常', value: String(unhealthy), hint: '优先检查这些目标', tone: unhealthy > 0 ? 'warning' : 'success' as const },
       { label: '节点数', value: String(totalEndpoints), hint: '全部节点' },
     ];
@@ -259,7 +260,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       await Promise.all(work);
       setCreateOpen(false);
       resetCreateForm();
-      await props.onRefresh(`上游 ${payload.name} 已创建。`);
+      await props.onRefresh(t('上游 {{name}} 已创建。', { name: payload.name }));
       setSelectedProviderId(providerId);
     } catch (error) {
       console.error('Failed to create provider', error);
@@ -289,7 +290,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setBusy(`provider-${item.provider.id}`);
     try {
       await updateProvider(props.settings, item.provider.id, payload);
-      await props.onRefresh(`上游 ${payload.name} 已更新。`);
+      await props.onRefresh(t('上游 {{name}} 已更新。', { name: payload.name ?? item.provider.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新上游失败。');
     } finally {
@@ -315,7 +316,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setBusy(`endpoint-create-${item.provider.id}`);
     try {
       await createEndpoint(props.settings, item.provider.id, payload);
-      await props.onRefresh(`目标 ${payload.name} 已创建。`);
+      await props.onRefresh(t('目标 {{name}} 已创建。', { name: payload.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建目标失败。');
     } finally {
@@ -337,7 +338,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setBusy(`endpoint-${endpointId}`);
     try {
       await updateEndpoint(props.settings, endpointId, payload);
-      await props.onRefresh(`目标 ${payload.name} 已更新。`);
+      await props.onRefresh(t('目标 {{name}} 已更新。', { name: payload.name ?? '' }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新目标失败。');
     } finally {
@@ -363,7 +364,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setBusy(`key-create-${item.provider.id}`);
     try {
       await createProviderKey(props.settings, item.provider.id, payload);
-      await props.onRefresh(`上游密钥 ${payload.name} 已创建。`);
+      await props.onRefresh(t('上游密钥 {{name}} 已创建。', { name: payload.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建上游密钥失败。');
     } finally {
@@ -385,7 +386,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setBusy(`key-${keyId}`);
     try {
       await updateProviderKey(props.settings, keyId, payload);
-      await props.onRefresh(`上游密钥 ${payload.name} 已更新。`);
+      await props.onRefresh(t('上游密钥 {{name}} 已更新。', { name: payload.name ?? '' }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新上游密钥失败。');
     } finally {
@@ -413,7 +414,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return;
     }
     await navigator.clipboard.writeText(value);
-    props.onMessage(`${label} 已复制。`);
+    props.onMessage(t('{{label}} 已复制。', { label: t(label) }));
   };
 
   createEffect(() => {
@@ -570,9 +571,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
         }
 
         if (view.status.state === 'completed') {
-          await props.onRefresh(`Codex OAuth 已完成，已创建密钥 #${view.status.key_id}。`);
+          await props.onRefresh(t('Codex OAuth 已完成，已创建密钥 #{{id}}。', { id: view.status.key_id ?? '' }));
         } else if (view.status.state === 'failed') {
-          props.onMessage(`Codex OAuth 失败：${view.status.message}`);
+          props.onMessage(t('Codex OAuth 失败：{{message}}', { message: view.status.message ?? '' }));
         }
       } catch (error) {
         if (cancelled) return;
@@ -594,7 +595,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       const models = await syncUpstreamKeyModels(props.settings, upstreamKeyId);
       setUpstreamKeyModels(models);
       setUpstreamKeyModelsError(null);
-      props.onMessage(`已同步 ${models.length} 个密钥模型。`);
+      props.onMessage(t('已同步 {{count}} 个密钥模型。', { count: models.length }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '同步密钥模型失败。');
     } finally {
@@ -616,7 +617,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       setUpstreamKeyModels(updated);
       setUpstreamKeyModelsError(null);
       setUpstreamKeyModelsDraft('');
-      props.onMessage(`已写入 ${models.length} 个模型。`);
+      props.onMessage(t('已写入 {{count}} 个模型。', { count: models.length }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '写入密钥模型失败。');
     } finally {
@@ -646,7 +647,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
 
   const removeKeyModel = async (model: UpstreamKeyModel) => {
     if (!ensureLive()) return;
-    if (!window.confirm(`确认删除密钥模型 ${model.model_name}？`)) return;
+    if (!window.confirm(t('确认删除密钥模型 {{name}}？', { name: model.model_name }))) return;
 
     setBusy(`key-model-${model.id}`);
     try {
@@ -674,7 +675,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         }
         return next;
       });
-      props.onMessage(`已同步 ${models.length} 个模型。`);
+      props.onMessage(t('已同步 {{count}} 个模型。', { count: models.length }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '同步模型失败。');
     } finally {
@@ -748,7 +749,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const removeModel = async (model: ProviderModel) => {
     const item = selected();
     if (!item || !ensureLive()) return;
-    if (!window.confirm(`确认删除模型 ${model.upstream_model}？`)) return;
+    if (!window.confirm(t('确认删除模型 {{name}}？', { name: model.upstream_model }))) return;
 
     setBusy(`provider-model-${model.id}`);
     try {
@@ -965,15 +966,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
           <div class="grid gap-4 md:grid-cols-3">
             <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
               <Checkbox name="enabled" checked />
-              <span>创建后启用</span>
+              <span>{t('创建后启用')}</span>
             </label>
             <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
               <Checkbox name="supports_include_usage" checked />
-              <span>补充用量</span>
+              <span>{t('补充用量')}</span>
             </label>
             <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
               <Checkbox name="websocket_enabled" checked={createProviderType() === 'openai_codex_oauth'} />
-              <span>WebSocket</span>
+              <span>{t('WebSocket')}</span>
             </label>
           </div>
           <div class="border border-border/40 bg-transparent p-4 text-sm text-muted-foreground font-mono">
@@ -1014,21 +1015,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <div class="flex flex-col gap-8">
                 <div class="grid gap-6 md:grid-cols-4 border-b border-border/40 pb-8">
                   <div class="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary">
-                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">状态</div>
+                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('状态')}</div>
                       <div class="mt-2">
                         <StatusBadge tone={health.tone}>{health.label}</StatusBadge>
                       </div>
                   </div>
                   <div class="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">目标</div>
+                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('目标')}</div>
                       <div class="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.endpoints.length}</div>
                   </div>
                   <div class="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">上游密钥</div>
+                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('上游密钥')}</div>
                       <div class="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.keys.length}</div>
                   </div>
                   <div class="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">最近成功</div>
+                      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('最近成功')}</div>
                       <div class="mt-2 font-mono text-sm tracking-tight pt-1 text-muted-foreground">
                         {item.provider.health?.last_success_at_ms ? formatDateTime(item.provider.health.last_success_at_ms) : '—'}
                       </div>
@@ -1038,7 +1039,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                 <form class="flex flex-col gap-6" onSubmit={(event) => void submitProviderUpdate(event, item)}>
                   <div class="flex items-center gap-3 border-b border-border/40 pb-4">
                     <ShieldCheck class="size-4 opacity-70" />
-                    <h3 class="text-base font-medium tracking-tight text-foreground uppercase">上游信息</h3>
+                    <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('上游信息')}</h3>
                   </div>
                   <FieldGroup class="grid gap-6 md:grid-cols-2 pt-4">
                     <Field>
@@ -1069,15 +1070,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   <div class="grid gap-4 md:grid-cols-3">
                     <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
                       <Checkbox name="provider_enabled" checked={item.provider.enabled} />
-                      <span>启用上游</span>
+                      <span>{t('启用上游')}</span>
                     </label>
                     <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
                       <Checkbox name="supports_include_usage" checked={item.provider.supports_include_usage} />
-                      <span>补充用量信息</span>
+                      <span>{t('补充用量信息')}</span>
                     </label>
                     <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
                       <Checkbox name="provider_websocket_enabled" checked={item.provider.websocket_enabled} />
-                      <span>启用 WebSocket 传输</span>
+                      <span>{t('启用 WebSocket 传输')}</span>
                     </label>
                   </div>
                   <div class="flex justify-end pt-4 border-t border-border/40 mt-2">
@@ -1100,18 +1101,18 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           START LOGIN
                         </Button>
                         <Show when={codexOauthView()?.status.state === 'pending'}>
-                          <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70 animate-pulse">WAITING FOR AUTHORIZATION...</span>
+                          <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70 animate-pulse">{t('WAITING FOR AUTHORIZATION...')}</span>
                         </Show>
                       </div>
 
                       <Show
                         when={codexOauthView() || codexOauthStart()}
-                        fallback={<p class="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-widest border-l-2 border-primary/20 pl-4 py-2 mt-4">Click START LOGIN to open authorization in browser.</p>}
+                        fallback={<p class="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-widest border-l-2 border-primary/20 pl-4 py-2 mt-4">{t('Click START LOGIN to open authorization in browser.')}</p>}
                       >
                         <div class="grid gap-6 border border-border/40 bg-muted/5 p-6 text-sm">
                           <div class="flex flex-col gap-2">
                             <div class="flex items-center justify-between">
-                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">登录地址</span>
+                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('登录地址')}</span>
                               <Button
                                 type="button"
                                 size="sm"
@@ -1137,21 +1138,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
 
                           <div class="grid grid-cols-2 gap-6 pt-4 border-t border-border/40">
                             <div class="flex flex-col gap-2">
-                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">状态</span>
+                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('状态')}</span>
                               <span class="font-mono text-sm tracking-tight text-foreground opacity-90">
                                 {(() => {
                                   const view = codexOauthView();
                                   if (!view) return '—';
-                                  if (view.status.state === 'completed') return `COMPLETED (KEY #${view.status.key_id})`;
-                                  if (view.status.state === 'failed') return `FAILED: ${view.status.message}`;
-                                  if (view.status.state === 'pending') return 'PENDING';
+                                  if (view.status.state === 'completed') return t('COMPLETED (KEY #{{id}})', { id: view.status.key_id ?? '' });
+                                  if (view.status.state === 'failed') return t('FAILED: {{message}}', { message: view.status.message ?? '' });
+                                  if (view.status.state === 'pending') return t('PENDING');
                                   return '—';
                                 })()}
                               </span>
                             </div>
 
                             <div class="flex flex-col gap-2">
-                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">过期时间</span>
+                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('过期时间')}</span>
                               <span class="font-mono text-sm tracking-tight text-foreground opacity-90">
                                 {(() => {
                                   const expiresAt = codexOauthView()?.expires_at_ms ?? codexOauthStart()?.expires_at_ms;
@@ -1170,7 +1171,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   <div class="flex items-center justify-between border-b border-border/40 pb-4">
                     <div class="flex items-center gap-3">
                       <Stethoscope class="size-4 opacity-70" />
-                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">目标</h3>
+                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('目标')}</h3>
                     </div>
                   </div>
                   <For each={item.endpoints}>
@@ -1211,13 +1212,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
                               <FieldLabel>权重</FieldLabel>
                               <Input name={`endpoint_weight_${endpoint.id}`} type="number" value={String(endpoint.weight)} class="bg-background" />
                               <FieldDescription class="mt-2 opacity-60">
-                                最近延迟 {endpoint.health?.latency_ewma_ms ? formatMs(endpoint.health.latency_ewma_ms) : '—'}
+                                 {t('最近延迟 {{value}}', { value: endpoint.health?.latency_ewma_ms ? formatMs(endpoint.health.latency_ewma_ms) : '—' })}
                               </FieldDescription>
                             </Field>
                           </FieldGroup>
                           <label class="flex items-center gap-3 border border-border/40 bg-background px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors mt-2">
                             <Checkbox name={`endpoint_enabled_${endpoint.id}`} checked={endpoint.enabled} />
-                            <span>启用目标</span>
+                            <span>{t('启用目标')}</span>
                           </label>
                         </form>
                       );
@@ -1225,7 +1226,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </For>
 
                   <form class="flex flex-col gap-6 border border-dashed border-border/60 bg-transparent p-6 mt-4" onSubmit={(event) => void submitEndpointCreate(event, item)}>
-                    <h4 class="text-sm font-medium tracking-widest uppercase font-mono text-foreground mb-2">添加目标</h4>
+                    <h4 class="text-sm font-medium tracking-widest uppercase font-mono text-foreground mb-2">{t('添加目标')}</h4>
                     <FieldGroup class="grid gap-6 md:grid-cols-2">
                       <Field>
                         <FieldLabel>名称</FieldLabel>
@@ -1249,7 +1250,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <div class="flex items-center justify-between border-t border-border/40 pt-6 mt-2">
                       <label class="flex items-center gap-3 cursor-pointer">
                         <Checkbox name="endpoint_enabled" checked />
-                        <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">创建后启用</span>
+                        <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">{t('创建后启用')}</span>
                       </label>
                       <Button type="submit" disabled={busy() === `endpoint-create-${item.provider.id}`} class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-6">
                         {busy() === `endpoint-create-${item.provider.id}` ? 'ADDING...' : 'ADD ENDPOINT'}
@@ -1262,7 +1263,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   <div class="flex items-center justify-between border-b border-border/40 pb-4">
                     <div class="flex items-center gap-3">
                       <AlertCircle class="size-4 opacity-70" />
-                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">上游密钥</h3>
+                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('上游密钥')}</h3>
                     </div>
                   </div>
                   <For each={item.keys}>
@@ -1301,7 +1302,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           </FieldGroup>
                           <label class="flex items-center gap-3 border border-border/40 bg-background px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors mt-2">
                             <Checkbox name={`upstream_key_enabled_${key.id}`} checked={key.enabled} />
-                            <span>启用密钥</span>
+                            <span>{t('启用密钥')}</span>
                           </label>
                         </form>
                       );
@@ -1309,7 +1310,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </For>
 
                   <form class="flex flex-col gap-6 border border-dashed border-border/60 bg-transparent p-6 mt-4" onSubmit={(event) => void submitKeyCreate(event, item)}>
-                    <h4 class="text-sm font-medium tracking-widest uppercase font-mono text-foreground mb-2">添加上游密钥</h4>
+                    <h4 class="text-sm font-medium tracking-widest uppercase font-mono text-foreground mb-2">{t('添加上游密钥')}</h4>
                     <FieldGroup class="grid gap-6 md:grid-cols-2">
                       <Field>
                         <FieldLabel>名称</FieldLabel>
@@ -1333,7 +1334,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <div class="flex items-center justify-between border-t border-border/40 pt-6 mt-2">
                       <label class="flex items-center gap-3 cursor-pointer">
                         <Checkbox name="upstream_key_enabled" checked />
-                        <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">创建后启用</span>
+                        <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">{t('创建后启用')}</span>
                       </label>
                       <Button type="submit" disabled={busy() === `key-create-${item.provider.id}`} class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-6">
                         {busy() === `key-create-${item.provider.id}` ? 'ADDING...' : 'ADD KEY'}
@@ -1346,7 +1347,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   <div class="flex items-center justify-between border-b border-border/40 pb-4">
                     <div class="flex items-center gap-3">
                       <ShieldCheck class="size-4 opacity-70" />
-                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">密钥模型限制</h3>
+                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('密钥模型限制')}</h3>
                     </div>
                   </div>
 
@@ -1377,7 +1378,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             disabled={item.keys.length === 0}
                             class="w-[240px]"
                           >
-                            <option value="">选择密钥…</option>
+                            <option value="">{t('选择密钥…')}</option>
                             <For each={item.keys}>{(key) => <option value={String(key.id)}>{key.name} (#{key.id})</option>}</For>
                           </Select>
                           <Button
@@ -1410,8 +1411,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           when={item.keys.length > 0}
                           fallback={
                             <div class="border border-dashed border-border/60 bg-transparent px-4 py-6 text-sm text-muted-foreground opacity-70">
-                              还没有上游密钥，请先创建。
-                            </div>
+                                  {t('还没有上游密钥，请先创建。')}
+                                </div>
                           }
                         >
                           <div class="flex flex-col gap-4 border border-dashed border-border/60 bg-transparent p-6">
@@ -1451,7 +1452,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             if (keyId === null) {
                               return (
                                 <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                  请选择一个密钥。
+                                  {t('请选择一个密钥。')}
                                 </div>
                               );
                             }
@@ -1468,7 +1469,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             if (models.length === 0) {
                               return (
                                 <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                  当前未限制模型；同步或添加后将按列表限制。
+                                  {t('当前未限制模型；同步或添加后将按列表限制。')}
                                 </div>
                               );
                             }
@@ -1526,7 +1527,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   <div class="flex items-center justify-between border-b border-border/40 pb-4">
                     <div class="flex items-center gap-3">
                       <RefreshCw class="size-4 opacity-70" />
-                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">模型</h3>
+                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('模型')}</h3>
                     </div>
                   </div>
 
@@ -1560,8 +1561,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <Show when={gatewayModelPoliciesError()}>
                           {(message) => (
                             <div class="border-b border-border/40 bg-background px-6 py-4 font-mono text-xs text-muted-foreground opacity-80">
-                              模型开关：{message()}
-                            </div>
+                               {t('模型开关：{{message}}', { message: message() })}
+                             </div>
                           )}
                         </Show>
 
@@ -1670,9 +1671,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <CardTitle class="text-lg font-medium tracking-tight">最近测试结果</CardTitle>
                       </CardHeader>
                       <CardContent class="grid gap-2 font-mono text-sm border-t border-border/40 pt-4">
-                        <div>地址：{result().url}</div>
-                        <div>状态：{result().status ?? '连接失败'}</div>
-                        <div>消息：{result().message ?? '无返回内容'}</div>
+                        <div>{t('地址：{{url}}', { url: result().url })}</div>
+                        <div>{t('状态：{{status}}', { status: result().status ?? t('连接失败') })}</div>
+                        <div>{t('消息：{{message}}', { message: result().message ?? t('无返回内容') })}</div>
                       </CardContent>
                     </Card>
                   )}

@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import { t } from '@/lib/i18n';
 import { createPrice } from '../lib/api';
 import { formatDateTime, formatMs, formatRoutingStrategy } from '../lib/format';
 import type { ConnectionSettings, CreatePriceInput, ModelPrice, ProviderWorkspace, SystemConfigResponse } from '../lib/types';
@@ -72,7 +73,7 @@ export function SettingsPage(props: SettingsPageProps) {
     setBusy(true);
     try {
       await createPrice(props.settings, payload);
-      await props.onRefresh(`价格 ${payload.model_name} 已写入。`);
+      await props.onRefresh(t('价格 {{name}} 已写入。', { name: payload.model_name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '写入价格失败。');
     } finally {
@@ -146,7 +147,7 @@ export function SettingsPage(props: SettingsPageProps) {
       >
         <div class="grid gap-4 md:grid-cols-2">
           <InfoTile label="分配策略" value={formatRoutingStrategy(props.systemConfig?.routing.endpoint_selector_strategy)} />
-          <InfoTile label="返回用量" value={props.systemConfig?.routing.inject_include_usage ? '开启' : '关闭'} />
+          <InfoTile label="返回用量" value={props.systemConfig?.routing.inject_include_usage ? '开启' : '已关闭'} />
           <InfoTile label="上游缓存" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_ttl_ms) : '—'} />
           <InfoTile label="缓存宽限期" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_stale_grace_ms) : '—'} />
           <InfoTile label="密钥缓存" value={props.systemConfig ? formatMs(props.systemConfig.routing.api_key_cache_ttl_ms) : '—'} />
@@ -178,7 +179,7 @@ export function SettingsPage(props: SettingsPageProps) {
           <InfoTile label="统计保留" value={props.systemConfig ? `${props.systemConfig.retention.stats_daily_retention_days} 天` : '—'} />
           <InfoTile label="清理间隔" value={props.systemConfig ? formatMs(props.systemConfig.retention.cleanup_interval_ms) : '—'} />
           <InfoTile label="删除批次" value={props.systemConfig ? String(props.systemConfig.retention.delete_batch) : '—'} />
-          <InfoTile label="归档" value={props.systemConfig?.retention.archive_enabled ? '开启' : '关闭'} />
+          <InfoTile label="归档" value={props.systemConfig?.retention.archive_enabled ? '开启' : '已关闭'} />
           <InfoTile label="归档目录" value={props.systemConfig?.retention.archive_dir ?? '—'} />
         </div>
       </SettingsSection>
@@ -203,7 +204,7 @@ export function SettingsPage(props: SettingsPageProps) {
                       name="provider_id"
                       class="flex h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground"
                     >
-                      <option value="">全局默认</option>
+                      <option value="">{t('全局默认')}</option>
                       <For each={props.providers}>
                         {(item) => <option value={item.provider.id}>{item.provider.name}</option>}
                       </For>
@@ -258,7 +259,7 @@ export function SettingsPage(props: SettingsPageProps) {
                     fallback={
                       <TableRow>
                         <TableCell colspan={3} class="text-center text-muted-foreground">
-                          暂无价格项。
+                          {t('暂无价格项。')}
                         </TableCell>
                       </TableRow>
                     }
@@ -267,7 +268,7 @@ export function SettingsPage(props: SettingsPageProps) {
                       {(item) => (
                         <TableRow>
                           <TableCell>{item.model_name}</TableCell>
-                          <TableCell>{item.provider_id ? props.providers.find((provider) => provider.provider.id === item.provider_id)?.provider.name ?? `#${item.provider_id}` : '全局默认'}</TableCell>
+                          <TableCell>{item.provider_id ? props.providers.find((provider) => provider.provider.id === item.provider_id)?.provider.name ?? `#${item.provider_id}` : t('全局默认')}</TableCell>
                           <TableCell>{formatDateTime(item.updated_at_ms)}</TableCell>
                         </TableRow>
                       )}
@@ -317,8 +318,8 @@ function SettingsSection(props: {
 function InfoTile(props: { label: string; value: string }) {
   return (
     <div class="rounded-xl border border-border/70 bg-muted/25 p-4">
-      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{props.label}</div>
-      <div class="mt-2 break-all text-sm text-foreground">{props.value}</div>
+      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t(props.label)}</div>
+      <div class="mt-2 break-all text-sm text-foreground">{t(props.value)}</div>
     </div>
   );
 }

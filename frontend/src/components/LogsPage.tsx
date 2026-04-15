@@ -10,6 +10,7 @@ import { EmptyState } from '@/components/console/EmptyState';
 import { FilterBar } from '@/components/console/FilterBar';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import { t } from '@/lib/i18n';
 import { loadRequestLogs } from '../lib/api';
 import { formatCompactInteger, formatCost, formatDateTime, formatModelName, formatMs, formatRequestType, parseDecimal } from '../lib/format';
 import type { ApiKeyWorkspace, ConnectionSettings, ProviderWorkspace, RequestLogRow } from '../lib/types';
@@ -146,11 +147,11 @@ export function LogsPage(props: LogsPageProps) {
 
   const copyField = async (value: string, label: string) => {
     if (!navigator?.clipboard) {
-      props.onMessage('当前环境不支持复制。');
+      props.onMessage(t('当前环境不支持复制。'));
       return;
     }
     await navigator.clipboard.writeText(value);
-    props.onMessage(`${label} 已复制。`);
+    props.onMessage(t('{{label}} 已复制。', { label: t(label) }));
   };
 
   return (
@@ -166,13 +167,13 @@ export function LogsPage(props: LogsPageProps) {
               onInput={(event) => setFilters((current) => ({ ...current, query: event.currentTarget.value }))}
             />
             <Select value={filters().statusClass} onChange={(event) => setFilters((current) => ({ ...current, statusClass: event.currentTarget.value }))}>
-              <option value="">全部状态</option>
+              <option value="">{t('全部状态')}</option>
               <option value="4">4xx</option>
               <option value="5">5xx</option>
               <option value="2">2xx</option>
             </Select>
             <Select value={filters().apiKeyId} onChange={(event) => setFilters((current) => ({ ...current, apiKeyId: event.currentTarget.value }))}>
-              <option value="">全部密钥</option>
+              <option value="">{t('全部密钥')}</option>
               <For each={props.apiKeys}>
                 {(item) => <option value={item.apiKey.id}>{item.apiKey.name}</option>}
               </For>
@@ -183,22 +184,22 @@ export function LogsPage(props: LogsPageProps) {
               onInput={(event) => setFilters((current) => ({ ...current, model: event.currentTarget.value }))}
             />
             <Select value={filters().apiFormat} onChange={(event) => setFilters((current) => ({ ...current, apiFormat: event.currentTarget.value as LogFilters['apiFormat'] }))}>
-              <option value="">全部请求类型</option>
-              <option value="chat_completions">对话请求</option>
-              <option value="responses">响应请求</option>
+              <option value="">{t('全部请求类型')}</option>
+              <option value="chat_completions">{t('对话请求')}</option>
+              <option value="responses">{t('响应请求')}</option>
             </Select>
           </>
         }
         advanced={
           <>
             <Select value={filters().providerId} onChange={(event) => setFilters((current) => ({ ...current, providerId: event.currentTarget.value, endpointId: '' }))}>
-              <option value="">全部上游</option>
+              <option value="">{t('全部上游')}</option>
               <For each={props.providers}>
                 {(item) => <option value={item.provider.id}>{item.provider.name}</option>}
               </For>
             </Select>
             <Select value={filters().endpointId} onChange={(event) => setFilters((current) => ({ ...current, endpointId: event.currentTarget.value }))}>
-              <option value="">全部目标</option>
+              <option value="">{t('全部目标')}</option>
               <For each={endpointOptions()}>{(item) => <option value={item.value}>{item.label}</option>}</For>
             </Select>
             <Input value={filters().durationMin} placeholder="延迟下限 ms" onInput={(event) => setFilters((current) => ({ ...current, durationMin: event.currentTarget.value }))} />
@@ -233,7 +234,7 @@ export function LogsPage(props: LogsPageProps) {
                 <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">默认按最近时间排序，优先暴露错误请求。</CardDescription>
               </div>
               <div class="flex gap-2">
-                <StatusBadge tone={errorCount() > 0 ? 'warning' : 'normal'}>{`${errorCount()} 条异常`}</StatusBadge>
+                <StatusBadge tone={errorCount() > 0 ? 'warning' : 'normal'}>{t('{{count}} 条异常', { count: errorCount() })}</StatusBadge>
                 <BadgeSummary label="总数" value={filteredRows().length} />
               </div>
             </div>
@@ -245,12 +246,12 @@ export function LogsPage(props: LogsPageProps) {
             >
           <div class="logs-table">
             <div class="hidden xl:grid gap-4 px-4 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20 py-3 mb-2" style={{ 'grid-template-columns': 'minmax(160px, 1.15fr) minmax(180px, 1.1fr) minmax(120px, 0.8fr) minmax(160px, 1fr) minmax(140px, 0.85fr) minmax(130px, 0.82fr)' }}>
-              <div>时间</div>
-              <div>模型</div>
-              <div>状态</div>
-              <div>耗时</div>
-              <div>用量</div>
-              <div>密钥</div>
+              <div>{t('时间')}</div>
+              <div>{t('模型')}</div>
+              <div>{t('状态')}</div>
+              <div>{t('耗时')}</div>
+              <div>{t('用量')}</div>
+              <div>{t('密钥')}</div>
             </div>
             <Show
               when={filteredRows().length > 0}
@@ -299,12 +300,12 @@ export function LogsPage(props: LogsPageProps) {
           </CardHeader>
           <CardContent class="flex flex-col gap-6 border-t border-border/40 pt-6">
             <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">默认视角</div>
-              <p class="mt-2 text-sm text-foreground opacity-90">先看 4xx/5xx，再按模型或密钥缩小范围。</p>
+              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('默认视角')}</div>
+              <p class="mt-2 text-sm text-foreground opacity-90">{t('先看 4xx/5xx，再按模型或密钥缩小范围。')}</p>
             </div>
             <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">常用筛选</div>
-              <p class="mt-2 text-sm text-foreground opacity-90">状态、模型、密钥、延迟区间、用量区间、成本区间。</p>
+              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('常用筛选')}</div>
+              <p class="mt-2 text-sm text-foreground opacity-90">{t('状态、模型、密钥、延迟区间、用量区间、成本区间。')}</p>
             </div>
           </CardContent>
         </Card>
@@ -380,7 +381,7 @@ export function LogsPage(props: LogsPageProps) {
 function BadgeSummary(props: { label: string; value: number }) {
   return (
     <div class="border border-border bg-transparent px-3 py-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
-      {props.label} {formatCompactInteger(props.value)}
+      {t(props.label)} {formatCompactInteger(props.value)}
     </div>
   );
 }
@@ -389,7 +390,7 @@ function MetricCard(props: { label: string; value: string; badge?: any }) {
   return (
     <div class="flex flex-col gap-1 pr-6 border-r border-border/40 last:border-r-0">
       <div class="flex items-center justify-between">
-        <span class="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground">{props.label}</span>
+        <span class="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground">{t(props.label)}</span>
       </div>
       <Show when={props.badge} fallback={<div class="mt-2 text-2xl font-medium tracking-tight text-foreground">{props.value}</div>}>
         <div class="mt-2">{props.badge}</div>
@@ -402,7 +403,7 @@ function DetailItem(props: { label: string; value: string; onCopy: () => void })
   return (
     <div class="flex flex-col gap-2 border-b border-r border-border/40 p-4 relative group hover:bg-muted/10 transition-colors">
       <div class="flex items-center justify-between gap-2">
-        <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{props.label}</span>
+        <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t(props.label)}</span>
       </div>
       <div class="break-all font-mono text-sm text-foreground pr-8 truncate" title={props.value}>{props.value}</div>
       <Button type="button" size="icon" variant="ghost" class="absolute right-2 bottom-2 size-6 opacity-0 group-hover:opacity-100 transition-opacity h-auto" onClick={props.onCopy}>

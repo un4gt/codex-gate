@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { t } from '@/lib/i18n';
 import { createPrice } from '../lib/api';
 import { formatDateTime } from '../lib/format';
 import type { ConnectionSettings, CreatePriceInput, ModelPrice, ProviderWorkspace } from '../lib/types';
@@ -28,7 +29,7 @@ function parseOptionalNumber(formData: FormData, key: string): number | null {
   if (!raw) return null;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`${key} 需要是大于等于 0 的数字。`);
+    throw new Error(t('{{key}} 需要是大于等于 0 的数字。', { key }));
   }
   return parsed;
 }
@@ -42,10 +43,10 @@ function formatUnitCost(value: unknown): string {
 function SummaryTile(props: { label: string; value: string; hint?: string }) {
   return (
     <div class="rounded-2xl border border-border bg-muted/50 p-4">
-      <div class="text-[0.72rem] uppercase tracking-[0.22em] text-muted-foreground">{props.label}</div>
+      <div class="text-[0.72rem] uppercase tracking-[0.22em] text-muted-foreground">{t(props.label)}</div>
       <div class="mt-2 text-2xl font-semibold tracking-tight text-foreground">{props.value}</div>
       <Show when={props.hint}>
-        <p class="mt-2 text-sm leading-6 text-muted-foreground">{props.hint}</p>
+        <p class="mt-2 text-sm leading-6 text-muted-foreground">{t(props.hint!)}</p>
       </Show>
     </div>
   );
@@ -120,7 +121,11 @@ export function PricesPage(props: PricesPageProps) {
     try {
       await createPrice(props.settings, payload);
       form.reset();
-      await props.onRefresh(`价格 ${payload.model_name} 已写入${payload.provider_id ? '上游作用域' : '全局作用域'}。`);
+      await props.onRefresh(
+        t(payload.provider_id ? '价格 {{name}} 已写入上游作用域。' : '价格 {{name}} 已写入全局作用域。', {
+          name: payload.model_name,
+        }),
+      );
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建价格失败。');
     } finally {
@@ -134,7 +139,7 @@ export function PricesPage(props: PricesPageProps) {
         <CardHeader>
           <div class="flex items-center justify-between gap-3">
             <div>
-              <p class="panel__eyebrow">价格</p>
+              <p class="panel__eyebrow">{t('价格')}</p>
               <CardTitle>模型价格与成本换算</CardTitle>
             </div>
             <Badge variant="success">已生效</Badge>
@@ -156,7 +161,7 @@ export function PricesPage(props: PricesPageProps) {
               <Field>
                 <FieldLabel>作用范围</FieldLabel>
                 <Select name="provider_id" value="">
-                  <option value="">全局默认</option>
+                  <option value="">{t('全局默认')}</option>
                   <For each={props.providers}>{(item) => <option value={item.provider.id}>{item.provider.name}</option>}</For>
                 </Select>
               </Field>
@@ -199,7 +204,7 @@ export function PricesPage(props: PricesPageProps) {
         <CardHeader>
           <div class="flex items-center justify-between gap-3">
             <div>
-              <p class="panel__eyebrow">价格结果</p>
+              <p class="panel__eyebrow">{t('价格结果')}</p>
               <CardTitle>当前可用价格项</CardTitle>
             </div>
             <Badge variant="outline">上游优先，全局兜底</Badge>
@@ -207,7 +212,7 @@ export function PricesPage(props: PricesPageProps) {
           <CardDescription>同一上游和模型只展示最新版本，全局默认价格用于兜底。</CardDescription>
         </CardHeader>
         <CardContent>
-          <Show when={sortedItems().length > 0} fallback={<div class="empty-state">当前还没有价格项。</div>}>
+          <Show when={sortedItems().length > 0} fallback={<div class="empty-state">{t('当前还没有价格项。')}</div>}>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -227,7 +232,7 @@ export function PricesPage(props: PricesPageProps) {
                       <TableCell class="font-medium text-foreground">{item.model_name}</TableCell>
                       <TableCell>
                         <Badge variant={item.provider_id === null ? 'outline' : 'success'}>
-                          {item.provider_id === null ? '全局默认' : providerNameMap().get(item.provider_id) ?? `上游 #${item.provider_id}`}
+                          {item.provider_id === null ? t('全局默认') : providerNameMap().get(item.provider_id) ?? t('上游 #{{id}}', { id: item.provider_id })}
                         </Badge>
                       </TableCell>
                       <TableCell>{formatUnitCost(item.price_data.input_cost_per_token)}</TableCell>

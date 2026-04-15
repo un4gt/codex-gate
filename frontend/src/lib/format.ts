@@ -1,34 +1,60 @@
-export const integerFormatter = new Intl.NumberFormat('zh-CN', {
-  maximumFractionDigits: 0,
-});
+import { getIntlLocale, t } from '@/lib/i18n';
 
-export const decimalFormatter = new Intl.NumberFormat('zh-CN', {
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 2,
-});
+interface FormatterBundle {
+  integer: Intl.NumberFormat;
+  decimal: Intl.NumberFormat;
+  dateTime: Intl.DateTimeFormat;
+}
+
+const formatterCache = new Map<string, FormatterBundle>();
+
+function getFormatters() {
+  const locale = getIntlLocale();
+  const cached = formatterCache.get(locale);
+  if (cached) return cached;
+
+  const bundle: FormatterBundle = {
+    integer: new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }),
+    decimal: new Intl.NumberFormat(locale, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }),
+    dateTime: new Intl.DateTimeFormat(locale, {
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+  };
+
+  formatterCache.set(locale, bundle);
+  return bundle;
+}
 
 export function formatCompactInteger(value: number): string {
+  const { integer, decimal } = getFormatters();
   if (Math.abs(value) >= 1_000_000_000) {
-    return `${decimalFormatter.format(value / 1_000_000_000)}B`;
+    return `${decimal.format(value / 1_000_000_000)}B`;
   }
   if (Math.abs(value) >= 1_000_000) {
-    return `${decimalFormatter.format(value / 1_000_000)}M`;
+    return `${decimal.format(value / 1_000_000)}M`;
   }
   if (Math.abs(value) >= 1_000) {
-    return `${decimalFormatter.format(value / 1_000)}k`;
+    return `${decimal.format(value / 1_000)}k`;
   }
-  return integerFormatter.format(value);
+  return integer.format(value);
 }
 
 export function formatCost(value: number): string {
-  return `$${decimalFormatter.format(value)}`;
+  return `$${getFormatters().decimal.format(value)}`;
 }
 
 export function formatMs(value: number): string {
+  const { decimal, integer } = getFormatters();
   if (value >= 1000) {
-    return `${decimalFormatter.format(value / 1000)}s`;
+    return `${decimal.format(value / 1000)}s`;
   }
-  return `${integerFormatter.format(value)}ms`;
+  return `${integer.format(value)}ms`;
 }
 
 export function formatDate(date: Date): string {
@@ -43,12 +69,7 @@ export function formatDateKey(date: Date): string {
 }
 
 export function formatDateTime(timestampMs: number): string {
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(timestampMs));
+  return getFormatters().dateTime.format(new Date(timestampMs));
 }
 
 export function formatDateTimeLocalInput(timestampMs: number | null | undefined): string {
@@ -77,18 +98,18 @@ export function parseDecimal(value: string | null | undefined): number {
 
 export function formatModelName(value: string | null | undefined): string {
   const trimmed = value?.trim();
-  return trimmed ? trimmed : '未识别';
+  return trimmed ? trimmed : t('未识别');
 }
 
 export function formatRequestType(value: string | null | undefined): string {
-  if (value === 'responses') return '响应请求';
-  if (value === 'chat_completions') return '对话请求';
+  if (value === 'responses') return t('响应请求');
+  if (value === 'chat_completions') return t('对话请求');
   return '—';
 }
 
 export function formatRoutingStrategy(value: string | null | undefined): string {
-  if (value === 'weighted') return '加权';
-  if (value === 'priority') return '优先级';
+  if (value === 'weighted') return t('加权');
+  if (value === 'priority') return t('优先级策略');
   const trimmed = value?.trim();
   return trimmed ? trimmed : '—';
 }
