@@ -4,45 +4,47 @@
 
 ## 部署方式
 
-### 1) Docker 部署（推荐）
+### 1) Docker Compose 快速部署（使用已发布镜像）
 
-1. 准备环境变量：
-   ```bash
-   cp .env.example .env
-   ```
-2. 至少设置：
-   - `ADMIN_TOKEN`（必填）
-   - `MASTER_KEY`（建议单独设置，不与 `ADMIN_TOKEN` 共用）
-3. 启动服务：
-   ```bash
-   docker compose up -d --build
-   ```
-4. 检查状态：
-   ```bash
-   docker compose ps
-   docker compose logs -f codex-gate
-   ```
-5. 健康检查：
-   ```bash
-   curl -fsS http://127.0.0.1:8080/healthz
-   curl -fsS http://127.0.0.1:8080/readyz
-   ```
+这条路径适合直接在服务器上部署，不需要本地构建源码。
 
-数据默认存储在 Docker 卷 `codex-gate-data`。如果开启归档，路径为容器内 `/app/data/archive/request_logs`。
+#### 第一步：下载 `docker-compose.yml`
 
-#### Docker Compose 配置说明
+```bash
+mkdir -p codex-gate && cd codex-gate
+curl -fsSLO https://raw.githubusercontent.com/un4gt/codex-gate/main/docker-compose.yml
+curl -fsSLo .env https://raw.githubusercontent.com/un4gt/codex-gate/main/.env.example
+```
 
-仓库根目录已提供可直接使用的 `docker-compose.yml`，默认行为如下：
+如果服务器没有 `curl`，也可以改用 `wget`。
 
-- 服务名：`codex-gate`
-- 容器名：`codex-gate`
-- 对外端口：`${CODEX_GATE_PORT:-8080}:8080`
-- 持久化卷：`codex-gate-data:/app/data`
-- 默认会从当前仓库源码执行 `build`，适合本地和自托管部署
+#### 第二步：修改 `docker-compose.yml`
 
-如果 `ADMIN_TOKEN` 未设置，`docker compose up` 会直接失败，这是预期行为。
+下载下来的 `docker-compose.yml` 默认是“从源码构建”，需要把它改成“直接拉取镜像”。
 
-#### 推荐 `.env` 最小配置
+把下面这段：
+
+```yaml
+build:
+  context: .
+  dockerfile: Dockerfile
+image: codex-gate:local
+```
+
+改成：
+
+```yaml
+image: ghcr.io/un4gt/codex-gate:v1.0.0
+```
+
+说明：
+
+- `v1.0.0` 请替换成你实际要部署的版本 tag
+- 如果你使用 Docker Hub，也可以把镜像地址替换成对应的 Docker Hub 地址
+
+#### 第三步：修改 `.env`
+
+至少设置这些字段：
 
 ```bash
 ADMIN_TOKEN=replace-with-strong-admin-token
@@ -51,36 +53,41 @@ CODEX_GATE_PORT=8080
 RUST_LOG=info
 ```
 
-如需额外调整监听地址、数据库、缓存和归档策略，可继续在 `.env` 中覆盖 `docker-compose.yml` 里的默认值。
+其中：
 
-#### 常用 Docker Compose 命令
+- `ADMIN_TOKEN`：后台管理鉴权口令，必填
+- `MASTER_KEY`：用于密钥加密，强烈建议单独设置
+- `CODEX_GATE_PORT`：宿主机映射端口，默认 `8080`
 
-首次部署或本地代码更新后重建：
-
-```bash
-docker compose up -d --build
-```
-
-启动前查看最终生效配置：
+#### 第四步：拉取镜像并启动
 
 ```bash
-docker compose config
+docker compose pull
+docker compose up -d
 ```
 
-查看容器状态与日志：
+#### 第五步：检查是否启动成功
 
 ```bash
 docker compose ps
 docker compose logs -f codex-gate
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-重启单个服务：
+#### 常用运维命令
+
+更新镜像版本：
+
+1. 修改 `docker-compose.yml` 中的镜像 tag
+2. 执行：
 
 ```bash
-docker compose restart codex-gate
+docker compose pull
+docker compose up -d
 ```
 
-停止服务但保留数据卷：
+停止服务：
 
 ```bash
 docker compose down
@@ -92,41 +99,22 @@ docker compose down
 docker compose down -v
 ```
 
-#### 使用已发布镜像部署（可选）
+数据默认存储在 Docker 卷 `codex-gate-data`。如果开启归档，路径为容器内 `/app/data/archive/request_logs`。
 
-如果你不想在目标机器上构建源码，可以把 `docker-compose.yml` 中的：
+### 2) Docker Compose 从源码构建（开发/自托管）
 
-```yaml
-build:
-  context: .
-  dockerfile: Dockerfile
-image: codex-gate:local
-```
-
-替换为固定版本镜像，例如：
-
-```yaml
-image: ghcr.io/un4gt/codex-gate:v1.0.0
-```
-
-或：
-
-```yaml
-image: docker.io/<dockerhub-user>/codex-gate:v1.0.0
-```
-
-然后执行：
+如果你就是在当前仓库目录里部署，并且希望按本地代码直接构建，可以使用仓库默认的 `docker-compose.yml`。
 
 ```bash
-docker compose pull
-docker compose up -d
+cp .env.example .env
+docker compose up -d --build
 ```
 
-这种方式更适合生产环境固定版本发布；源码构建方式更适合本地开发和自定义改动验证。
+这种方式会使用仓库内的 `Dockerfile` 本地构建镜像，更适合开发调试或自定义修改后的部署。
 
 ---
 
-### 2) 裸二进制部署（Linux）
+### 3) 裸二进制部署（Linux）
 
 #### 构建
 
