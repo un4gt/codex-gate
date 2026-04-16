@@ -30,12 +30,99 @@
 
 数据默认存储在 Docker 卷 `codex-gate-data`。如果开启归档，路径为容器内 `/app/data/archive/request_logs`。
 
-停止/清理：
+#### Docker Compose 配置说明
+
+仓库根目录已提供可直接使用的 `docker-compose.yml`，默认行为如下：
+
+- 服务名：`codex-gate`
+- 容器名：`codex-gate`
+- 对外端口：`${CODEX_GATE_PORT:-8080}:8080`
+- 持久化卷：`codex-gate-data:/app/data`
+- 默认会从当前仓库源码执行 `build`，适合本地和自托管部署
+
+如果 `ADMIN_TOKEN` 未设置，`docker compose up` 会直接失败，这是预期行为。
+
+#### 推荐 `.env` 最小配置
+
+```bash
+ADMIN_TOKEN=replace-with-strong-admin-token
+MASTER_KEY=replace-with-strong-master-key
+CODEX_GATE_PORT=8080
+RUST_LOG=info
+```
+
+如需额外调整监听地址、数据库、缓存和归档策略，可继续在 `.env` 中覆盖 `docker-compose.yml` 里的默认值。
+
+#### 常用 Docker Compose 命令
+
+首次部署或本地代码更新后重建：
+
+```bash
+docker compose up -d --build
+```
+
+启动前查看最终生效配置：
+
+```bash
+docker compose config
+```
+
+查看容器状态与日志：
+
+```bash
+docker compose ps
+docker compose logs -f codex-gate
+```
+
+重启单个服务：
+
+```bash
+docker compose restart codex-gate
+```
+
+停止服务但保留数据卷：
 
 ```bash
 docker compose down
-docker compose down -v   # 连同 SQLite 数据卷一起删除
 ```
+
+停止服务并删除数据卷：
+
+```bash
+docker compose down -v
+```
+
+#### 使用已发布镜像部署（可选）
+
+如果你不想在目标机器上构建源码，可以把 `docker-compose.yml` 中的：
+
+```yaml
+build:
+  context: .
+  dockerfile: Dockerfile
+image: codex-gate:local
+```
+
+替换为固定版本镜像，例如：
+
+```yaml
+image: ghcr.io/un4gt/codex-gate:v1.0.0
+```
+
+或：
+
+```yaml
+image: docker.io/<dockerhub-user>/codex-gate:v1.0.0
+```
+
+然后执行：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+这种方式更适合生产环境固定版本发布；源码构建方式更适合本地开发和自定义改动验证。
 
 ---
 
