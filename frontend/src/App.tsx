@@ -1086,32 +1086,33 @@ function Root() {
     onMessage: (message) => setMessage(t(message)),
   };
 
-  if (accessMode() === 'connect') {
-    return (
-      <ConnectionGate
-        settings={settings}
-        status={status}
-        message={message}
-        onApiBaseChange={(value) => setSettings((current) => ({ ...current, apiBase: value }))}
-        onAdminTokenChange={(value) => setSettings((current) => ({ ...current, adminToken: value }))}
-        onRefresh={refreshData}
-      />
-    );
-  }
-
   return (
-    <Router root={(props) => <TopShell data={data}>{props.children}</TopShell>}>
-      <Route path="/" component={() => <Navigate href="/overview" />} />
-      <Route path="/overview" component={() => <OverviewPage data={data} />} />
-      <Route path="/access" component={() => <AccessPage data={data} />} />
-      <Route path="/keys" component={() => <KeysRoutePage data={data} />} />
-      <Route path="/logs" component={() => <LogsRoutePage data={data} />} />
-      <Route path="/usage" component={() => <UsagePage data={data} />} />
-      <Route path="/upstreams" component={() => <UpstreamsPage data={data} />} />
-      <Route path="/settings" component={() => <SettingsRoutePage data={data} />} />
-      <Route path="/prices" component={() => <Navigate href="/usage" />} />
-      <Route path="*" component={() => <Navigate href="/overview" />} />
-    </Router>
+    <Show
+      when={accessMode() === 'console'}
+      fallback={
+        <ConnectionGate
+          settings={settings}
+          status={status}
+          message={message}
+          onApiBaseChange={(value) => setSettings((current) => ({ ...current, apiBase: value }))}
+          onAdminTokenChange={(value) => setSettings((current) => ({ ...current, adminToken: value }))}
+          onRefresh={refreshData}
+        />
+      }
+    >
+      <Router root={(props) => <TopShell data={data}>{props.children}</TopShell>}>
+        <Route path="/" component={() => <Navigate href="/overview" />} />
+        <Route path="/overview" component={() => <OverviewPage data={data} />} />
+        <Route path="/access" component={() => <AccessPage data={data} />} />
+        <Route path="/keys" component={() => <KeysRoutePage data={data} />} />
+        <Route path="/logs" component={() => <LogsRoutePage data={data} />} />
+        <Route path="/usage" component={() => <UsagePage data={data} />} />
+        <Route path="/upstreams" component={() => <UpstreamsPage data={data} />} />
+        <Route path="/settings" component={() => <SettingsRoutePage data={data} />} />
+        <Route path="/prices" component={() => <Navigate href="/usage" />} />
+        <Route path="*" component={() => <Navigate href="/overview" />} />
+      </Router>
+    </Show>
   );
 }
 
