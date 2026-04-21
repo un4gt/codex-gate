@@ -864,7 +864,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             type="button"
                             size="sm"
                             variant="ghost"
-                            class="font-mono text-xs hover:bg-transparent hover:text-primary px-0"
+                            class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0"
                             onClick={(event) => {
                               event.stopPropagation();
                               setSelectedProviderId(item.provider.id);
@@ -1185,7 +1185,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                               <StatusBadge tone={endpointHealth.tone}>{endpointHealth.label}</StatusBadge>
                             </div>
                             <div class="flex items-center gap-2">
-                              <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-3" disabled={busy() === `test-${endpoint.id}`} onClick={() => void handleTestEndpoint(endpoint.id)}>
+                              <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-3 shrink-0" disabled={busy() === `test-${endpoint.id}`} onClick={() => void handleTestEndpoint(endpoint.id)}>
                                 [ TEST CONNECTION ]
                               </Button>
                               <Button type="submit" size="sm" class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-4 ml-2" disabled={busy() === `endpoint-${endpoint.id}`}>
@@ -1502,7 +1502,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                                             type="button"
                                             size="sm"
                                             variant="ghost"
-                                            class="font-mono text-[0.65rem] uppercase tracking-widest hover:bg-transparent hover:text-destructive px-0"
+                                            class="font-mono text-[0.65rem] uppercase tracking-widest hover:bg-transparent hover:text-destructive px-0 shrink-0"
                                             onClick={() => void removeKeyModel(model)}
                                             disabled={busy() === `key-model-${model.id}`}
                                           >

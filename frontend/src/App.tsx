@@ -410,11 +410,11 @@ function OverviewPage(props: { data: AppDataContext }) {
                 30D
               </Button>
             </div>
-            <Button type="button" variant="outline" size="sm" class="rounded-none text-xs tracking-wider" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
+            <Button type="button" variant="outline" size="sm" class="rounded-none text-xs tracking-wider shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
               <Copy class="mr-2 size-3" />
               COPY URL
             </Button>
-            <A href="/keys">
+            <A href="/keys" class="shrink-0">
               <Button type="button" size="sm" class="rounded-none text-xs tracking-wider">CREATE KEY</Button>
             </A>
           </div>
@@ -473,7 +473,7 @@ function OverviewPage(props: { data: AppDataContext }) {
             </div>
             <div class="md:col-span-3 pt-2">
               <A href="/upstreams">
-                <Button type="button" variant="ghost" class="w-full justify-start pl-0 hover:bg-transparent hover:text-primary">
+                <Button type="button" variant="ghost" class="w-full justify-start pl-0 hover:bg-transparent hover:text-primary shrink-0">
                   {`[ ${t('查看上游详情')} ]`}
                 </Button>
               </A>
@@ -488,7 +488,7 @@ function OverviewPage(props: { data: AppDataContext }) {
               title: '服务地址',
               description: props.data.settings().apiBase,
               action: (
-                <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
+                <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
                   [ COPY ]
                 </Button>
               ),
@@ -501,7 +501,7 @@ function OverviewPage(props: { data: AppDataContext }) {
               }),
               action: (
                 <A href="/keys">
-                  <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0">
+                  <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0">
                     [ CREATE ]
                   </Button>
                 </A>
@@ -512,7 +512,7 @@ function OverviewPage(props: { data: AppDataContext }) {
               description: '提供 cURL、JavaScript 与 Python。',
               action: (
                 <A href="/access">
-                  <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0">
+                  <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0">
                     [ OPEN ]
                   </Button>
                 </A>
@@ -530,8 +530,8 @@ function OverviewPage(props: { data: AppDataContext }) {
                 <CardTitle class="text-xl font-medium tracking-tight">最近异常</CardTitle>
                 <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">最近 5 条异常请求。</CardDescription>
               </div>
-              <A href="/logs">
-                <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0">
+              <A href="/logs" class="shrink-0">
+                <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0">
                   [ VIEW ALL LOGS ]
                 </Button>
               </A>
@@ -682,11 +682,11 @@ res = requests.post(
               </div>
             </div>
             <div class="flex flex-wrap gap-2 pt-2 border-t border-border/40">
-              <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
+              <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
                 [ COPY URL ]
               </Button>
-              <A href="/keys">
-                <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 ml-4">
+              <A href="/keys" class="shrink-0">
+                <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 ml-4 shrink-0">
                   [ CREATE KEY ]
                 </Button>
               </A>
@@ -713,8 +713,8 @@ res = requests.post(
                 {(item) => (
                   <div class="border border-border/40 bg-muted/10 p-5">
                     <div class="mb-4 flex items-center justify-between gap-2">
-                      <strong class="font-mono text-xs uppercase tracking-widest text-foreground">{item.title}</strong>
-                      <Button type="button" size="sm" variant="ghost" class="font-mono text-[0.65rem] hover:bg-transparent hover:text-primary px-0 h-auto" onClick={() => void copyText(item.value, `${item.title} 示例已复制。`, props.data.onMessage)}>
+                      <strong class="font-mono text-xs uppercase tracking-widest text-foreground shrink-0">{item.title}</strong>
+                      <Button type="button" size="sm" variant="ghost" class="font-mono text-[0.65rem] hover:bg-transparent hover:text-primary px-0 h-auto shrink-0" onClick={() => void copyText(item.value, `${item.title} 示例已复制。`, props.data.onMessage)}>
                         [ COPY ]
                       </Button>
                     </div>
