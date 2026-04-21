@@ -102,7 +102,7 @@ client_json="$(
   curl -fsS -X POST "http://127.0.0.1:${GW_PORT}/api/v1/api-keys" \
     -H "$ADMIN_AUTH" \
     -H 'Content-Type: application/json' \
-    -d '{"name":"resp-client","enabled":true}'
+    -d '{"name":"resp-client","enabled":true,"log_enabled":true}'
 )"
 client_key="$(json_get "$client_json" "api_key")"
 
@@ -142,6 +142,27 @@ curl -sS "http://127.0.0.1:${GW_PORT}/v1/models" \
 curl -sS "http://127.0.0.1:${GW_PORT}/v1/models?api_format=responses" \
   -H "Authorization: Bearer ${client_key}" >"$resp_models_body"
 
+for _ in $(seq 1 40); do
+  stats_rows="$(python3 - "$DB_PATH" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+cur = conn.cursor()
+print(cur.execute("select count(*) from stats_daily").fetchone()[0])
+PY
+)"
+  log_rows="$(python3 - "$DB_PATH" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+cur = conn.cursor()
+print(cur.execute("select count(*) from request_logs").fetchone()[0])
+PY
+)"
+  if [[ "$stats_rows" -gt 0 && "$log_rows" -gt 0 ]]; then
+    break
+  fi
+  sleep 0.2
+done
+
 python3 - \
   "$resp_code" \
   "$chat_code" \
@@ -156,6 +177,7 @@ python3 - \
   "$sync_provider" \
   "$sync_key" <<'PY'
 import json
+import sqlite3
 import sys
 
 resp_code, chat_code = sys.argv[1], sys.argv[2]
@@ -187,6 +209,37 @@ for expected in ("resp-sync-mini", "resp-sync-plus"):
     assert expected in provider_sync_ids, f"provider sync missing {expected}: {sync_provider}"
     assert expected in key_sync_ids, f"key sync missing {expected}: {sync_key}"
 
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+request_logs = cur.execute(
+    """
+    select api_format, model, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, http_status
+    from request_logs
+    order by time_ms desc
+    """
+).fetchall()
+stats_daily = cur.execute(
+    """
+    select request_success, request_failed, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens
+    from stats_daily
+    where api_key_id != 0
+    order by rowid desc
+    """
+).fetchall()
+
+assert request_logs, f"request_logs should not be empty: db={db_path}"
+assert stats_daily, f"stats_daily should not be empty: db={db_path}"
+
+responses_logs = [row for row in request_logs if row[0] == "responses"]
+assert responses_logs, f"missing responses request log rows: {request_logs}"
+resp_log = responses_logs[0]
+assert resp_log[1] == "resp-sync-mini", f"unexpected logged model: {resp_log}"
+assert resp_log[2] == 7, f"expected uncached input tokens 7, got {resp_log}"
+assert resp_log[3] == 4, f"expected output tokens 4, got {resp_log}"
+assert resp_log[4] == 1, f"expected cache read tokens 1, got {resp_log}"
+assert resp_log[5] == 1, f"expected cache creation tokens 1, got {resp_log}"
+assert resp_log[6] == 200, f"expected 200 log status, got {resp_log}"
+
 result = {
     "responses_status": resp_code,
     "chat_status": chat_code,
@@ -197,6 +250,8 @@ result = {
     "responses_models": responses_ids,
     "provider_sync_models": provider_sync_ids,
     "key_sync_models": key_sync_ids,
+    "request_logs": request_logs,
+    "stats_daily": stats_daily,
     "artifacts": {
         "db": db_path,
         "mock_log": mock_log,

@@ -1642,12 +1642,17 @@ fn parse_chat_usage(v: &Value) -> Option<Usage> {
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
+    let cache_created = v
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cache_creation_tokens"))
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
 
     Some(Usage {
-        input_tokens: (prompt - cached).max(0),
+        input_tokens: (prompt - cached - cache_created).max(0),
         output_tokens: completion.max(0),
         cache_read_input_tokens: cached.max(0),
-        cache_creation_input_tokens: 0,
+        cache_creation_input_tokens: cache_created.max(0),
     })
 }
 
@@ -1659,12 +1664,17 @@ fn parse_responses_usage(v: &Value) -> Option<Usage> {
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
+    let cache_created = v
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cache_creation_tokens"))
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
 
     Some(Usage {
-        input_tokens: (input - cached).max(0),
+        input_tokens: (input - cached - cache_created).max(0),
         output_tokens: output.max(0),
         cache_read_input_tokens: cached.max(0),
-        cache_creation_input_tokens: 0,
+        cache_creation_input_tokens: cache_created.max(0),
     })
 }
 
@@ -1737,4 +1747,70 @@ fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Deci
     }
 
     (cost_in, cost_out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_cost, parse_chat_usage, parse_responses_usage};
+    use crate::types::ModelPriceData;
+    use rust_decimal::Decimal;
+    use serde_json::json;
+
+    #[test]
+    fn parse_chat_usage_should_split_cached_and_cache_creation_tokens() {
+        let usage = parse_chat_usage(&json!({
+            "prompt_tokens": 20,
+            "completion_tokens": 7,
+            "prompt_tokens_details": {
+                "cached_tokens": 3,
+                "cache_creation_tokens": 5
+            }
+        }))
+        .expect("usage");
+
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_input_tokens, 3);
+        assert_eq!(usage.cache_creation_input_tokens, 5);
+    }
+
+    #[test]
+    fn parse_responses_usage_should_split_cached_and_cache_creation_tokens() {
+        let usage = parse_responses_usage(&json!({
+            "input_tokens": 18,
+            "output_tokens": 4,
+            "input_tokens_details": {
+                "cached_tokens": 2,
+                "cache_creation_tokens": 6
+            }
+        }))
+        .expect("usage");
+
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.cache_read_input_tokens, 2);
+        assert_eq!(usage.cache_creation_input_tokens, 6);
+    }
+
+    #[test]
+    fn compute_cost_should_include_cache_creation_pricing() {
+        let usage = crate::types::Usage {
+            input_tokens: 10,
+            output_tokens: 4,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 6,
+        };
+        let price = ModelPriceData {
+            input_cost_per_token: Some(Decimal::new(2, 0)),
+            output_cost_per_token: Some(Decimal::new(3, 0)),
+            cache_read_input_token_cost: Some(Decimal::new(5, 0)),
+            cache_creation_input_token_cost: Some(Decimal::new(7, 0)),
+            cache_creation_input_token_cost_above_1hr: None,
+        };
+
+        let (cost_in, cost_out) = compute_cost(&usage, Some(&price));
+
+        assert_eq!(cost_in, Decimal::new(72, 0));
+        assert_eq!(cost_out, Decimal::new(12, 0));
+    }
 }
