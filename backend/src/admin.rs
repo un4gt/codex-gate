@@ -1,5 +1,5 @@
 use base64::Engine;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::Uri;
 use hyper::body::Bytes;
 use hyper::body::Incoming;
@@ -26,6 +26,22 @@ const ALLOWED_PROVIDER_TYPES: [&str; 4] = [
     "openai_codex_oauth",
     "openai_compatible_responses",
 ];
+
+// Admin endpoints sometimes probe upstreams that can return arbitrary HTML/JSON.
+// Keep these payloads bounded to avoid untrusted memory spikes.
+const ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES: usize = 1024 * 1024;
+const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
+
+fn validate_upstream_base_url(value: &str) -> Result<(), &'static str> {
+    let uri: Uri = value.parse().map_err(|_| "invalid base_url")?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return Err("invalid base_url");
+    }
+    if uri.authority().is_none() {
+        return Err("invalid base_url");
+    }
+    Ok(())
+}
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     if let Some(resp) = require_admin(&req, &state) {
@@ -253,7 +269,13 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
     };
 
     let status = response.status();
-    let body_bytes = match response.into_body().collect().await {
+    let body_bytes = match Limited::new(
+        response.into_body(),
+        ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES,
+    )
+    .collect()
+    .await
+    {
         Ok(collected) => collected.to_bytes(),
         Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
     };
@@ -471,7 +493,13 @@ async fn sync_key_models(req: Request<Incoming>, state: SharedState) -> HttpResp
     };
 
     let status = response.status();
-    let body_bytes = match response.into_body().collect().await {
+    let body_bytes = match Limited::new(
+        response.into_body(),
+        ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES,
+    )
+    .collect()
+    .await
+    {
         Ok(collected) => collected.to_bytes(),
         Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
     };
@@ -1115,6 +1143,9 @@ async fn create_provider_endpoint(req: Request<Incoming>, state: SharedState) ->
     let priority = body.priority.unwrap_or(100);
     let weight = body.weight.unwrap_or(1);
     let base_url = normalize_base_url(body.base_url.trim());
+    if let Err(message) = validate_upstream_base_url(&base_url) {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
 
     let now_ms = util::now_ms();
     let id = match state
@@ -1182,7 +1213,11 @@ async fn update_endpoint(req: Request<Incoming>, state: SharedState) -> HttpResp
         if b.trim().is_empty() {
             return http::json_error(StatusCode::BAD_REQUEST, "base_url is empty");
         }
-        current.base_url = normalize_base_url(b.trim());
+        let base_url = normalize_base_url(b.trim());
+        if let Err(message) = validate_upstream_base_url(&base_url) {
+            return http::json_error(StatusCode::BAD_REQUEST, message);
+        }
+        current.base_url = base_url;
     }
     if let Some(v) = patch.enabled {
         current.enabled = v;
@@ -1247,9 +1282,25 @@ async fn test_endpoint(req: Request<Incoming>, state: SharedState) -> HttpRespon
     {
         Ok(Ok(resp)) => {
             let status = resp.status().as_u16();
-            let body_bytes = match resp.into_body().collect().await {
+            let body_bytes = match Limited::new(
+                resp.into_body(),
+                ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES,
+            )
+            .collect()
+            .await
+            {
                 Ok(collected) => collected.to_bytes(),
-                Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
+                Err(e) => {
+                    return http::json(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "ok": status < 500,
+                            "status": status,
+                            "url": url,
+                            "message": e.to_string(),
+                        }),
+                    )
+                }
             };
             let body_text = String::from_utf8_lossy(&body_bytes).trim().to_string();
             http::json(
