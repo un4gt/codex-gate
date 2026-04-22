@@ -41,7 +41,7 @@ interface LogFilters {
 
 const EMPTY_FILTERS: LogFilters = {
   query: '',
-  statusClass: '4',
+  statusClass: '',
   apiKeyId: '',
   model: '',
   apiFormat: '',

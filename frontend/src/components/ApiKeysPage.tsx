@@ -49,6 +49,16 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
 
   const selected = createMemo(() => props.items.find((item) => item.apiKey.id === selectedId()) ?? null);
 
+  const openCreateDrawer = () => {
+    setCreated(null);
+    setCreateOpen(true);
+  };
+
+  const closeCreateDrawer = () => {
+    setCreateOpen(false);
+    setCreated(null);
+  };
+
   const ensureLive = () => {
     if (!props.settings.adminToken.trim()) {
       props.onMessage('请先填写管理员口令。');
@@ -78,7 +88,6 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     try {
       const result = await createApiKey(props.settings, payload);
       setCreated(result);
-      setCreateOpen(false);
       await props.onRefresh(t('密钥 {{name}} 已创建。', { name: payload.name }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建密钥失败。');
@@ -171,7 +180,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         title="密钥"
         description="创建和管理访问密钥。"
         actions={
-          <Button type="button" onClick={() => setCreateOpen(true)}>
+          <Button type="button" onClick={openCreateDrawer}>
             <Plus />
             创建密钥
           </Button>
@@ -193,7 +202,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 title="还没有密钥"
                 description="先创建第一条访问密钥，再提供给接入方使用。"
                 action={
-                  <Button type="button" onClick={() => setCreateOpen(true)}>
+                  <Button type="button" onClick={openCreateDrawer}>
                     创建密钥
                   </Button>
                 }
@@ -270,7 +279,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         </CardContent>
       </Card>
 
-      <DetailDrawer open={createOpen()} title="创建密钥" description="填写必要信息后立即生成。" onClose={() => setCreateOpen(false)}>
+      <DetailDrawer open={createOpen()} title="创建密钥" description="填写必要信息后立即生成。" onClose={closeCreateDrawer}>
         <form class="flex flex-col gap-4" onSubmit={(event) => void submitCreate(event)}>
           <FieldGroup>
             <Field>
