@@ -1057,7 +1057,7 @@ async fn build_upstream_plan(
             continue;
         }
 
-        let price = snap.find_price(provider.id, &upstream_model);
+        let price = snap.find_price_for_request(provider.id, requested_model, &upstream_model);
         for key in &ranked_keys {
             for endpoint in &ranked_endpoints {
                 attempts.push(ResolvedUpstream {

@@ -32,6 +32,21 @@ impl UpstreamSnapshot {
             .or_else(|| self.global_prices_by_model.get(model_name).cloned())
     }
 
+    pub fn find_price_for_request(
+        &self,
+        provider_id: i64,
+        requested_model: &str,
+        upstream_model: &str,
+    ) -> Option<ModelPriceData> {
+        self.find_price(provider_id, upstream_model).or_else(|| {
+            if requested_model == upstream_model {
+                None
+            } else {
+                self.find_price(provider_id, requested_model)
+            }
+        })
+    }
+
     pub fn is_model_globally_enabled(&self, model_name: &str) -> bool {
         !self.globally_disabled_models.contains(model_name)
     }
@@ -239,5 +254,66 @@ impl UpstreamCache {
             provider_prices_by_model,
             global_prices_by_model,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpstreamSnapshot;
+    use crate::types::ModelPriceData;
+    use rust_decimal::Decimal;
+    use std::collections::{HashMap, HashSet};
+
+    fn price(tag: i64) -> ModelPriceData {
+        ModelPriceData {
+            input_cost_per_token: Some(Decimal::new(tag, 0)),
+            ..ModelPriceData::default()
+        }
+    }
+
+    fn snapshot_with_prices() -> UpstreamSnapshot {
+        let mut provider_prices_by_model = HashMap::new();
+        provider_prices_by_model.insert(
+            7,
+            HashMap::from([("upstream-model".to_string(), price(7))]),
+        );
+
+        let global_prices_by_model = HashMap::from([("gateway-alias".to_string(), price(3))]);
+
+        UpstreamSnapshot {
+            providers: Vec::new(),
+            keys_by_provider: HashMap::new(),
+            endpoints_by_provider: HashMap::new(),
+            routes_by_model: HashMap::new(),
+            provider_models_by_provider: HashMap::new(),
+            alias_to_provider_model: HashMap::new(),
+            key_models_by_key: HashMap::new(),
+            globally_disabled_models: HashSet::new(),
+            provider_prices_by_model,
+            global_prices_by_model,
+        }
+    }
+
+    #[test]
+    fn find_price_for_request_prefers_upstream_model_price() {
+        let snapshot = snapshot_with_prices();
+
+        let found = snapshot
+            .find_price_for_request(7, "gateway-alias", "upstream-model")
+            .and_then(|item| item.input_cost_per_token);
+
+        assert_eq!(found, Some(Decimal::new(7, 0)));
+    }
+
+    #[test]
+    fn find_price_for_request_falls_back_to_requested_model_price() {
+        let mut snapshot = snapshot_with_prices();
+        snapshot.provider_prices_by_model.clear();
+
+        let found = snapshot
+            .find_price_for_request(7, "gateway-alias", "upstream-model")
+            .and_then(|item| item.input_cost_per_token);
+
+        assert_eq!(found, Some(Decimal::new(3, 0)));
     }
 }
