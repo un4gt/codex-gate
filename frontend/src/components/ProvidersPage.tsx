@@ -801,7 +801,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       <Card class="rounded-none border border-border bg-background shadow-none">
         <CardHeader class="pb-6">
           <CardTitle class="text-xl font-medium tracking-tight">上游列表</CardTitle>
-          <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">查看目标与健康状态。</CardDescription>
+          <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('查看目标与健康状态。')}</CardDescription>
         </CardHeader>
         <CardContent class="p-0 border-t border-border/40">
           <Show
@@ -1092,7 +1092,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   <Card class="rounded-none border border-border bg-background shadow-none mt-8">
                     <CardHeader class="pb-6">
                       <CardTitle class="text-xl font-medium tracking-tight">Codex OAuth</CardTitle>
-                      <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">完成登录后会自动写入一个上游密钥。</CardDescription>
+                      <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('完成登录后会自动写入一个上游密钥。')}</CardDescription>
                     </CardHeader>
                     <CardContent class="grid gap-6 border-t border-border/40 pt-6">
                       <div class="flex flex-wrap items-center gap-4">
@@ -1365,7 +1365,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <CardHeader class="flex flex-row items-start justify-between gap-6 pb-6">
                         <div class="grid gap-2">
                           <CardTitle class="text-xl font-medium tracking-tight">按密钥限制模型</CardTitle>
-                          <CardDescription class="font-mono text-[0.65rem] uppercase tracking-widest mt-1">未设置时允许所有模型；设置后只允许列表中的模型。</CardDescription>
+                          <CardDescription class="font-mono text-[0.65rem] uppercase tracking-wider mt-1">{t('未设置时允许所有模型；设置后只允许列表中的模型。')}</CardDescription>
                         </div>
                         <div class="flex flex-wrap items-center gap-3">
                           <Select
@@ -1545,7 +1545,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <CardHeader class="flex flex-row items-start justify-between gap-6 pb-6">
                         <div class="grid gap-2">
                           <CardTitle class="text-xl font-medium tracking-tight">可用模型</CardTitle>
-                          <CardDescription class="font-mono text-[0.65rem] uppercase tracking-widest mt-1">同步模型并管理显示名称与启用状态。</CardDescription>
+                          <CardDescription class="font-mono text-[0.65rem] uppercase tracking-wider mt-1">{t('同步模型并管理显示名称与启用状态。')}</CardDescription>
                         </div>
                         <Button type="button" size="sm" class="rounded-none text-xs tracking-wider" onClick={() => void syncModels(item)} disabled={busy() === `models-sync-${item.provider.id}`}>
                           <RefreshCw class={`mr-2 size-3 ${busy() === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} />

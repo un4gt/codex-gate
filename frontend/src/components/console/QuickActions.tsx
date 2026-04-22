@@ -22,10 +22,10 @@ export function QuickActions(props: QuickActionsProps) {
       <CardContent class="grid gap-0">
         <For each={props.items}>
           {(item) => (
-            <div class="flex items-center justify-between gap-4 border-b border-border/40 py-4 last:border-0 last:pb-0 first:pt-0">
+            <div class="flex items-center justify-between gap-4 border-b border-border/40 py-4 last:border-0 last:pb-0 first:pt-0 overflow-hidden">
               <div class="flex min-w-0 flex-col gap-1">
-                <strong class="text-sm font-medium text-foreground">{t(item.title)}</strong>
-                <span class="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-widest truncate">{t(item.description)}</span>
+                <strong class="text-sm font-medium text-foreground truncate">{t(item.title)}</strong>
+                <span class="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-wider truncate">{t(item.description)}</span>
               </div>
               <div class="shrink-0">{item.action}</div>
             </div>

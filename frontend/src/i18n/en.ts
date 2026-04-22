@@ -59,6 +59,7 @@ export const dict: Record<string, string> = {
   'ADMIN CONSOLE INITIALIZATION': 'Admin Console Initialization',
   '查看服务状态、请求趋势与最近异常。': 'View service health, request trends, and recent anomalies.',
   '完成地址配置并发送第一条请求。': 'Configure the service URL and send your first request.',
+  '接入只需要服务地址和访问密钥。': 'Only a service URL and access key are needed.',
   '创建和管理访问密钥。': 'Create and manage access keys.',
   '筛选并排查最近请求。': 'Filter and investigate recent requests.',
   '查看成本趋势与消耗拆分。': 'View cost trends and usage breakdowns.',

@@ -231,7 +231,7 @@ export function LogsPage(props: LogsPageProps) {
             <div class="flex items-center justify-between gap-3">
               <div>
                 <CardTitle class="text-xl font-medium tracking-tight">结果</CardTitle>
-                <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">默认按最近时间排序，优先暴露错误请求。</CardDescription>
+                <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('默认按最近时间排序，优先暴露错误请求。')}</CardDescription>
               </div>
               <div class="flex gap-2">
                 <StatusBadge tone={errorCount() > 0 ? 'warning' : 'normal'}>{t('{{count}} 条异常', { count: errorCount() })}</StatusBadge>
@@ -296,7 +296,7 @@ export function LogsPage(props: LogsPageProps) {
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader class="pb-6">
             <CardTitle class="text-xl font-medium tracking-tight">排障提示</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">从结果直接进入详情，不再混入概念说明。</CardDescription>
+            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('从结果直接进入详情，不再混入概念说明。')}</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-6 border-t border-border/40 pt-6">
             <div class="border-l-2 border-primary/20 pl-4 py-1">

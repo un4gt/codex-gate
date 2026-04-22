@@ -412,10 +412,10 @@ function OverviewPage(props: { data: AppDataContext }) {
             </div>
             <Button type="button" variant="outline" size="sm" class="rounded-none text-xs tracking-wider shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
               <Copy class="mr-2 size-3" />
-              COPY URL
+              {t('COPY URL')}
             </Button>
             <A href="/keys" class="shrink-0">
-              <Button type="button" size="sm" class="rounded-none text-xs tracking-wider">CREATE KEY</Button>
+              <Button type="button" size="sm" class="rounded-none text-xs tracking-wider">{t('CREATE KEY')}</Button>
             </A>
           </div>
         }
@@ -429,7 +429,7 @@ function OverviewPage(props: { data: AppDataContext }) {
             <div class="flex items-center justify-between gap-3">
               <div>
                 <CardTitle class="text-xl font-medium tracking-tight">服务状态</CardTitle>
-                <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">先看整体，再决定是否进入日志或上游。</CardDescription>
+                <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('先看整体，再决定是否进入日志或上游。')}</CardDescription>
               </div>
               <StatusBadge
                 tone={
@@ -528,7 +528,7 @@ function OverviewPage(props: { data: AppDataContext }) {
             <div class="flex items-center justify-between gap-3">
               <div>
                 <CardTitle class="text-xl font-medium tracking-tight">最近异常</CardTitle>
-                <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">最近 5 条异常请求。</CardDescription>
+                <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('最近 5 条异常请求。')}</CardDescription>
               </div>
               <A href="/logs" class="shrink-0">
                 <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0">
@@ -581,7 +581,7 @@ function OverviewPage(props: { data: AppDataContext }) {
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
             <CardTitle class="text-xl font-medium tracking-tight">热门模型</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">按请求量与成本排序。</CardDescription>
+            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('按请求量与成本排序。')}</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-0">
             <Show
@@ -655,7 +655,7 @@ res = requests.post(
         actions={
           <div class="flex items-center gap-2">
             <A href="/keys">
-              <Button type="button" size="sm" class="rounded-none text-xs tracking-wider">CREATE KEY</Button>
+              <Button type="button" size="sm" class="rounded-none text-xs tracking-wider">{t('CREATE KEY')}</Button>
             </A>
           </div>
         }
@@ -665,7 +665,7 @@ res = requests.post(
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
             <CardTitle class="text-xl font-medium tracking-tight">连接信息</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">接入只需要服务地址和访问密钥。</CardDescription>
+            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('接入只需要服务地址和访问密钥。')}</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-6">
               <div class="border-l-2 border-primary/20 pl-4 py-1">
@@ -683,17 +683,17 @@ res = requests.post(
             </div>
             <div class="flex flex-wrap gap-2 pt-2 border-t border-border/40">
               <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
-                [ COPY URL ]
+                {t('[ COPY URL ]')}
               </Button>
               <A href="/keys" class="shrink-0">
                 <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 ml-4 shrink-0">
-                  [ CREATE KEY ]
+                  {t('[ CREATE KEY ]')}
                 </Button>
               </A>
             </div>
             <Alert class="rounded-none border-border/40 bg-muted/20">
-              <AlertTitle class="font-mono text-xs uppercase tracking-widest">常见错误</AlertTitle>
-              <AlertDescription class="text-sm mt-2 opacity-80">先确认访问密钥已启用，再检查服务地址和模型名。</AlertDescription>
+              <AlertTitle class="font-mono text-xs uppercase tracking-wider">{t('常见错误')}</AlertTitle>
+              <AlertDescription class="text-sm mt-2 opacity-80">{t('先确认访问密钥已启用，再检查服务地址和模型名。')}</AlertDescription>
             </Alert>
           </CardContent>
         </Card>
@@ -702,7 +702,7 @@ res = requests.post(
           <Card class="rounded-none border border-border bg-background shadow-none">
             <CardHeader>
               <CardTitle class="text-xl font-medium tracking-tight">最短接入方式</CardTitle>
-              <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">复制即可测试。</CardDescription>
+              <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('复制即可测试。')}</CardDescription>
             </CardHeader>
             <CardContent class="grid gap-6 xl:grid-cols-3">
               <For each={[
@@ -803,7 +803,7 @@ function UsagePage(props: { data: AppDataContext }) {
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
                 <CardTitle class="text-xl font-medium tracking-tight">成本趋势</CardTitle>
-                <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">粗略趋势预览，详细请以导出的统计为准。</CardDescription>
+                <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('粗略趋势预览，详细请以导出的统计为准。')}</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-6">
             <div class="grid gap-4">
@@ -828,7 +828,7 @@ function UsagePage(props: { data: AppDataContext }) {
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
             <CardTitle class="text-xl font-medium tracking-tight">异常提示</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">只显示需要处理的提醒。</CardDescription>
+            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('只显示需要处理的提醒。')}</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-4">
             <Alert variant={topConsumer() && parseDecimal(topConsumer()!.cost_total_usd) > totalCost() * 0.45 ? 'destructive' : 'default'} class="rounded-none border-border/40 bg-muted/20">
@@ -854,7 +854,7 @@ function UsagePage(props: { data: AppDataContext }) {
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
             <CardTitle class="text-xl font-medium tracking-tight">按模型</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">查看模型消耗与错误情况。</CardDescription>
+            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('查看模型消耗与错误情况。')}</CardDescription>
           </CardHeader>
           <CardContent>
             <Table>
@@ -898,7 +898,7 @@ function UsagePage(props: { data: AppDataContext }) {
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
             <CardTitle class="text-xl font-medium tracking-tight">按密钥</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-widest mt-1">识别高消耗访问方。</CardDescription>
+            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('识别高消耗访问方。')}</CardDescription>
           </CardHeader>
           <CardContent>
             <Table>

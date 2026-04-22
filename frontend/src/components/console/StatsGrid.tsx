@@ -45,7 +45,7 @@ export function StatsGrid(props: StatsGridProps) {
             </div>
             <div class="mt-2 text-4xl font-medium tracking-tight text-foreground">{item.value}</div>
             <Show when={item.hint}>
-              <div class="mt-1 font-mono text-[0.65rem] text-muted-foreground opacity-70 uppercase tracking-widest">{t(item.hint!)}</div>
+              <div class="mt-1 font-mono text-[0.65rem] text-muted-foreground opacity-70 uppercase tracking-wider truncate">{t(item.hint!)}</div>
             </Show>
           </div>
         )}
