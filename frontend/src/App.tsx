@@ -612,41 +612,6 @@ function OverviewPage(props: { data: AppDataContext }) {
 }
 
 function AccessPage(props: { data: AppDataContext }) {
-  const curlSample = createMemo(
-    () => `curl ${props.data.settings().apiBase}/v1/chat/completions \\
-  -H "Authorization: Bearer <YOUR_API_KEY>" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hello"}]}'`,
-  );
-  const jsSample = createMemo(
-    () => `const res = await fetch("${props.data.settings().apiBase}/v1/responses", {
-  method: "POST",
-  headers: {
-    Authorization: "Bearer <YOUR_API_KEY>",
-    "Content-Type": "application/json"
-  },
-  body: JSON.stringify({
-    model: "gpt-4.1-mini",
-    input: "hello"
-  })
-});`,
-  );
-  const pySample = createMemo(
-    () => `import requests
-
-res = requests.post(
-  "${props.data.settings().apiBase}/v1/chat/completions",
-  headers={
-    "Authorization": "Bearer <YOUR_API_KEY>",
-    "Content-Type": "application/json"
-  },
-  json={
-    "model": "gpt-4.1-mini",
-    "messages": [{"role": "user", "content": "hello"}]
-  }
-)`,
-  );
-
   return (
     <div class="flex flex-col gap-6">
       <PageHeader
@@ -698,33 +663,6 @@ res = requests.post(
           </CardContent>
         </Card>
 
-        <div class="grid gap-6">
-          <Card class="rounded-none border border-border bg-background shadow-none">
-            <CardHeader>
-              <CardTitle class="text-xl font-medium tracking-tight">最短接入方式</CardTitle>
-              <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('复制即可测试。')}</CardDescription>
-            </CardHeader>
-            <CardContent class="grid gap-6 xl:grid-cols-3">
-              <For each={[
-                { title: 'cURL', value: curlSample() },
-                { title: 'JavaScript', value: jsSample() },
-                { title: 'Python', value: pySample() },
-              ]}>
-                {(item) => (
-                  <div class="border border-border/40 bg-muted/10 p-5">
-                    <div class="mb-4 flex items-center justify-between gap-2">
-                      <strong class="font-mono text-xs uppercase tracking-widest text-foreground shrink-0">{item.title}</strong>
-                      <Button type="button" size="sm" variant="ghost" class="font-mono text-[0.65rem] hover:bg-transparent hover:text-primary px-0 h-auto shrink-0" onClick={() => void copyText(item.value, `${item.title} 示例已复制。`, props.data.onMessage)}>
-                        [ COPY ]
-                      </Button>
-                    </div>
-                    <pre class="overflow-auto bg-transparent p-0 text-[0.7rem] leading-5 text-foreground font-mono opacity-80">{item.value}</pre>
-                  </div>
-                )}
-              </For>
-            </CardContent>
-          </Card>
-        </div>
       </div>
     </div>
   );
