@@ -106,6 +106,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const [createApiKey, setCreateApiKey] = createSignal('');
   const [createSubmitError, setCreateSubmitError] = createSignal<string | null>(null);
   const [selectedProviderId, setSelectedProviderId] = createSignal<number | null>(null);
+  const [providerTypeDraft, setProviderTypeDraft] = createSignal('');
   const [testResult, setTestResult] = createSignal<{ ok: boolean; status: number | null; url: string; message: string | null } | null>(null);
 
   const selected = createMemo(() => props.items.find((item) => item.provider.id === selectedProviderId()) ?? null);
@@ -400,7 +401,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     try {
       const result = await testEndpointConnection(props.settings, endpointId);
       setTestResult(result);
-      props.onMessage(result.ok ? '连接测试成功。' : '连接测试失败。');
+      props.onMessage(result.ok ? '目标可达。' : '目标不可达。');
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '连接测试失败。');
     } finally {
@@ -428,6 +429,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setUpstreamKeyModelsDraft('');
     setCodexOauthStart(null);
     setCodexOauthView(null);
+    setProviderTypeDraft('');
+  });
+
+  createEffect(() => {
+    const item = selected();
+    if (!item) return;
+    setProviderTypeDraft(item.provider.provider_type);
   });
 
   createEffect(() => {
@@ -1048,13 +1056,17 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     </Field>
                     <Field>
                       <FieldLabel>类型</FieldLabel>
-                      <Select name="provider_type" value={item.provider.provider_type}>
+                      <Select
+                        name="provider_type"
+                        value={providerTypeDraft() || item.provider.provider_type}
+                        onChange={(event) => setProviderTypeDraft(event.currentTarget.value)}
+                      >
                         <For each={PROVIDER_TYPE_OPTIONS}>{(option) => <option value={option.value}>{option.label}</option>}</For>
                         <Show when={!PROVIDER_TYPE_OPTIONS.some((option) => option.value === item.provider.provider_type)}>
                           <option value={item.provider.provider_type}>{item.provider.provider_type}</option>
                         </Show>
                       </Select>
-                      <FieldDescription>{providerTypeDescription(item.provider.provider_type)}</FieldDescription>
+                      <FieldDescription>{providerTypeDescription(providerTypeDraft() || item.provider.provider_type)}</FieldDescription>
                     </Field>
                   </FieldGroup>
                   <FieldGroup class="grid gap-6 md:grid-cols-2">

@@ -228,8 +228,8 @@ export async function loadProviderWorkspace(settings: ConnectionSettings): Promi
   return Promise.all(
     providers.map(async (provider) => {
       const [endpoints, keys] = await Promise.all([
-        fetchJson<UpstreamEndpointSummary[]>(apiBase, `/api/v1/providers/${provider.id}/endpoints`, adminToken),
-        fetchJson<UpstreamKeyMeta[]>(apiBase, `/api/v1/providers/${provider.id}/keys`, adminToken),
+        fetchJson<UpstreamEndpointSummary[]>(apiBase, `/api/v1/providers/${provider.id}/endpoints`, adminToken).catch(() => [] as UpstreamEndpointSummary[]),
+        fetchJson<UpstreamKeyMeta[]>(apiBase, `/api/v1/providers/${provider.id}/keys`, adminToken).catch(() => [] as UpstreamKeyMeta[]),
       ]);
 
       return {
