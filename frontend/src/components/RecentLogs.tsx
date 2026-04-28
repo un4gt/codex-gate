@@ -9,6 +9,10 @@ interface RecentLogsProps {
   rows: RequestLogRow[];
 }
 
+function totalTokens(row: RequestLogRow) {
+  return row.input_tokens + row.output_tokens + row.cache_read_input_tokens + row.cache_creation_input_tokens;
+}
+
 export function RecentLogs(props: RecentLogsProps) {
   return (
     <Card class="h-full overflow-hidden">
@@ -20,7 +24,7 @@ export function RecentLogs(props: RecentLogsProps) {
           </div>
           <Badge variant="outline">仅摘要</Badge>
         </div>
-        <CardDescription>只保留摘要字段，不保存请求或响应正文；更适合快速排查状态码、模型和时延。</CardDescription>
+        <CardDescription>快速查看状态、模型、时延和成本。</CardDescription>
       </CardHeader>
       <CardContent>
         <Show when={props.rows.length > 0} fallback={<div class="empty-state">{t('还没有可展示的日志，等第一批流量进来后这里会自动出现。')}</div>}>
@@ -36,7 +40,7 @@ export function RecentLogs(props: RecentLogsProps) {
                     <div class="log-row__meta mt-3 flex flex-wrap gap-3 text-xs uppercase tracking-[0.14em] text-muted-foreground">
                       <span>{formatRequestType(row.api_format)}</span>
                       <span>{formatDateTime(row.time_ms)}</span>
-                      <span>{`${formatCompactInteger(row.input_tokens + row.output_tokens)} ${t('用量')}`}</span>
+                      <span>{`${formatCompactInteger(totalTokens(row))} ${t('用量')}`}</span>
                     </div>
                   </div>
                   <div class="flex flex-col items-start gap-2 text-sm md:items-end">

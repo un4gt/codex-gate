@@ -43,6 +43,7 @@ export interface RequestLogRow {
 export interface RequestLogSearchParams {
   page: number;
   page_size: number;
+  query?: string;
   model?: string;
   provider_id?: number;
   endpoint_id?: number;
@@ -321,7 +322,8 @@ export interface SystemConfigResponse {
     db_dsn: string;
     static_dir: string;
     max_request_bytes: number;
-    max_response_bytes: number;
+    usage_capture_bytes: number;
+    usage_capture_tail_bytes: number;
     log_queue_capacity: number;
     stats_flush_interval_ms: number;
   };

@@ -1667,7 +1667,8 @@ async fn system_config(_req: Request<Incoming>, state: SharedState) -> HttpRespo
             "db_dsn": config.db_dsn,
             "static_dir": config.static_dir,
             "max_request_bytes": config.max_request_bytes,
-            "max_response_bytes": config.max_response_bytes,
+            "usage_capture_bytes": config.usage_capture_bytes,
+            "usage_capture_tail_bytes": config.usage_capture_tail_bytes,
             "log_queue_capacity": config.log_queue_capacity,
             "stats_flush_interval_ms": config.stats_flush_interval.as_millis() as u64,
         },
@@ -1989,6 +1990,8 @@ async fn stats_usage_breakdown(req: Request<Incoming>, state: SharedState) -> Ht
 async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let page = query_i64(req.uri().query(), "page").unwrap_or(1);
     let page_size = query_i64(req.uri().query(), "page_size").unwrap_or(20);
+    let query =
+        query_string(req.uri().query(), "query").or_else(|| query_string(req.uri().query(), "q"));
     let model = query_string(req.uri().query(), "model");
     let provider_id = query_i64(req.uri().query(), "provider_id");
     let endpoint_id = query_i64(req.uri().query(), "endpoint_id");
@@ -2024,6 +2027,11 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
         && !matches!(format, "chat_completions" | "responses")
     {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid api_format");
+    }
+    if let Some(status_class) = status_class
+        && !(1..=5).contains(&status_class)
+    {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid status_class");
     }
     if let (Some(from_ms), Some(to_ms)) = (time_from_ms, time_to_ms)
         && from_ms > to_ms
@@ -2078,6 +2086,7 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     }
 
     let filter = RequestLogFilter {
+        query,
         model,
         provider_id,
         endpoint_id,

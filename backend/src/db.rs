@@ -57,6 +57,7 @@ impl From<sqlx::Error> for DbError {
 
 #[derive(Clone, Debug, Default)]
 pub struct RequestLogFilter {
+    pub query: Option<String>,
     pub model: Option<String>,
     pub provider_id: Option<i64>,
     pub endpoint_id: Option<i64>,
@@ -2684,6 +2685,26 @@ fn append_request_logs_filters_sqlite(
 ) {
     let mut has_where = false;
 
+    if let Some(query) = filter
+        .query
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let pattern = format!("%{query}%");
+        qb.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        qb.push("(");
+        qb.push("request_logs.id LIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.model LIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.error_type LIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.error_message LIKE ");
+        qb.push_bind(pattern);
+        qb.push(")");
+    }
     if let Some(model) = filter
         .model
         .as_ref()
@@ -2845,6 +2866,26 @@ fn append_request_logs_filters_postgres(
 ) {
     let mut has_where = false;
 
+    if let Some(query) = filter
+        .query
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let pattern = format!("%{query}%");
+        qb.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        qb.push("(");
+        qb.push("request_logs.id ILIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.model ILIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.error_type ILIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.error_message ILIKE ");
+        qb.push_bind(pattern);
+        qb.push(")");
+    }
     if let Some(model) = filter
         .model
         .as_ref()

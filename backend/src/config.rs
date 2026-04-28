@@ -19,7 +19,8 @@ pub struct Config {
     pub upstream_cache_ttl: Duration,
     pub upstream_cache_stale_grace: Duration,
     pub max_request_bytes: usize,
-    pub max_response_bytes: usize,
+    pub usage_capture_bytes: usize,
+    pub usage_capture_tail_bytes: usize,
     pub log_queue_capacity: usize,
     pub stats_flush_interval: Duration,
     pub upstream_connect_timeout: Duration,
@@ -76,7 +77,14 @@ impl Config {
             Duration::from_millis(getenv_u64("UPSTREAM_CACHE_STALE_GRACE_MS").unwrap_or(30_000));
 
         let max_request_bytes = getenv_usize("MAX_REQUEST_BYTES").unwrap_or(10 * 1024 * 1024);
-        let max_response_bytes = getenv_usize("MAX_RESPONSE_BYTES").unwrap_or(20 * 1024 * 1024);
+        let legacy_max_response_bytes = getenv_usize("MAX_RESPONSE_BYTES");
+        let usage_capture_bytes = getenv_usize("USAGE_CAPTURE_BYTES")
+            .or(legacy_max_response_bytes)
+            .unwrap_or(2 * 1024 * 1024)
+            .max(1);
+        let usage_capture_tail_bytes = getenv_usize("USAGE_CAPTURE_TAIL_BYTES")
+            .unwrap_or_else(|| (usage_capture_bytes / 2).max(1))
+            .min(usage_capture_bytes);
         let log_queue_capacity = getenv_usize("LOG_QUEUE_CAPACITY").unwrap_or(2048);
         let stats_flush_interval =
             Duration::from_millis(getenv_u64("STATS_FLUSH_INTERVAL_MS").unwrap_or(2_000));
@@ -126,7 +134,8 @@ impl Config {
             upstream_cache_ttl,
             upstream_cache_stale_grace,
             max_request_bytes,
-            max_response_bytes,
+            usage_capture_bytes,
+            usage_capture_tail_bytes,
             log_queue_capacity,
             stats_flush_interval,
             upstream_connect_timeout,

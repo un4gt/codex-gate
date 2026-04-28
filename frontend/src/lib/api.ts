@@ -134,6 +134,9 @@ export async function loadRequestLogs(settings: ConnectionSettings, params: Requ
   const search = new URLSearchParams();
   search.set('page', String(params.page));
   search.set('page_size', String(params.page_size));
+  if (params.query?.trim()) {
+    search.set('query', params.query.trim());
+  }
   if (params.model?.trim()) {
     search.set('model', params.model.trim());
   }

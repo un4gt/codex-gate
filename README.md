@@ -200,9 +200,12 @@ curl -fsS http://127.0.0.1:8080/readyz
 | `UPSTREAM_CACHE_TTL_MS` | `2000` | 上游快照缓存 TTL。 |
 | `UPSTREAM_CACHE_STALE_GRACE_MS` | `30000` | 上游缓存过期后的容错窗口。 |
 | `MAX_REQUEST_BYTES` | `10485760` | 单次请求体最大字节数（10MB）。 |
-| `MAX_RESPONSE_BYTES` | `20971520` | 单次响应体最大字节数（20MB）。 |
+| `USAGE_CAPTURE_BYTES` | `2097152` | 非流式响应用量采样窗口总字节数（2MB）。 |
+| `USAGE_CAPTURE_TAIL_BYTES` | `1048576` | 用量采样窗口中保留尾部的字节数（1MB）。 |
 | `LOG_QUEUE_CAPACITY` | `2048` | 异步日志/遥测队列容量。 |
 | `STATS_FLUSH_INTERVAL_MS` | `2000` | 统计聚合刷新周期。 |
+
+旧版 `MAX_RESPONSE_BYTES` 仍可作为 `USAGE_CAPTURE_BYTES` 的回退值，但新部署建议使用上面的用量采样字段。
 
 ### 选路、熔断与超时字段
 

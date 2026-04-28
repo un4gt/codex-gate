@@ -134,7 +134,8 @@ export function SettingsPage(props: SettingsPageProps) {
           <InfoTile label="监控地址" value={props.systemConfig?.connection.metrics_path ?? '/metrics'} />
           <InfoTile label="静态目录" value={props.systemConfig?.basic.static_dir ?? '—'} />
           <InfoTile label="数据库" value={props.systemConfig?.basic.db_dsn ?? '—'} />
-          <InfoTile label="请求大小限制" value={props.systemConfig ? `${props.systemConfig.basic.max_request_bytes} / ${props.systemConfig.basic.max_response_bytes}` : '—'} />
+          <InfoTile label="请求大小" value={props.systemConfig ? String(props.systemConfig.basic.max_request_bytes) : '—'} />
+          <InfoTile label="用量采样" value={props.systemConfig ? `${props.systemConfig.basic.usage_capture_bytes} / ${props.systemConfig.basic.usage_capture_tail_bytes}` : '—'} />
           <InfoTile label="统计刷新" value={props.systemConfig ? `${props.systemConfig.basic.stats_flush_interval_ms}ms` : '—'} />
         </div>
       </SettingsSection>

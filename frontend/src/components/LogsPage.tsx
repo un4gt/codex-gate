@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onMount } from 'solid-js';
+import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js';
 import { Copy, Search } from 'lucide-solid';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -60,9 +60,12 @@ function totalTokens(row: RequestLogRow) {
 }
 
 function rowStatus(row: RequestLogRow) {
-  if ((row.http_status ?? 0) >= 500) return { tone: 'error' as const, label: String(row.http_status) };
-  if ((row.http_status ?? 0) >= 400) return { tone: 'warning' as const, label: String(row.http_status) };
-  return { tone: 'normal' as const, label: String(row.http_status ?? 200) };
+  if (row.http_status === null) {
+    return row.error_type ? { tone: 'error' as const, label: '失败' } : { tone: 'normal' as const, label: '—' };
+  }
+  if (row.http_status >= 500) return { tone: 'error' as const, label: String(row.http_status) };
+  if (row.http_status >= 400) return { tone: 'warning' as const, label: String(row.http_status) };
+  return { tone: 'normal' as const, label: String(row.http_status) };
 }
 
 export function LogsPage(props: LogsPageProps) {
@@ -89,7 +92,7 @@ export function LogsPage(props: LogsPageProps) {
     });
   });
 
-  const loadLogs = async () => {
+  const loadLogs = async (activeFilters = filters()) => {
     setLoading(true);
     try {
       if (!props.settings.adminToken.trim()) {
@@ -97,11 +100,12 @@ export function LogsPage(props: LogsPageProps) {
         return;
       }
 
-      const current = filters();
+      const current = activeFilters;
       const result = await loadRequestLogs(props.settings, {
         page: 1,
         page_size: 50,
-        model: current.model || current.query || undefined,
+        query: current.query || undefined,
+        model: current.model || undefined,
         api_key_id: current.apiKeyId ? Number(current.apiKeyId) : undefined,
         provider_id: current.providerId ? Number(current.providerId) : undefined,
         endpoint_id: current.endpointId ? Number(current.endpointId) : undefined,
@@ -127,6 +131,16 @@ export function LogsPage(props: LogsPageProps) {
     void loadLogs();
   });
 
+  createEffect(
+    on(
+      () => props.refreshKey,
+      () => {
+        void loadLogs();
+      },
+      { defer: true },
+    ),
+  );
+
   const filteredRows = createMemo(() => {
     const draft = filters();
     return rows()
@@ -143,7 +157,7 @@ export function LogsPage(props: LogsPageProps) {
       .sort((left, right) => right.time_ms - left.time_ms);
   });
 
-  const errorCount = createMemo(() => filteredRows().filter((row) => (row.http_status ?? 0) >= 400).length);
+  const errorCount = createMemo(() => filteredRows().filter((row) => (row.http_status ?? 0) >= 400 || row.error_type).length);
 
   const copyField = async (value: string, label: string) => {
     if (!navigator?.clipboard) {
@@ -216,10 +230,10 @@ export function LogsPage(props: LogsPageProps) {
           <div class="flex gap-2">
             <Button type="button" size="sm" onClick={() => void loadLogs()} disabled={loading()}>
               <Search class="mr-2 size-3" />
-              {loading() ? 'SEARCHING' : 'SEARCH'}
+              {loading() ? '查询中' : '查询'}
             </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={() => { setFilters(EMPTY_FILTERS); void loadLogs(); }}>
-              RESET
+            <Button type="button" size="sm" variant="ghost" onClick={() => { setFilters(EMPTY_FILTERS); void loadLogs(EMPTY_FILTERS); }}>
+              重置
             </Button>
           </div>
         }
@@ -231,7 +245,7 @@ export function LogsPage(props: LogsPageProps) {
             <div class="flex items-center justify-between gap-3">
               <div>
                 <CardTitle class="text-xl font-medium tracking-tight">结果</CardTitle>
-                <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('默认按最近时间排序，优先暴露错误请求。')}</CardDescription>
+                <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('默认按最近时间排序。')}</CardDescription>
               </div>
               <div class="flex gap-2">
                 <StatusBadge tone={errorCount() > 0 ? 'warning' : 'normal'}>{t('{{count}} 条异常', { count: errorCount() })}</StatusBadge>
@@ -241,8 +255,8 @@ export function LogsPage(props: LogsPageProps) {
           </CardHeader>
           <CardContent class="p-0 border-t border-border/40">
             <Show
-              when={filteredRows().length > 0}
-              fallback={<EmptyState title="NO LOGS" description="Awaiting telemetry." />}
+              when={rows().length > 0}
+              fallback={<EmptyState title="暂无日志" description="有流量后会显示。" />}
             >
           <div class="logs-table">
             <div class="hidden xl:grid gap-4 px-4 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20 py-3 mb-2" style={{ 'grid-template-columns': 'minmax(160px, 1.15fr) minmax(180px, 1.1fr) minmax(120px, 0.8fr) minmax(160px, 1fr) minmax(140px, 0.85fr) minmax(130px, 0.82fr)' }}>
@@ -257,11 +271,11 @@ export function LogsPage(props: LogsPageProps) {
               when={filteredRows().length > 0}
               fallback={
                 <EmptyState
-                  title="NO LOGS FOUND"
+                  title="未找到日志"
                   description="尝试放宽筛选条件。"
                   action={
-                    <Button type="button" variant="ghost" onClick={() => { setFilters(EMPTY_FILTERS); void loadLogs(); }}>
-                      CLEAR FILTERS
+                    <Button type="button" variant="ghost" onClick={() => { setFilters(EMPTY_FILTERS); void loadLogs(EMPTY_FILTERS); }}>
+                      清空筛选
                     </Button>
                   }
                 />
@@ -365,7 +379,7 @@ export function LogsPage(props: LogsPageProps) {
                       <DetailItem label="输出用量" value={formatCompactInteger(row.output_tokens)} onCopy={() => void copyField(String(row.output_tokens), '输出用量')} />
                       <DetailItem label="缓存读取" value={formatCompactInteger(row.cache_read_input_tokens)} onCopy={() => void copyField(String(row.cache_read_input_tokens), '缓存读取')} />
                       <DetailItem label="缓存写入" value={formatCompactInteger(row.cache_creation_input_tokens)} onCopy={() => void copyField(String(row.cache_creation_input_tokens), '缓存写入')} />
-                      <DetailItem label="元数据" value={row.error_message ?? '无'} onCopy={() => void copyField(row.error_message ?? '', '错误信息')} />
+                      <DetailItem label="错误信息" value={row.error_message ?? '无'} onCopy={() => void copyField(row.error_message ?? '', '错误信息')} />
                     </div>
                   </CardContent>
                 </Card>

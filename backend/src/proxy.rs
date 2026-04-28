@@ -671,7 +671,8 @@ async fn proxy_openai(
                 start,
                 is_sse,
                 price: resolved.price.clone(),
-                max_response_bytes: state.config.max_response_bytes,
+                usage_capture_bytes: state.config.usage_capture_bytes,
+                usage_capture_tail_bytes: state.config.usage_capture_tail_bytes,
                 endpoint_health: state.endpoint_health.clone(),
                 upstream_key_health: state.upstream_key_health.clone(),
                 metrics: state.metrics.clone(),
@@ -1198,7 +1199,8 @@ struct TapConfig {
     start: Instant,
     is_sse: bool,
     price: Option<ModelPriceData>,
-    max_response_bytes: usize,
+    usage_capture_bytes: usize,
+    usage_capture_tail_bytes: usize,
     endpoint_health: std::sync::Arc<crate::health::EndpointHealthBook>,
     upstream_key_health: std::sync::Arc<crate::health::UpstreamKeyHealthBook>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
@@ -1210,7 +1212,7 @@ struct TapFinalizeInputs<'a> {
     usage: &'a mut Usage,
     error_type: &'a Option<String>,
     error_message: &'a Option<String>,
-    collected: &'a BytesMut,
+    capture: &'a UsageCaptureBuffer,
 }
 
 pin_project! {
@@ -1227,7 +1229,7 @@ pin_project! {
         error_type: Option<String>,
         error_message: Option<String>,
 
-        collected: BytesMut,
+        capture: UsageCaptureBuffer,
         sse: Option<SseParser>,
     }
 
@@ -1244,7 +1246,7 @@ pin_project! {
                     usage: this.usage,
                     error_type: this.error_type,
                     error_message: this.error_message,
-                    collected: this.collected,
+                    capture: this.capture,
                 },
             );
         }
@@ -1262,6 +1264,8 @@ impl ProxyTapBody {
         } else {
             None
         };
+        let capture =
+            UsageCaptureBuffer::new(cfg.usage_capture_bytes, cfg.usage_capture_tail_bytes);
         Self {
             inner,
             cfg,
@@ -1272,7 +1276,7 @@ impl ProxyTapBody {
             usage: Usage::default(),
             error_type: None,
             error_message: None,
-            collected: BytesMut::new(),
+            capture,
             sse,
         }
     }
@@ -1302,7 +1306,7 @@ impl hyper::body::Body for ProxyTapBody {
                         usage: this.usage,
                         error_type: this.error_type,
                         error_message: this.error_message,
-                        collected: this.collected,
+                        capture: this.capture,
                     },
                 );
                 Poll::Ready(None)
@@ -1323,15 +1327,7 @@ impl hyper::body::Body for ProxyTapBody {
                             *this.usage = u;
                         }
                     } else {
-                        if this.collected.len() < this.cfg.max_response_bytes {
-                            let remaining = this.cfg.max_response_bytes - this.collected.len();
-                            let slice = if data.len() > remaining {
-                                &data[..remaining]
-                            } else {
-                                &data[..]
-                            };
-                            this.collected.extend_from_slice(slice);
-                        }
+                        this.capture.push(data);
                     }
                 }
                 Poll::Ready(Some(Ok(frame)))
@@ -1349,7 +1345,7 @@ impl hyper::body::Body for ProxyTapBody {
                         usage: this.usage,
                         error_type: this.error_type,
                         error_message: this.error_message,
-                        collected: this.collected,
+                        capture: this.capture,
                     },
                 );
                 Poll::Ready(Some(Err(e)))
@@ -1458,9 +1454,8 @@ fn finalize_tap(
     *finalized = true;
 
     if !cfg.is_sse
-        && !inputs.collected.is_empty()
-        && let Ok(v) = serde_json::from_slice::<Value>(inputs.collected)
-        && let Some(u) = extract_usage(cfg.api_format, &v)
+        && !inputs.capture.is_empty()
+        && let Some(u) = extract_usage_from_capture(cfg.api_format, inputs.capture)
     {
         *inputs.usage = u;
     }
@@ -1511,6 +1506,210 @@ fn finalize_tap(
         return;
     };
     let _ = permit.send(event);
+}
+
+struct UsageCaptureBuffer {
+    head: BytesMut,
+    tail: BytesMut,
+    total_seen: usize,
+    head_limit: usize,
+    tail_limit: usize,
+}
+
+impl UsageCaptureBuffer {
+    fn new(max_bytes: usize, tail_bytes: usize) -> Self {
+        let max_bytes = max_bytes.max(1);
+        let tail_limit = tail_bytes.min(max_bytes);
+        let head_limit = max_bytes - tail_limit;
+        Self {
+            head: BytesMut::with_capacity(head_limit.min(8 * 1024)),
+            tail: BytesMut::with_capacity(tail_limit.min(8 * 1024)),
+            total_seen: 0,
+            head_limit,
+            tail_limit,
+        }
+    }
+
+    fn push(&mut self, data: &Bytes) {
+        let mut remaining = data.as_ref();
+        self.total_seen = self.total_seen.saturating_add(remaining.len());
+
+        if self.head.len() < self.head_limit {
+            let take = (self.head_limit - self.head.len()).min(remaining.len());
+            self.head.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+        }
+
+        self.push_tail(remaining);
+    }
+
+    fn push_tail(&mut self, bytes: &[u8]) {
+        if self.tail_limit == 0 || bytes.is_empty() {
+            return;
+        }
+
+        if bytes.len() >= self.tail_limit {
+            self.tail.clear();
+            self.tail
+                .extend_from_slice(&bytes[bytes.len() - self.tail_limit..]);
+            return;
+        }
+
+        self.tail.extend_from_slice(bytes);
+        if self.tail.len() > self.tail_limit {
+            let overflow = self.tail.len() - self.tail_limit;
+            let _ = self.tail.split_to(overflow);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.head.is_empty() && self.tail.is_empty()
+    }
+
+    fn is_truncated(&self) -> bool {
+        self.total_seen > self.head_limit.saturating_add(self.tail_limit)
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.head.len() + self.tail.len());
+        out.extend_from_slice(&self.head);
+        out.extend_from_slice(&self.tail);
+        out
+    }
+}
+
+fn extract_usage_from_capture(
+    api_format: &'static str,
+    capture: &UsageCaptureBuffer,
+) -> Option<Usage> {
+    let window = capture.to_vec();
+    if !capture.is_truncated()
+        && let Ok(v) = serde_json::from_slice::<Value>(&window)
+        && let Some(usage) = extract_usage(api_format, &v)
+    {
+        return Some(usage);
+    }
+
+    extract_usage_from_window(api_format, &window)
+}
+
+fn extract_usage_from_window(api_format: &'static str, window: &[u8]) -> Option<Usage> {
+    let mut search_end = window.len();
+    while let Some(key_pos) = rfind_subslice(&window[..search_end], b"\"usage\"") {
+        if let Some((start, end)) = json_value_span_after_key(window, key_pos)
+            && let Ok(v) = serde_json::from_slice::<Value>(&window[start..end])
+            && let Some(usage) = parse_usage_value(api_format, &v)
+        {
+            return Some(usage);
+        }
+        search_end = key_pos;
+    }
+    None
+}
+
+fn parse_usage_value(api_format: &'static str, value: &Value) -> Option<Usage> {
+    match api_format {
+        "chat_completions" => parse_chat_usage(value),
+        "responses" => parse_responses_usage(value),
+        _ => None,
+    }
+}
+
+fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .rposition(|candidate| candidate == needle)
+}
+
+fn json_value_span_after_key(input: &[u8], key_pos: usize) -> Option<(usize, usize)> {
+    let mut idx = key_pos.checked_add(b"\"usage\"".len())?;
+    while idx < input.len() && input[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    if input.get(idx).copied()? != b':' {
+        return None;
+    }
+    idx += 1;
+    while idx < input.len() && input[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let end = scan_json_value_end(input, idx)?;
+    Some((idx, end))
+}
+
+fn scan_json_value_end(input: &[u8], start: usize) -> Option<usize> {
+    if start >= input.len() {
+        return None;
+    }
+    match input[start] {
+        b'{' | b'[' => {
+            let mut depth: i32 = 0;
+            let mut in_string = false;
+            let mut escape = false;
+            let mut idx = start;
+            while idx < input.len() {
+                let byte = input[idx];
+                if in_string {
+                    if escape {
+                        escape = false;
+                    } else if byte == b'\\' {
+                        escape = true;
+                    } else if byte == b'"' {
+                        in_string = false;
+                    }
+                    idx += 1;
+                    continue;
+                }
+
+                match byte {
+                    b'"' => {
+                        in_string = true;
+                        escape = false;
+                    }
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(idx + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                idx += 1;
+            }
+            None
+        }
+        b'"' => {
+            let mut idx = start + 1;
+            let mut escape = false;
+            while idx < input.len() {
+                let byte = input[idx];
+                if escape {
+                    escape = false;
+                } else if byte == b'\\' {
+                    escape = true;
+                } else if byte == b'"' {
+                    return Some(idx + 1);
+                }
+                idx += 1;
+            }
+            None
+        }
+        _ => {
+            let mut idx = start;
+            while idx < input.len() {
+                let byte = input[idx];
+                if byte == b',' || byte == b'}' || byte == b']' || byte.is_ascii_whitespace() {
+                    break;
+                }
+                idx += 1;
+            }
+            Some(idx)
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1751,8 +1950,12 @@ fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Deci
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_cost, parse_chat_usage, parse_responses_usage};
+    use super::{
+        UsageCaptureBuffer, compute_cost, extract_usage_from_capture, parse_chat_usage,
+        parse_responses_usage,
+    };
     use crate::types::ModelPriceData;
+    use bytes::Bytes;
     use rust_decimal::Decimal;
     use serde_json::json;
 
@@ -1812,5 +2015,43 @@ mod tests {
 
         assert_eq!(cost_in, Decimal::new(72, 0));
         assert_eq!(cost_out, Decimal::new(12, 0));
+    }
+
+    #[test]
+    fn usage_capture_should_parse_complete_chat_body_inside_window() {
+        let body = Bytes::from_static(
+            br#"{"id":"chatcmpl","choices":[],"usage":{"prompt_tokens":20,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":3,"cache_creation_tokens":5}}}"#,
+        );
+        let mut capture = UsageCaptureBuffer::new(4096, 1024);
+
+        capture.push(&body);
+        let usage = extract_usage_from_capture("chat_completions", &capture).expect("usage");
+
+        assert!(!capture.is_truncated());
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_input_tokens, 3);
+        assert_eq!(usage.cache_creation_input_tokens, 5);
+    }
+
+    #[test]
+    fn usage_capture_should_parse_tail_chat_usage_after_truncation() {
+        let mut body = Vec::new();
+        body.extend_from_slice(br#"{"id":"chatcmpl","choices":[{"message":{"content":""#);
+        body.extend(std::iter::repeat_n(b'a', 4096));
+        body.extend_from_slice(
+            br#""}}],"usage":{"prompt_tokens":20,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":3,"cache_creation_tokens":5}}}"#,
+        );
+        let mut capture = UsageCaptureBuffer::new(256, 192);
+
+        capture.push(&Bytes::from(body));
+        let usage = extract_usage_from_capture("chat_completions", &capture).expect("usage");
+
+        assert!(capture.is_truncated());
+        assert!(capture.to_vec().len() <= 256);
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_input_tokens, 3);
+        assert_eq!(usage.cache_creation_input_tokens, 5);
     }
 }
