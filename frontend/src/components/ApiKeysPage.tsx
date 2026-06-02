@@ -13,7 +13,7 @@ import { StatsGrid } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
 import { createApiKey, deleteApiKey, updateApiKey } from '../lib/api';
-import { formatCompactInteger, formatCost, formatDateTime, formatDateTimeLocalInput, parseDateTimeLocalInput } from '../lib/format';
+import { formatCompactInteger, formatDateTime, formatDateTimeLocalInput, parseDateTimeLocalInput } from '../lib/format';
 import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, UpdateApiKeyInput } from '../lib/types';
 
 interface ApiKeysPageProps {
@@ -168,9 +168,9 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       hint: '7 天内到期',
     },
     {
-      label: '累计成本',
-      value: formatCost(props.items.reduce((sum, item) => sum + item.totals.cost, 0)),
-      hint: '按所有密钥汇总',
+      label: '记录日志',
+      value: formatCompactInteger(props.items.filter((item) => item.apiKey.log_enabled).length),
+      hint: '开启请求元数据',
     },
   ]);
 
@@ -214,10 +214,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 <TableRow>
                   <TableHead>密钥</TableHead>
                   <TableHead>状态</TableHead>
-                  <TableHead>最近模型</TableHead>
-                  <TableHead>请求量</TableHead>
-                  <TableHead>用量</TableHead>
-                  <TableHead>成本</TableHead>
+                  <TableHead>日志</TableHead>
                   <TableHead>到期</TableHead>
                   <TableHead class="text-right">操作</TableHead>
                 </TableRow>
@@ -237,10 +234,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                         <TableCell>
                           <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                         </TableCell>
-                        <TableCell>{item.recentModels.length > 0 ? item.recentModels.join(', ') : '—'}</TableCell>
-                        <TableCell>{formatCompactInteger(item.totals.requests)}</TableCell>
-                        <TableCell>{formatCompactInteger(item.totals.tokens)}</TableCell>
-                        <TableCell>{formatCost(item.totals.cost)}</TableCell>
+                        <TableCell>{item.apiKey.log_enabled ? '开启' : '关闭'}</TableCell>
                         <TableCell>{item.apiKey.expires_at_ms ? formatDateTime(item.apiKey.expires_at_ms) : '不过期'}</TableCell>
                         <TableCell class="text-right">
                           <div class="flex justify-end gap-2">
@@ -352,14 +346,14 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   </Card>
                   <Card class="border-border/70 bg-muted/25">
                     <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('请求量')}</div>
-                      <div class="mt-2 text-xl font-semibold text-foreground">{formatCompactInteger(data.totals.requests)}</div>
+                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('请求元数据')}</div>
+                      <div class="mt-2 text-xl font-semibold text-foreground">{data.apiKey.log_enabled ? '开启' : '关闭'}</div>
                     </CardContent>
                   </Card>
                   <Card class="border-border/70 bg-muted/25">
                     <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('成本')}</div>
-                      <div class="mt-2 text-xl font-semibold text-foreground">{formatCost(data.totals.cost)}</div>
+                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('到期')}</div>
+                      <div class="mt-2 text-xl font-semibold text-foreground">{data.apiKey.expires_at_ms ? formatDateTime(data.apiKey.expires_at_ms) : '不过期'}</div>
                     </CardContent>
                   </Card>
                 </div>
@@ -386,13 +380,6 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       <span>{t('记录请求元数据')}</span>
                     </label>
                   </div>
-
-                  <Card class="border-border/70 bg-muted/25">
-                    <CardContent class="grid gap-2 p-4">
-                      <div class="text-sm text-muted-foreground">{t('最近使用模型')}</div>
-                      <div class="text-sm text-foreground">{data.recentModels.length > 0 ? data.recentModels.join(', ') : t('暂无记录')}</div>
-                    </CardContent>
-                  </Card>
 
                   <div class="flex flex-wrap gap-2">
                     <Button type="submit" disabled={busy() === `update-${data.apiKey.id}`}>

@@ -5,7 +5,9 @@ use crate::codex_oauth::CodexOauthManager;
 use crate::config::Config;
 use crate::db::Database;
 use crate::health::{EndpointHealthBook, UpstreamKeyHealthBook};
+use crate::key_rotation::KeyRotationBook;
 use crate::metrics::Metrics;
+use crate::runtime_settings::RuntimeSettings;
 use crate::telemetry::Telemetry;
 use crate::upstream::UpstreamClient;
 
@@ -17,8 +19,10 @@ pub struct AppState {
     pub upstream: UpstreamClient,
     pub endpoint_health: Arc<EndpointHealthBook>,
     pub upstream_key_health: Arc<UpstreamKeyHealthBook>,
+    pub key_rotation: Arc<KeyRotationBook>,
     pub metrics: Arc<Metrics>,
     pub codex_oauth: CodexOauthManager,
+    pub runtime_settings: RuntimeSettings,
 }
 
 pub type SharedState = Arc<AppState>;

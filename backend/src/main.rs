@@ -6,10 +6,12 @@ mod crypto;
 mod db;
 mod health;
 mod http;
+mod key_rotation;
 mod log_archive;
 mod metrics;
 mod openai;
 mod proxy;
+mod runtime_settings;
 mod selector;
 mod state;
 mod telemetry;
@@ -149,6 +151,10 @@ async fn serve_static(req: Request<hyper::body::Incoming>, state: SharedState) -
 
     let base_dir = PathBuf::from(&state.config.static_dir);
     let request_path = req.uri().path();
+    if request_path == "/access" || request_path.starts_with("/access/") {
+        return crate::http::json_error(StatusCode::NOT_FOUND, "not found");
+    }
+
     let Some(safe_path) = sanitize_static_path(request_path) else {
         return crate::http::json_error(StatusCode::BAD_REQUEST, "invalid path");
     };
@@ -249,9 +255,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.circuit_breaker_failure_threshold,
         config.circuit_breaker_open_ms,
     ));
+    let key_rotation = Arc::new(key_rotation::KeyRotationBook::new());
 
     let metrics = Arc::new(metrics::Metrics::new());
     let codex_oauth = codex_oauth::CodexOauthManager::new();
+    let runtime_settings = runtime_settings::RuntimeSettings::load(&config, &db)
+        .await
+        .map_err(|e| format!("runtime settings: {e}"))?;
 
     let state: SharedState = Arc::new(AppState {
         config,
@@ -261,8 +271,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         upstream,
         endpoint_health,
         upstream_key_health,
+        key_rotation,
         metrics,
         codex_oauth,
+        runtime_settings,
     });
 
     let addr: SocketAddr = state.config.listen_addr;

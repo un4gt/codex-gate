@@ -7,11 +7,12 @@ use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use crate::db::{Database, DbError};
-use crate::types::{RequestLogRow, StatsDailyRow, Usage};
+use crate::types::{RequestLogRow, StatsDailyRow, StatsHourlyRow, Usage};
 use crate::util;
 
 pub const COST_SCALE: u32 = 15;
 const MILLIS_PER_DAY: i64 = 86_400_000;
+const MILLIS_PER_HOUR: i64 = 3_600_000;
 const RETENTION_MAX_BATCHES_PER_RUN: usize = 4;
 
 #[derive(Clone, Debug)]
@@ -35,6 +36,7 @@ pub struct TelemetryEvent {
     pub duration_ms: Option<i64>,
 
     pub usage: Usage,
+    pub usage_observed: bool,
     pub cost_in_usd: Decimal,
     pub cost_out_usd: Decimal,
     pub time_ms: i64,
@@ -98,10 +100,8 @@ impl Telemetry {
         Ok(Self { tx })
     }
 
-    pub async fn reserve_permit(
-        &self,
-    ) -> Result<mpsc::OwnedPermit<TelemetryEvent>, mpsc::error::SendError<()>> {
-        self.tx.clone().reserve_owned().await
+    pub fn try_reserve_permit(&self) -> Result<mpsc::OwnedPermit<TelemetryEvent>, ()> {
+        self.tx.clone().try_reserve_owned().map_err(|_| ())
     }
 }
 
@@ -113,6 +113,8 @@ struct StatsAgg {
     output_tokens: i64,
     cache_read_input_tokens: i64,
     cache_creation_input_tokens: i64,
+    reasoning_output_tokens: i64,
+    usage_observed_requests: i64,
     cost_in_usd: Decimal,
     cost_out_usd: Decimal,
     wait_time_ms: i64,
@@ -123,6 +125,7 @@ impl StatsAgg {
         &mut self,
         ok: bool,
         usage: &Usage,
+        usage_observed: bool,
         cost_in: Decimal,
         cost_out: Decimal,
         wait_time_ms: i64,
@@ -136,9 +139,57 @@ impl StatsAgg {
         self.output_tokens += usage.output_tokens;
         self.cache_read_input_tokens += usage.cache_read_input_tokens;
         self.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+        self.reasoning_output_tokens += usage.reasoning_output_tokens;
+        if usage_observed {
+            self.usage_observed_requests += 1;
+        }
         self.cost_in_usd += cost_in;
         self.cost_out_usd += cost_out;
         self.wait_time_ms += wait_time_ms;
+    }
+}
+
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+struct HourlyKey {
+    bucket_ms: i64,
+    api_key_id: i64,
+    provider_id: i64,
+    endpoint_id: i64,
+    upstream_key_id: i64,
+    api_format: &'static str,
+    model: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HourlyStatsAgg {
+    stats: StatsAgg,
+    latency_lt_500ms: i64,
+    latency_lt_1000ms: i64,
+    latency_lt_2000ms: i64,
+    latency_lt_5000ms: i64,
+    latency_lt_15000ms: i64,
+    latency_gte_15000ms: i64,
+}
+
+impl HourlyStatsAgg {
+    fn add(&mut self, ok: bool, event: &TelemetryEvent, wait_time_ms: i64) {
+        self.stats.add(
+            ok,
+            &event.usage,
+            event.usage_observed,
+            event.cost_in_usd,
+            event.cost_out_usd,
+            wait_time_ms,
+        );
+
+        match wait_time_ms {
+            value if value < 500 => self.latency_lt_500ms += 1,
+            value if value < 1_000 => self.latency_lt_1000ms += 1,
+            value if value < 2_000 => self.latency_lt_2000ms += 1,
+            value if value < 5_000 => self.latency_lt_5000ms += 1,
+            value if value < 15_000 => self.latency_lt_15000ms += 1,
+            _ => self.latency_gte_15000ms += 1,
+        }
     }
 }
 
@@ -151,6 +202,7 @@ struct TelemetryWorker {
 
     current_date: String,
     stats_by_key: HashMap<i64, StatsAgg>,
+    hourly_stats: HashMap<HourlyKey, HourlyStatsAgg>,
     dirty: bool,
 
     log_buffer: Vec<RequestLogRow>,
@@ -179,6 +231,8 @@ impl TelemetryWorker {
                     output_tokens: row.output_tokens,
                     cache_read_input_tokens: row.cache_read_input_tokens,
                     cache_creation_input_tokens: row.cache_creation_input_tokens,
+                    reasoning_output_tokens: row.reasoning_output_tokens,
+                    usage_observed_requests: row.usage_observed_requests,
                     cost_in_usd: cost_in,
                     cost_out_usd: cost_out,
                     wait_time_ms: row.wait_time_ms,
@@ -201,6 +255,7 @@ impl TelemetryWorker {
             next_retention_run_ms,
             current_date,
             stats_by_key,
+            hourly_stats: HashMap::new(),
             dirty: false,
             log_buffer: Vec::new(),
         })
@@ -257,6 +312,8 @@ impl TelemetryWorker {
                             output_tokens: row.output_tokens,
                             cache_read_input_tokens: row.cache_read_input_tokens,
                             cache_creation_input_tokens: row.cache_creation_input_tokens,
+                            reasoning_output_tokens: row.reasoning_output_tokens,
+                            usage_observed_requests: row.usage_observed_requests,
                             cost_in_usd: cost_in,
                             cost_out_usd: cost_out,
                             wait_time_ms: row.wait_time_ms,
@@ -278,6 +335,7 @@ impl TelemetryWorker {
         self.stats_by_key.entry(event.api_key_id).or_default().add(
             ok,
             &event.usage,
+            event.usage_observed,
             event.cost_in_usd,
             event.cost_out_usd,
             wait,
@@ -286,10 +344,31 @@ impl TelemetryWorker {
         self.stats_by_key.entry(0).or_default().add(
             ok,
             &event.usage,
+            event.usage_observed,
             event.cost_in_usd,
             event.cost_out_usd,
             wait,
         );
+
+        let hourly_key = HourlyKey {
+            bucket_ms: hour_bucket_ms(event.time_ms),
+            api_key_id: event.api_key_id,
+            provider_id: event.provider_id.unwrap_or(0),
+            endpoint_id: event.endpoint_id.unwrap_or(0),
+            upstream_key_id: event.upstream_key_id.unwrap_or(0),
+            api_format: event.api_format,
+            model: event
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown")
+                .to_string(),
+        };
+        self.hourly_stats
+            .entry(hourly_key)
+            .or_default()
+            .add(ok, &event, wait);
 
         self.dirty = true;
 
@@ -318,6 +397,8 @@ impl TelemetryWorker {
                 output_tokens: event.usage.output_tokens,
                 cache_read_input_tokens: event.usage.cache_read_input_tokens,
                 cache_creation_input_tokens: event.usage.cache_creation_input_tokens,
+                reasoning_output_tokens: event.usage.reasoning_output_tokens,
+                usage_observed: event.usage_observed,
                 cost_in_usd: to_cost_storage(event.cost_in_usd),
                 cost_out_usd: to_cost_storage(event.cost_out_usd),
                 cost_total_usd: to_cost_storage(event.cost_in_usd + event.cost_out_usd),
@@ -360,6 +441,8 @@ impl TelemetryWorker {
                 output_tokens: agg.output_tokens,
                 cache_read_input_tokens: agg.cache_read_input_tokens,
                 cache_creation_input_tokens: agg.cache_creation_input_tokens,
+                reasoning_output_tokens: agg.reasoning_output_tokens,
+                usage_observed_requests: agg.usage_observed_requests,
                 cost_in_usd: to_cost_storage(agg.cost_in_usd),
                 cost_out_usd: to_cost_storage(agg.cost_out_usd),
                 cost_total_usd: to_cost_storage(agg.cost_in_usd + agg.cost_out_usd),
@@ -372,6 +455,50 @@ impl TelemetryWorker {
             error!("failed to upsert stats_daily: {}", e);
             self.dirty = true;
         }
+
+        if !self.hourly_stats.is_empty() {
+            let hourly_rows = self.hourly_rows(now_ms);
+            if let Err(e) = self.db.upsert_stats_hourly(&hourly_rows).await {
+                error!("failed to upsert stats_hourly: {}", e);
+                self.dirty = true;
+            } else {
+                self.hourly_stats.clear();
+            }
+        }
+    }
+
+    fn hourly_rows(&self, updated_at_ms: i64) -> Vec<StatsHourlyRow> {
+        self.hourly_stats
+            .iter()
+            .map(|(key, agg)| StatsHourlyRow {
+                bucket_ms: key.bucket_ms,
+                api_key_id: key.api_key_id,
+                provider_id: key.provider_id,
+                endpoint_id: key.endpoint_id,
+                upstream_key_id: key.upstream_key_id,
+                api_format: key.api_format.to_string(),
+                model: key.model.clone(),
+                request_success: agg.stats.request_success,
+                request_failed: agg.stats.request_failed,
+                input_tokens: agg.stats.input_tokens,
+                output_tokens: agg.stats.output_tokens,
+                cache_read_input_tokens: agg.stats.cache_read_input_tokens,
+                cache_creation_input_tokens: agg.stats.cache_creation_input_tokens,
+                reasoning_output_tokens: agg.stats.reasoning_output_tokens,
+                usage_observed_requests: agg.stats.usage_observed_requests,
+                cost_in_usd: to_cost_storage(agg.stats.cost_in_usd),
+                cost_out_usd: to_cost_storage(agg.stats.cost_out_usd),
+                cost_total_usd: to_cost_storage(agg.stats.cost_in_usd + agg.stats.cost_out_usd),
+                wait_time_ms: agg.stats.wait_time_ms,
+                latency_lt_500ms: agg.latency_lt_500ms,
+                latency_lt_1000ms: agg.latency_lt_1000ms,
+                latency_lt_2000ms: agg.latency_lt_2000ms,
+                latency_lt_5000ms: agg.latency_lt_5000ms,
+                latency_lt_15000ms: agg.latency_lt_15000ms,
+                latency_gte_15000ms: agg.latency_gte_15000ms,
+                updated_at_ms,
+            })
+            .collect()
     }
 
     async fn flush_logs(&mut self) {
@@ -526,4 +653,8 @@ fn to_cost_storage(v: Decimal) -> String {
     )
     .normalize()
     .to_string()
+}
+
+fn hour_bucket_ms(time_ms: i64) -> i64 {
+    time_ms.div_euclid(MILLIS_PER_HOUR) * MILLIS_PER_HOUR
 }

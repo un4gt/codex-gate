@@ -35,6 +35,9 @@ interface LogFilters {
   durationMax: string;
   tokenMin: string;
   tokenMax: string;
+  usageObserved: '' | 'true' | 'false';
+  reasoningMin: string;
+  reasoningMax: string;
   costMin: string;
   costMax: string;
 }
@@ -51,12 +54,19 @@ const EMPTY_FILTERS: LogFilters = {
   durationMax: '',
   tokenMin: '',
   tokenMax: '',
+  usageObserved: '',
+  reasoningMin: '',
+  reasoningMax: '',
   costMin: '',
   costMax: '',
 };
 
 function totalTokens(row: RequestLogRow) {
   return row.input_tokens + row.output_tokens + row.cache_read_input_tokens + row.cache_creation_input_tokens;
+}
+
+function visibleOutputTokens(row: RequestLogRow) {
+  return Math.max(row.output_tokens - row.reasoning_output_tokens, 0);
 }
 
 function rowStatus(row: RequestLogRow) {
@@ -115,6 +125,9 @@ export function LogsPage(props: LogsPageProps) {
         duration_ms_max: current.durationMax ? Number(current.durationMax) : undefined,
         total_tokens_min: current.tokenMin ? Number(current.tokenMin) : undefined,
         total_tokens_max: current.tokenMax ? Number(current.tokenMax) : undefined,
+        usage_observed: current.usageObserved ? current.usageObserved === 'true' : undefined,
+        reasoning_output_tokens_min: current.reasoningMin ? Number(current.reasoningMin) : undefined,
+        reasoning_output_tokens_max: current.reasoningMax ? Number(current.reasoningMax) : undefined,
         cost_total_min: current.costMin ? Number(current.costMin) : undefined,
         cost_total_max: current.costMax ? Number(current.costMax) : undefined,
       });
@@ -216,10 +229,17 @@ export function LogsPage(props: LogsPageProps) {
               <option value="">{t('全部目标')}</option>
               <For each={endpointOptions()}>{(item) => <option value={item.value}>{item.label}</option>}</For>
             </Select>
-            <Input value={filters().durationMin} placeholder="延迟下限 ms" onInput={(event) => setFilters((current) => ({ ...current, durationMin: event.currentTarget.value }))} />
-            <Input value={filters().durationMax} placeholder="延迟上限 ms" onInput={(event) => setFilters((current) => ({ ...current, durationMax: event.currentTarget.value }))} />
+            <Input value={filters().durationMin} placeholder="延迟下限" onInput={(event) => setFilters((current) => ({ ...current, durationMin: event.currentTarget.value }))} />
+            <Input value={filters().durationMax} placeholder="延迟上限" onInput={(event) => setFilters((current) => ({ ...current, durationMax: event.currentTarget.value }))} />
             <Input value={filters().tokenMin} placeholder="用量下限" onInput={(event) => setFilters((current) => ({ ...current, tokenMin: event.currentTarget.value }))} />
             <Input value={filters().tokenMax} placeholder="用量上限" onInput={(event) => setFilters((current) => ({ ...current, tokenMax: event.currentTarget.value }))} />
+            <Select value={filters().usageObserved} onChange={(event) => setFilters((current) => ({ ...current, usageObserved: event.currentTarget.value as LogFilters['usageObserved'] }))}>
+              <option value="">{t('全部用量')}</option>
+              <option value="true">{t('已返回用量')}</option>
+              <option value="false">{t('未返回用量')}</option>
+            </Select>
+            <Input value={filters().reasoningMin} placeholder="思考下限" onInput={(event) => setFilters((current) => ({ ...current, reasoningMin: event.currentTarget.value }))} />
+            <Input value={filters().reasoningMax} placeholder="思考上限" onInput={(event) => setFilters((current) => ({ ...current, reasoningMax: event.currentTarget.value }))} />
             <Input value={filters().costMin} placeholder="成本下限" onInput={(event) => setFilters((current) => ({ ...current, costMin: event.currentTarget.value }))} />
             <Input value={filters().costMax} placeholder="成本上限" onInput={(event) => setFilters((current) => ({ ...current, costMax: event.currentTarget.value }))} />
           </>
@@ -239,7 +259,7 @@ export function LogsPage(props: LogsPageProps) {
         }
       />
 
-      <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <div class="grid gap-6">
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader class="pb-6">
             <div class="flex items-center justify-between gap-3">
@@ -295,7 +315,7 @@ export function LogsPage(props: LogsPageProps) {
                       <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                     </div>
                     <div class="font-mono text-xs">{formatMs(row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? 0)}</div>
-                    <div class="font-mono text-xs">{formatCompactInteger(totalTokens(row))}</div>
+                    <TokenSummary row={row} />
                     <div class="font-mono text-xs text-muted-foreground">{apiKeyNameMap().get(row.api_key_id) ?? `#${row.api_key_id}`}</div>
                   </div>
                   );
@@ -307,22 +327,6 @@ export function LogsPage(props: LogsPageProps) {
           </CardContent>
         </Card>
 
-        <Card class="rounded-none border border-border bg-background shadow-none">
-          <CardHeader class="pb-6">
-            <CardTitle class="text-xl font-medium tracking-tight">排障提示</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('从结果直接进入详情，不再混入概念说明。')}</CardDescription>
-          </CardHeader>
-          <CardContent class="flex flex-col gap-6 border-t border-border/40 pt-6">
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('默认视角')}</div>
-              <p class="mt-2 text-sm text-foreground opacity-90">{t('先看 4xx/5xx，再按模型或密钥缩小范围。')}</p>
-            </div>
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('常用筛选')}</div>
-              <p class="mt-2 text-sm text-foreground opacity-90">{t('状态、模型、密钥、延迟区间、用量区间、成本区间。')}</p>
-            </div>
-          </CardContent>
-        </Card>
       </div>
 
       <DetailDrawer
@@ -375,10 +379,15 @@ export function LogsPage(props: LogsPageProps) {
                   </CardHeader>
                   <CardContent class="grid gap-0 border-t border-border/40 pt-0">
                     <div class="grid md:grid-cols-2">
+                      <DetailItem label="总用量" value={formatCompactInteger(totalTokens(row))} onCopy={() => void copyField(String(totalTokens(row)), '总用量')} />
                       <DetailItem label="输入用量" value={formatCompactInteger(row.input_tokens)} onCopy={() => void copyField(String(row.input_tokens), '输入用量')} />
                       <DetailItem label="输出用量" value={formatCompactInteger(row.output_tokens)} onCopy={() => void copyField(String(row.output_tokens), '输出用量')} />
+                      <DetailItem label="可见输出" value={formatCompactInteger(visibleOutputTokens(row))} onCopy={() => void copyField(String(visibleOutputTokens(row)), '可见输出')} />
+                      <DetailItem label="思考用量" value={formatCompactInteger(row.reasoning_output_tokens)} onCopy={() => void copyField(String(row.reasoning_output_tokens), '思考用量')} />
                       <DetailItem label="缓存读取" value={formatCompactInteger(row.cache_read_input_tokens)} onCopy={() => void copyField(String(row.cache_read_input_tokens), '缓存读取')} />
                       <DetailItem label="缓存写入" value={formatCompactInteger(row.cache_creation_input_tokens)} onCopy={() => void copyField(String(row.cache_creation_input_tokens), '缓存写入')} />
+                      <DetailItem label="用量状态" value={row.usage_observed ? '已返回用量' : '未返回用量'} onCopy={() => void copyField(row.usage_observed ? 'observed' : 'missing', '用量状态')} />
+                      <DetailItem label="成本" value={formatCost(parseDecimal(row.cost_total_usd))} onCopy={() => void copyField(row.cost_total_usd, '成本')} />
                       <DetailItem label="错误信息" value={row.error_message ?? '无'} onCopy={() => void copyField(row.error_message ?? '', '错误信息')} />
                     </div>
                   </CardContent>
@@ -397,6 +406,33 @@ function BadgeSummary(props: { label: string; value: number }) {
     <div class="border border-border bg-transparent px-3 py-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
       {t(props.label)} {formatCompactInteger(props.value)}
     </div>
+  );
+}
+
+function TokenSummary(props: { row: RequestLogRow }) {
+  return (
+    <Show
+      when={props.row.usage_observed}
+      fallback={<div class="font-mono text-xs text-muted-foreground">{t('未返回用量')}</div>}
+    >
+      <div class="min-w-0 font-mono text-xs leading-5">
+        <div class="text-foreground">{formatCompactInteger(totalTokens(props.row))}</div>
+        <div class="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+          {t('入 {{input}} · 出 {{output}}', {
+            input: formatCompactInteger(props.row.input_tokens),
+            output: formatCompactInteger(props.row.output_tokens),
+          })}
+        </div>
+        <Show when={props.row.cache_read_input_tokens > 0 || props.row.cache_creation_input_tokens > 0 || props.row.reasoning_output_tokens > 0}>
+          <div class="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+            {t('缓存 {{cache}} · 思考 {{reasoning}}', {
+              cache: formatCompactInteger(props.row.cache_read_input_tokens + props.row.cache_creation_input_tokens),
+              reasoning: formatCompactInteger(props.row.reasoning_output_tokens),
+            })}
+          </div>
+        </Show>
+      </div>
+    </Show>
   );
 }
 

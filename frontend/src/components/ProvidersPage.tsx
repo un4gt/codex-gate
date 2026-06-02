@@ -17,8 +17,12 @@ import { t } from '@/lib/i18n';
 import {
   addUpstreamKeyModels,
   createEndpoint,
+  createModelAlias,
+  createModelAliasTarget,
   createProvider,
   createProviderKey,
+  deleteModelAlias,
+  deleteModelAliasTarget,
   deleteUpstreamKeyModel,
   deleteProviderModel,
   getCodexOauthRequest,
@@ -32,6 +36,8 @@ import {
   updateGatewayModelPolicy,
   updateEndpoint,
   updateProvider,
+  updateModelAlias,
+  updateModelAliasTarget,
   updateUpstreamKeyModel,
   updateProviderModel,
   updateProviderKey,
@@ -45,6 +51,7 @@ import type {
   CreateProviderInput,
   CreateProviderKeyInput,
   GatewayModelPolicy,
+  ModelAlias,
   ProviderModel,
   ProviderWorkspace,
   UpstreamKeyModel,
@@ -56,6 +63,7 @@ import type {
 interface ProvidersPageProps {
   settings: ConnectionSettings;
   items: ProviderWorkspace[];
+  aliases: ModelAlias[];
   onRefresh: (successMessage?: string) => Promise<void>;
   onMessage: (message: string) => void;
 }
@@ -207,6 +215,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       weight: readInt(formData, 'weight', 1),
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'websocket_enabled'),
+      key_selection_strategy: (readString(formData, 'key_selection_strategy') || 'round_robin') as 'round_robin' | 'weighted',
     };
     setCreateSubmitError(null);
     if (!payload.name) {
@@ -286,6 +295,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       weight: readInt(formData, 'provider_weight', item.provider.weight),
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'provider_websocket_enabled'),
+      key_selection_strategy: (readString(formData, 'key_selection_strategy') || item.provider.key_selection_strategy || 'round_robin') as 'round_robin' | 'weighted',
     };
 
     setBusy(`provider-${item.provider.id}`);
@@ -776,6 +786,124 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }
   };
 
+  const submitAliasCreate = async (event: SubmitEvent) => {
+    event.preventDefault();
+    if (!ensureLive()) return;
+    const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const name = readString(formData, 'alias_name');
+    if (!name) {
+      props.onMessage('模型名称不能为空。');
+      return;
+    }
+    setBusy('alias-create');
+    try {
+      await createModelAlias(props.settings, {
+        name,
+        enabled: readBool(formData, 'alias_enabled'),
+        mode: (readString(formData, 'alias_mode') || 'ordered') as 'ordered' | 'weighted',
+      });
+      (event.currentTarget as HTMLFormElement).reset();
+      await props.onRefresh(t('模型 {{name}} 已创建。', { name }));
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '创建模型失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const submitAliasUpdate = async (event: SubmitEvent, alias: ModelAlias) => {
+    event.preventDefault();
+    if (!ensureLive()) return;
+    const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const name = readString(formData, `alias_name_${alias.id}`);
+    if (!name) {
+      props.onMessage('模型名称不能为空。');
+      return;
+    }
+    setBusy(`alias-${alias.id}`);
+    try {
+      await updateModelAlias(props.settings, alias.id, {
+        name,
+        enabled: readBool(formData, `alias_enabled_${alias.id}`),
+        mode: (readString(formData, `alias_mode_${alias.id}`) || alias.mode) as 'ordered' | 'weighted',
+      });
+      await props.onRefresh(t('模型 {{name}} 已更新。', { name }));
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '更新模型失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const submitAliasTargetCreate = async (event: SubmitEvent, alias: ModelAlias) => {
+    event.preventDefault();
+    if (!ensureLive()) return;
+    const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const upstreamModel = readString(formData, `alias_target_model_${alias.id}`);
+    const providerId = readInt(formData, `alias_target_provider_${alias.id}`, 0);
+    if (!upstreamModel || providerId <= 0) {
+      props.onMessage('请选择上游并填写模型。');
+      return;
+    }
+    setBusy(`alias-target-create-${alias.id}`);
+    try {
+      await createModelAliasTarget(props.settings, alias.id, {
+        provider_id: providerId,
+        upstream_model: upstreamModel,
+        enabled: true,
+        priority: readInt(formData, `alias_target_priority_${alias.id}`, 100),
+        weight: readInt(formData, `alias_target_weight_${alias.id}`, 1),
+      });
+      (event.currentTarget as HTMLFormElement).reset();
+      await props.onRefresh('模型目标已添加。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '添加模型目标失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleAliasTarget = async (targetId: number, enabled: boolean) => {
+    if (!ensureLive()) return;
+    setBusy(`alias-target-${targetId}`);
+    try {
+      await updateModelAliasTarget(props.settings, targetId, { enabled });
+      await props.onRefresh(enabled ? '模型目标已启用。' : '模型目标已停用。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '更新模型目标失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeAliasTarget = async (targetId: number) => {
+    if (!ensureLive()) return;
+    if (!window.confirm('确认删除这个模型目标？')) return;
+    setBusy(`alias-target-${targetId}`);
+    try {
+      await deleteModelAliasTarget(props.settings, targetId);
+      await props.onRefresh('模型目标已删除。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '删除模型目标失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeAlias = async (alias: ModelAlias) => {
+    if (!ensureLive()) return;
+    if (!window.confirm(t('确认删除模型 {{name}}？', { name: alias.name }))) return;
+    setBusy(`alias-${alias.id}`);
+    try {
+      await deleteModelAlias(props.settings, alias.id);
+      await props.onRefresh('模型已删除。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '删除模型失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div class="flex flex-col gap-6">
       <PageHeader
@@ -891,6 +1019,131 @@ export function ProvidersPage(props: ProvidersPageProps) {
         </CardContent>
       </Card>
 
+      <Card class="rounded-none border border-border bg-background shadow-none">
+        <CardHeader class="pb-6">
+          <CardTitle class="text-xl font-medium tracking-tight">模型配置</CardTitle>
+          <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('用一个模型名称管理多个上游目标。')}</CardDescription>
+        </CardHeader>
+        <CardContent class="grid gap-6 border-t border-border/40 pt-6">
+          <form class="grid gap-4 xl:grid-cols-[minmax(160px,1fr)_150px_120px_120px]" onSubmit={(event) => void submitAliasCreate(event)}>
+            <Input name="alias_name" placeholder="gpt-5" class="bg-background" />
+            <Select name="alias_mode" value="ordered">
+              <option value="ordered">按顺序</option>
+              <option value="weighted">按权重</option>
+            </Select>
+            <label class="flex min-h-10 items-center gap-3 border border-border/40 px-3 text-sm text-muted-foreground">
+              <Checkbox name="alias_enabled" checked />
+              <span>{t('启用')}</span>
+            </label>
+            <Button type="submit" disabled={busy() === 'alias-create'}>
+              {busy() === 'alias-create' ? '创建中…' : '新增模型'}
+            </Button>
+          </form>
+
+          <Show
+            when={props.aliases.length > 0}
+            fallback={<EmptyState title="暂无模型配置" description="新增一个模型名称后，再为它添加上游目标。" />}
+          >
+            <div class="grid gap-5">
+              <For each={props.aliases}>
+                {(alias) => (
+                  <div class="border border-border/40 bg-muted/5 p-5">
+                    <form class="grid gap-4 xl:grid-cols-[minmax(160px,1fr)_150px_120px_160px]" onSubmit={(event) => void submitAliasUpdate(event, alias)}>
+                      <Input name={`alias_name_${alias.id}`} value={alias.name} class="bg-background" />
+                      <Select name={`alias_mode_${alias.id}`} value={alias.mode}>
+                        <option value="ordered">按顺序</option>
+                        <option value="weighted">按权重</option>
+                      </Select>
+                      <label class="flex min-h-10 items-center gap-3 border border-border/40 px-3 text-sm text-muted-foreground">
+                        <Checkbox name={`alias_enabled_${alias.id}`} checked={alias.enabled} />
+                        <span>{t('启用')}</span>
+                      </label>
+                      <div class="flex gap-2">
+                        <Button type="submit" size="sm" disabled={busy() === `alias-${alias.id}`}>
+                          保存
+                        </Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => void removeAlias(alias)}>
+                          <Trash2 class="size-4" />
+                        </Button>
+                      </div>
+                    </form>
+
+                    <div class="mt-5 overflow-x-auto border border-border/30">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>上游</TableHead>
+                            <TableHead>模型</TableHead>
+                            <TableHead>优先级</TableHead>
+                            <TableHead>权重</TableHead>
+                            <TableHead>状态</TableHead>
+                            <TableHead class="text-right">操作</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          <Show
+                            when={alias.targets.length > 0}
+                            fallback={
+                              <TableRow>
+                                <TableCell colspan={6} class="text-center text-muted-foreground">
+                                  {t('暂无目标。')}
+                                </TableCell>
+                              </TableRow>
+                            }
+                          >
+                            <For each={alias.targets}>
+                              {(target) => (
+                                <TableRow>
+                                  <TableCell>{props.items.find((item) => item.provider.id === target.provider_id)?.provider.name ?? `#${target.provider_id}`}</TableCell>
+                                  <TableCell class="font-mono text-xs">{target.upstream_model}</TableCell>
+                                  <TableCell class="font-mono text-xs">{target.priority}</TableCell>
+                                  <TableCell class="font-mono text-xs">{target.weight}</TableCell>
+                                  <TableCell>
+                                    <StatusBadge tone={target.enabled ? 'normal' : 'warning'}>{target.enabled ? '启用' : '停用'}</StatusBadge>
+                                  </TableCell>
+                                  <TableCell class="text-right">
+                                    <div class="flex justify-end gap-2">
+                                      <Button type="button" size="sm" variant="ghost" onClick={() => void toggleAliasTarget(target.id, !target.enabled)}>
+                                        {target.enabled ? '停用' : '启用'}
+                                      </Button>
+                                      <Button type="button" size="sm" variant="ghost" onClick={() => void removeAliasTarget(target.id)}>
+                                        <Trash2 class="size-4" />
+                                      </Button>
+                                    </div>
+                                  </TableCell>
+                                </TableRow>
+                              )}
+                            </For>
+                          </Show>
+                        </TableBody>
+                      </Table>
+                    </div>
+
+                    <form
+                      class="mt-4 grid gap-4 xl:grid-cols-[180px_minmax(160px,1fr)_110px_110px_120px]"
+                      onSubmit={(event) => void submitAliasTargetCreate(event, alias)}
+                    >
+                      <Select name={`alias_target_provider_${alias.id}`} value="">
+                        <option value="">选择上游</option>
+                        <For each={props.items}>
+                          {(item) => <option value={item.provider.id}>{item.provider.name}</option>}
+                        </For>
+                      </Select>
+                      <Input name={`alias_target_model_${alias.id}`} placeholder="上游模型名称" class="bg-background" />
+                      <Input name={`alias_target_priority_${alias.id}`} type="number" value="100" class="bg-background" />
+                      <Input name={`alias_target_weight_${alias.id}`} type="number" value="1" class="bg-background" />
+                      <Button type="submit" disabled={busy() === `alias-target-create-${alias.id}`}>
+                        添加目标
+                      </Button>
+                    </form>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
+        </CardContent>
+      </Card>
+
       <DetailDrawer
         open={createOpen()}
         title="NEW PROVIDER"
@@ -969,6 +1222,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
             <Field>
               <FieldLabel>权重</FieldLabel>
               <Input name="weight" type="number" value="1" class="bg-background" />
+            </Field>
+            <Field>
+              <FieldLabel>密钥分配</FieldLabel>
+              <Select name="key_selection_strategy" value="round_robin">
+                <option value="round_robin">轮询</option>
+                <option value="weighted">按权重</option>
+              </Select>
             </Field>
           </FieldGroup>
           <div class="grid gap-4 md:grid-cols-3">
@@ -1077,6 +1337,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <Field>
                       <FieldLabel>权重</FieldLabel>
                       <Input name="provider_weight" type="number" value={String(item.provider.weight)} class="bg-background" />
+                    </Field>
+                    <Field>
+                      <FieldLabel>密钥分配</FieldLabel>
+                      <Select name="key_selection_strategy" value={item.provider.key_selection_strategy ?? 'round_robin'}>
+                        <option value="round_robin">轮询</option>
+                        <option value="weighted">按权重</option>
+                      </Select>
                     </Field>
                   </FieldGroup>
                   <div class="grid gap-4 md:grid-cols-3">

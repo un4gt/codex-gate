@@ -1,20 +1,7 @@
-import { For, Show, createMemo, createSignal, onMount } from 'solid-js';
+import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js';
 import { A, Navigate, Route, Router, useLocation } from '@solidjs/router';
-import {
-  Activity,
-  Coins,
-  Copy,
-  ExternalLink,
-  KeyRound,
-  Link2,
-  ListFilter,
-  RefreshCw,
-  Server,
-  Settings,
-  SquareTerminal,
-} from 'lucide-solid';
+import { Activity, Coins, Copy, KeyRound, ListFilter, RefreshCw, Server, Settings, SquareTerminal } from 'lucide-solid';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -32,41 +19,50 @@ import { SettingsPage } from '@/components/SettingsPage';
 import { installLocaleEffect, t } from '@/lib/i18n';
 import {
   loadApiKeyWorkspace,
-  loadDashboardData,
   loadPrices,
+  loadModelAliases,
   loadProviderWorkspace,
-  loadRequestLogs,
+  loadRuntimeSettings,
+  loadStatsDaily,
   loadStatsOverview,
   loadSystemConfig,
   loadUsageBreakdown,
+  previewRuntimeEnv,
 } from '@/lib/api';
-import { buildDashboardSnapshot, createEmptyDashboardSnapshot } from '@/lib/dashboard';
 import { formatCompactInteger, formatCost, formatDateTime, formatModelName, formatMs, parseDecimal } from '@/lib/format';
 import type {
   ApiKeyWorkspace,
   ConnectionSettings,
-  DashboardSnapshot,
   ModelPrice,
+  ModelAlias,
   ProviderWorkspace,
-  RequestLogRow,
+  RuntimeEnvPreviewResponse,
+  RuntimeSettingsResponse,
+  StatsDailyRow,
   StatsOverviewResponse,
   SystemConfigResponse,
   UsageBreakdownResponse,
 } from '@/lib/types';
 
 type LoadState = 'idle' | 'loading' | 'ready';
-type ConsoleAccessMode = 'connect' | 'console';
+type ConsoleMode = 'connect' | 'console';
 
 interface AppDataContext {
   settings: () => ConnectionSettings;
-  snapshot: () => DashboardSnapshot;
   providers: () => ProviderWorkspace[];
+  modelAliases: () => ModelAlias[];
   apiKeys: () => ApiKeyWorkspace[];
   prices: () => ModelPrice[];
   systemConfig: () => SystemConfigResponse | null;
+  runtimeSettings: () => RuntimeSettingsResponse | null;
+  runtimeEnvPreview: () => RuntimeEnvPreviewResponse | null;
   status: () => LoadState;
   message: () => string;
   refreshKey: () => number;
+  loadProviders: (successMessage?: string) => Promise<void>;
+  loadModelAliases: (successMessage?: string) => Promise<void>;
+  loadApiKeys: (successMessage?: string) => Promise<void>;
+  loadPricesAndConfig: (successMessage?: string) => Promise<void>;
   onApiBaseChange: (value: string) => void;
   onAdminTokenChange: (value: string) => void;
   onRefresh: (successMessage?: string) => Promise<void>;
@@ -78,7 +74,6 @@ const ADMIN_TOKEN_KEY = 'codex_gate_admin_token';
 
 const NAV_ITEMS = [
   { to: '/overview', label: '总览', icon: Activity },
-  { to: '/access', label: '接入', icon: Link2 },
   { to: '/keys', label: '密钥', icon: KeyRound },
   { to: '/logs', label: '日志', icon: ListFilter },
   { to: '/usage', label: '成本', icon: Coins },
@@ -118,7 +113,6 @@ async function copyText(value: string, success: string, onMessage: (message: str
 
 function pageDescription(pathname: string) {
   if (pathname.startsWith('/overview')) return '查看服务状态、请求趋势与最近异常。';
-  if (pathname.startsWith('/access')) return '完成地址配置并发送第一条请求。';
   if (pathname.startsWith('/keys')) return '创建和管理访问密钥。';
   if (pathname.startsWith('/logs')) return '筛选并排查最近请求。';
   if (pathname.startsWith('/usage')) return '查看成本趋势与消耗拆分。';
@@ -297,6 +291,7 @@ function ConnectionGate(props: {
 function OverviewPage(props: { data: AppDataContext }) {
   const [overview, setOverview] = createSignal<StatsOverviewResponse | null>(null);
   const [period, setPeriod] = createSignal<'today' | '7d' | '30d'>('today');
+  const live = () => overview();
 
   const loadOverview = async () => {
     const current = props.data.settings();
@@ -317,54 +312,60 @@ function OverviewPage(props: { data: AppDataContext }) {
     void loadOverview();
   });
 
+  createEffect(
+    on(
+      () => props.data.refreshKey(),
+      () => {
+        void loadOverview();
+      },
+      { defer: true },
+    ),
+  );
+
   const metrics = createMemo<StatItem[]>(() => {
-    const live = overview();
-    if (live) {
+    const current = live();
+    if (current) {
       return [
         {
           label: '今日请求',
-          value: formatCompactInteger(live.kpis.requests),
-          hint: t('失败 {{count}}', { count: formatCompactInteger(live.kpis.failed) }),
+          value: formatCompactInteger(current.kpis.requests),
+          hint: t('失败 {{count}}', { count: formatCompactInteger(current.kpis.failed) }),
         },
         {
           label: '错误率',
-          value: `${live.kpis.error_rate.toFixed(1)}%`,
-          hint: live.kpis.error_rate > 5 ? '高于阈值' : '处于正常区间',
-          tone: live.kpis.error_rate > 5 ? 'warning' : 'success',
+          value: `${current.kpis.error_rate.toFixed(1)}%`,
+          hint: current.kpis.error_rate > 5 ? '高于阈值' : '处于正常区间',
+          tone: current.kpis.error_rate > 5 ? 'warning' : 'success',
         },
         {
           label: 'P95 延迟',
-          value: formatMs(live.kpis.p95_latency_ms),
+          value: formatMs(current.kpis.p95_latency_ms),
           hint: '最近 24 小时',
         },
         {
           label: '今日成本',
-          value: formatCost(parseDecimal(live.kpis.cost_total_usd)),
+          value: formatCost(parseDecimal(current.kpis.cost_total_usd)),
           hint: '可切到成本页查看拆分',
         },
       ];
     }
 
-    const snapshot = props.data.snapshot();
-    const errorRate = snapshot.totals.requests > 0 ? (snapshot.totals.failed / snapshot.totals.requests) * 100 : 0;
-      return [
-      { label: '今日请求', value: formatCompactInteger(snapshot.totals.requestsToday), hint: t('累计 {{count}}', { count: formatCompactInteger(snapshot.totals.requests) }) },
-      { label: '错误率', value: `${errorRate.toFixed(1)}%`, hint: t('失败 {{count}}', { count: formatCompactInteger(snapshot.totals.failed) }) },
-      { label: 'P95 延迟', value: formatMs(snapshot.totals.averageWaitMs), hint: '使用平均耗时回退' },
-      { label: '今日成本', value: formatCost(snapshot.totals.cost), hint: '来自本地汇总' },
+    return [
+      { label: '今日请求', value: '—', hint: '等待数据' },
+      { label: '错误率', value: '—', hint: '等待数据' },
+      { label: 'P95 延迟', value: '—', hint: '等待数据' },
+      { label: '今日成本', value: '—', hint: '等待数据' },
     ];
   });
 
-  const anomalies = createMemo(() => overview()?.recent_anomalies ?? props.data.snapshot().recentLogs.filter((row) => (row.http_status ?? 200) >= 400).slice(0, 5));
-  const topModels = createMemo(() => overview()?.top_models ?? props.data.snapshot().topModels.map((model) => ({
-    key: model.model,
-    requests: model.requests,
-    failed: 0,
-    tokens: 0,
-    cost_total_usd: String(model.cost),
-  })));
-  const latestKey = createMemo(() => props.data.apiKeys()[0]?.apiKey);
-
+  const anomalies = createMemo(() => overview()?.recent_anomalies ?? []);
+  const topModels = createMemo(() => overview()?.top_models ?? []);
+  const tokenUsage = createMemo(() => overview()?.token_usage);
+  const usageCoverage = createMemo(() => {
+    const current = overview();
+    if (!current || current.kpis.requests <= 0) return 0;
+    return (current.token_usage.usage_observed_requests / current.kpis.requests) * 100;
+  });
   return (
     <div class="flex flex-col gap-6">
       <PageHeader
@@ -423,6 +424,38 @@ function OverviewPage(props: { data: AppDataContext }) {
 
       <StatsGrid items={metrics()} />
 
+      <Card class="rounded-none border border-border bg-background shadow-none">
+        <CardHeader class="pb-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <CardTitle class="text-xl font-medium tracking-tight">Token 用量</CardTitle>
+              <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">
+                {overview()
+                  ? t('覆盖 {{rate}}% 请求', { rate: usageCoverage().toFixed(1) })
+                  : t('等待数据')}
+              </CardDescription>
+            </div>
+            <StatusBadge tone={usageCoverage() >= 95 || !overview() ? 'normal' : usageCoverage() >= 50 ? 'warning' : 'error'}>
+              {overview() ? `${usageCoverage().toFixed(1)}%` : '—'}
+            </StatusBadge>
+          </div>
+        </CardHeader>
+        <CardContent class="grid gap-4 border-t border-border/40 pt-5 md:grid-cols-4">
+          <TokenStat label="总用量" value={tokenUsage()?.total_tokens ?? 0} />
+          <TokenStat label="输入" value={tokenUsage()?.input_tokens ?? 0} />
+          <TokenStat label="输出" value={tokenUsage()?.output_tokens ?? 0} hint={t('可见 {{count}}', { count: formatCompactInteger(tokenUsage()?.visible_output_tokens ?? 0) })} />
+          <TokenStat
+            label="缓存 / 思考"
+            value={(tokenUsage()?.cache_read_input_tokens ?? 0) + (tokenUsage()?.cache_creation_input_tokens ?? 0) + (tokenUsage()?.reasoning_output_tokens ?? 0)}
+            hint={t('读 {{read}} · 写 {{write}} · 思考 {{reasoning}}', {
+              read: formatCompactInteger(tokenUsage()?.cache_read_input_tokens ?? 0),
+              write: formatCompactInteger(tokenUsage()?.cache_creation_input_tokens ?? 0),
+              reasoning: formatCompactInteger(tokenUsage()?.reasoning_output_tokens ?? 0),
+            })}
+          />
+        </CardContent>
+      </Card>
+
       <div class="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_360px]">
         <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
@@ -450,7 +483,7 @@ function OverviewPage(props: { data: AppDataContext }) {
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
                 {overview()
                   ? t('{{count}} 正常', { count: overview()?.service_health.healthy ?? 0 })
-                  : t('{{count}} 已启用', { count: props.data.providers().filter((item) => item.provider.enabled).length })}
+                  : t('等待数据')}
               </div>
               <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">
                 {overview()
@@ -468,8 +501,10 @@ function OverviewPage(props: { data: AppDataContext }) {
             </div>
             <div class="border-l-2 border-primary/20 pl-4 py-1">
               <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('活跃密钥')}</div>
-              <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">{formatCompactInteger(props.data.apiKeys().filter((item) => item.apiKey.enabled).length)}</div>
-              <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">{t('当前已启用的访问密钥。')}</p>
+              <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
+                {overview() ? formatCompactInteger(overview()?.service_health.upstream_keys_enabled ?? 0) : '—'}
+              </div>
+              <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">{t('当前可用的上游密钥。')}</p>
             </div>
             <div class="md:col-span-3 pt-2">
               <A href="/upstreams">
@@ -495,10 +530,9 @@ function OverviewPage(props: { data: AppDataContext }) {
             },
             {
               title: '访问密钥',
-              description: t('共 {{count}} 个 · 最近 {{last}}', {
-                count: formatCompactInteger(props.data.apiKeys().length),
-                last: latestKey() ? formatDateTime(latestKey()!.id) : t('暂无'),
-              }),
+              description: props.data.apiKeys().length > 0
+                ? t('共 {{count}} 个', { count: formatCompactInteger(props.data.apiKeys().length) })
+                : t('打开密钥页查看。'),
               action: (
                 <A href="/keys">
                   <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0">
@@ -508,10 +542,10 @@ function OverviewPage(props: { data: AppDataContext }) {
               ),
             },
             {
-              title: '接入示例',
-              description: '提供 cURL、JavaScript 与 Python。',
+              title: '请求日志',
+              description: '查看最近请求与异常。',
               action: (
-                <A href="/access">
+                <A href="/logs">
                   <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0">
                     [ OPEN ]
                   </Button>
@@ -611,59 +645,14 @@ function OverviewPage(props: { data: AppDataContext }) {
   );
 }
 
-function AccessPage(props: { data: AppDataContext }) {
+function TokenStat(props: { label: string; value: number; hint?: string }) {
   return (
-    <div class="flex flex-col gap-6">
-      <PageHeader
-        title="接入"
-        description="完成地址配置并发送第一条请求。"
-        actions={
-          <div class="flex items-center gap-2">
-            <A href="/keys">
-              <Button type="button" size="sm" class="rounded-none text-xs tracking-wider">{t('CREATE KEY')}</Button>
-            </A>
-          </div>
-        }
-      />
-
-      <div class="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-        <Card class="rounded-none border border-border bg-background shadow-none">
-          <CardHeader>
-            <CardTitle class="text-xl font-medium tracking-tight">连接信息</CardTitle>
-            <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('接入只需要服务地址和访问密钥。')}</CardDescription>
-          </CardHeader>
-          <CardContent class="flex flex-col gap-6">
-              <div class="border-l-2 border-primary/20 pl-4 py-1">
-                <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('服务地址')}</div>
-                <code class="mt-2 block break-all text-sm font-mono text-foreground">{props.data.settings().apiBase}</code>
-              </div>
-              <div class="border-l-2 border-primary/20 pl-4 py-1">
-                <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t('管理状态')}</div>
-                <div class="mt-2 flex items-center gap-3">
-                  <StatusBadge tone={props.data.settings().adminToken.trim() ? 'normal' : 'warning'}>
-                    {props.data.settings().adminToken.trim() ? '已连接' : '未连接'}
-                </StatusBadge>
-                <span class="font-mono text-xs text-muted-foreground opacity-70">{props.data.message()}</span>
-              </div>
-            </div>
-            <div class="flex flex-wrap gap-2 pt-2 border-t border-border/40">
-              <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
-                {t('[ COPY URL ]')}
-              </Button>
-              <A href="/keys" class="shrink-0">
-                <Button type="button" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 ml-4 shrink-0">
-                  {t('[ CREATE KEY ]')}
-                </Button>
-              </A>
-            </div>
-            <Alert class="rounded-none border-border/40 bg-muted/20">
-              <AlertTitle class="font-mono text-xs uppercase tracking-wider">{t('常见错误')}</AlertTitle>
-              <AlertDescription class="text-sm mt-2 opacity-80">{t('先确认访问密钥已启用，再检查服务地址和模型名。')}</AlertDescription>
-            </Alert>
-          </CardContent>
-        </Card>
-
-      </div>
+    <div class="border-l-2 border-primary/20 pl-4 py-1">
+      <div class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{t(props.label)}</div>
+      <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">{formatCompactInteger(props.value)}</div>
+      <Show when={props.hint}>
+        <p class="mt-1 font-mono text-xs text-muted-foreground opacity-70">{props.hint}</p>
+      </Show>
     </div>
   );
 }
@@ -672,21 +661,36 @@ function UsagePage(props: { data: AppDataContext }) {
   const [period, setPeriod] = createSignal<'today' | '7d' | '30d'>('today');
   const [breakdownByModel, setBreakdownByModel] = createSignal<UsageBreakdownResponse | null>(null);
   const [breakdownByKey, setBreakdownByKey] = createSignal<UsageBreakdownResponse | null>(null);
+  const [dailyRows, setDailyRows] = createSignal<StatsDailyRow[]>([]);
+
+  const periodDays = () => {
+    switch (period()) {
+      case 'today':
+        return 1;
+      case '7d':
+        return 7;
+      case '30d':
+        return 30;
+    }
+  };
 
   const loadUsage = async () => {
     const current = props.data.settings();
     if (!current.adminToken.trim()) {
       setBreakdownByModel(null);
       setBreakdownByKey(null);
+      setDailyRows([]);
       return;
     }
     try {
-      const [modelRows, keyRows] = await Promise.all([
+      const [modelRows, keyRows, daily] = await Promise.all([
         loadUsageBreakdown(current, { by: 'model', period: period(), limit: 8 }),
         loadUsageBreakdown(current, { by: 'api_key', period: period(), limit: 8 }),
+        loadStatsDaily(current, periodDays()),
       ]);
       setBreakdownByModel(modelRows);
       setBreakdownByKey(keyRows);
+      setDailyRows(daily);
     } catch (error) {
       props.data.onMessage(error instanceof Error ? error.message : '读取成本拆分失败。');
     }
@@ -696,11 +700,38 @@ function UsagePage(props: { data: AppDataContext }) {
     void loadUsage();
   });
 
+  createEffect(
+    on(
+      () => props.data.refreshKey(),
+      () => {
+        void loadUsage();
+      },
+      { defer: true },
+    ),
+  );
+
   const modelRows = createMemo(() => breakdownByModel()?.rows ?? []);
   const keyRows = createMemo(() => breakdownByKey()?.rows ?? []);
   const totalCost = createMemo(() => modelRows().reduce((sum, row) => sum + parseDecimal(row.cost_total_usd), 0));
   const totalRequests = createMemo(() => modelRows().reduce((sum, row) => sum + row.requests, 0));
+  const totalUsage = createMemo(() => dailyRows().reduce((sum, row) => sum + row.input_tokens + row.output_tokens + row.cache_read_input_tokens + row.cache_creation_input_tokens, 0));
+  const reasoningUsage = createMemo(() => dailyRows().reduce((sum, row) => sum + row.reasoning_output_tokens, 0));
+  const observedRequests = createMemo(() => dailyRows().reduce((sum, row) => sum + row.usage_observed_requests, 0));
+  const usageCoverage = createMemo(() => {
+    const requests = dailyRows().reduce((sum, row) => sum + row.request_success + row.request_failed, 0);
+    if (requests <= 0) return 0;
+    return (observedRequests() / requests) * 100;
+  });
   const topConsumer = createMemo(() => modelRows()[0]);
+  const trendRows = createMemo(() => (
+    [...dailyRows()]
+      .sort((left, right) => left.date.localeCompare(right.date))
+      .map((row) => ({
+        label: `${row.date.slice(4, 6)}/${row.date.slice(6, 8)}`,
+        value: row.request_success + row.request_failed,
+      }))
+  ));
+  const maxTrendValue = createMemo(() => Math.max(...trendRows().map((item) => item.value), 1));
 
   return (
     <div class="flex flex-col gap-6">
@@ -728,11 +759,11 @@ function UsagePage(props: { data: AppDataContext }) {
         items={[
           { label: '总成本', value: formatCost(totalCost()), hint: t('窗口 {{window}}', { window: period() === 'today' ? t('今日') : period() === '7d' ? t('7 天') : t('30 天') }) },
           { label: '总请求', value: formatCompactInteger(totalRequests()), hint: '当前窗口内请求总量' },
-          { label: '活跃模型', value: formatCompactInteger(modelRows().length), hint: '按成本或请求排序' },
+          { label: 'Token 用量', value: formatCompactInteger(totalUsage()), hint: t('覆盖 {{rate}}%', { rate: usageCoverage().toFixed(1) }) },
           {
-            label: '最高消耗',
-            value: topConsumer() ? topConsumer()!.key : '—',
-            hint: topConsumer() ? formatCost(parseDecimal(topConsumer()!.cost_total_usd)) : '暂无数据',
+            label: '思考用量',
+            value: formatCompactInteger(reasoningUsage()),
+            hint: topConsumer() ? t('最高 {{model}}', { model: topConsumer()!.key }) : '暂无数据',
           },
         ]}
       />
@@ -744,22 +775,27 @@ function UsagePage(props: { data: AppDataContext }) {
                 <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('粗略趋势预览，详细请以导出的统计为准。')}</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-6">
-            <div class="grid gap-4">
-              <For each={props.data.snapshot().trend}>
-                {(point) => (
-                  <div class="grid grid-cols-[72px_minmax(0,1fr)_72px] items-center gap-4">
-                    <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{point.label}</span>
-                    <div class="h-1.5 overflow-hidden bg-muted">
-                      <div
-                        class="h-full bg-primary"
-                        style={{ width: `${(point.value / Math.max(...props.data.snapshot().trend.map((item) => item.value), 1)) * 100}%` }}
-                      />
+            <Show
+              when={trendRows().length > 0}
+              fallback={<EmptyState title="NO USAGE DATA." description="暂无用量数据。" />}
+            >
+              <div class="grid gap-4">
+                <For each={trendRows()}>
+                  {(point) => (
+                    <div class="grid grid-cols-[72px_minmax(0,1fr)_72px] items-center gap-4">
+                      <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">{point.label}</span>
+                      <div class="h-1.5 overflow-hidden bg-muted">
+                        <div
+                          class="h-full bg-primary"
+                          style={{ width: `${(point.value / maxTrendValue()) * 100}%` }}
+                        />
+                      </div>
+                      <span class="text-right font-mono text-xs text-foreground">{formatCompactInteger(point.value)}</span>
                     </div>
-                    <span class="text-right font-mono text-xs text-foreground">{formatCompactInteger(point.value)}</span>
-                  </div>
-                )}
-              </For>
-            </div>
+                  )}
+                </For>
+              </div>
+            </Show>
           </CardContent>
         </Card>
 
@@ -822,7 +858,7 @@ function UsagePage(props: { data: AppDataContext }) {
                         <TableCell class="font-mono text-xs truncate max-w-[150px]" title={row.key}>{row.key}</TableCell>
                         <TableCell class="font-mono text-xs">{formatCompactInteger(row.requests)}</TableCell>
                         <TableCell class="font-mono text-xs">{formatCompactInteger(row.failed)}</TableCell>
-                        <TableCell class="font-mono text-xs">{formatCompactInteger(row.tokens)}</TableCell>
+                        <TableCell class="font-mono text-xs"><UsageBreakdownCell row={row} /></TableCell>
                         <TableCell class="font-mono text-xs">{formatCost(parseDecimal(row.cost_total_usd))}</TableCell>
                       </TableRow>
                     )}
@@ -866,7 +902,7 @@ function UsagePage(props: { data: AppDataContext }) {
                         <TableCell class="font-mono text-xs truncate max-w-[150px]">#{row.key}</TableCell>
                         <TableCell class="font-mono text-xs">{formatCompactInteger(row.requests)}</TableCell>
                         <TableCell class="font-mono text-xs">{formatCompactInteger(row.failed)}</TableCell>
-                        <TableCell class="font-mono text-xs">{formatCompactInteger(row.tokens)}</TableCell>
+                        <TableCell class="font-mono text-xs"><UsageBreakdownCell row={row} /></TableCell>
                         <TableCell class="font-mono text-xs">{formatCost(parseDecimal(row.cost_total_usd))}</TableCell>
                       </TableRow>
                     )}
@@ -881,7 +917,36 @@ function UsagePage(props: { data: AppDataContext }) {
   );
 }
 
+function UsageBreakdownCell(props: { row: UsageBreakdownResponse['rows'][number] }) {
+  return (
+    <div class="min-w-[132px] font-mono leading-5">
+      <div class="text-xs text-foreground">{formatCompactInteger(props.row.tokens)}</div>
+      <div class="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+        {t('入 {{input}} · 出 {{output}}', {
+          input: formatCompactInteger(props.row.input_tokens),
+          output: formatCompactInteger(props.row.output_tokens),
+        })}
+      </div>
+      <div class="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+        {t('缓存 {{cache}} · 思考 {{reasoning}}', {
+          cache: formatCompactInteger(props.row.cache_read_input_tokens + props.row.cache_creation_input_tokens),
+          reasoning: formatCompactInteger(props.row.reasoning_output_tokens),
+        })}
+      </div>
+    </div>
+  );
+}
+
 function UpstreamsPage(props: { data: AppDataContext }) {
+  onMount(() => {
+    if (props.data.providers().length === 0) {
+      void props.data.loadProviders();
+    }
+    if (props.data.modelAliases().length === 0) {
+      void props.data.loadModelAliases();
+    }
+  });
+
   return (
     <div class="flex flex-col gap-6">
       <PageHeader title="上游" description="查看连接目标与健康状态。" />
@@ -889,7 +954,13 @@ function UpstreamsPage(props: { data: AppDataContext }) {
         <ProvidersPage
           settings={props.data.settings()}
           items={props.data.providers()}
-          onRefresh={props.data.onRefresh}
+          aliases={props.data.modelAliases()}
+          onRefresh={async (successMessage?: string) => {
+            await Promise.all([
+              props.data.loadProviders(),
+              props.data.loadModelAliases(successMessage),
+            ]);
+          }}
           onMessage={props.data.onMessage}
         />
       </div>
@@ -898,12 +969,18 @@ function UpstreamsPage(props: { data: AppDataContext }) {
 }
 
 function KeysRoutePage(props: { data: AppDataContext }) {
+  onMount(() => {
+    if (props.data.apiKeys().length === 0) {
+      void props.data.loadApiKeys();
+    }
+  });
+
   return (
     <div class="mt-4">
       <ApiKeysPage
         settings={props.data.settings()}
         items={props.data.apiKeys()}
-        onRefresh={props.data.onRefresh}
+        onRefresh={props.data.loadApiKeys}
         onMessage={props.data.onMessage}
       />
     </div>
@@ -911,6 +988,15 @@ function KeysRoutePage(props: { data: AppDataContext }) {
 }
 
 function LogsRoutePage(props: { data: AppDataContext }) {
+  onMount(() => {
+    if (props.data.providers().length === 0) {
+      void props.data.loadProviders();
+    }
+    if (props.data.apiKeys().length === 0) {
+      void props.data.loadApiKeys();
+    }
+  });
+
   return (
     <div class="mt-4">
       <LogsPage
@@ -925,16 +1011,25 @@ function LogsRoutePage(props: { data: AppDataContext }) {
 }
 
 function SettingsRoutePage(props: { data: AppDataContext }) {
+  onMount(() => {
+    void props.data.loadPricesAndConfig();
+    if (props.data.providers().length === 0) {
+      void props.data.loadProviders();
+    }
+  });
+
   return (
     <div class="mt-4">
       <SettingsPage
         settings={props.data.settings()}
         systemConfig={props.data.systemConfig()}
+        runtimeSettings={props.data.runtimeSettings()}
+        runtimeEnvPreview={props.data.runtimeEnvPreview()}
         prices={props.data.prices()}
         providers={props.data.providers()}
         onApiBaseChange={props.data.onApiBaseChange}
         onAdminTokenChange={props.data.onAdminTokenChange}
-        onRefresh={props.data.onRefresh}
+        onRefresh={props.data.loadPricesAndConfig}
         onMessage={props.data.onMessage}
       />
     </div>
@@ -944,17 +1039,119 @@ function SettingsRoutePage(props: { data: AppDataContext }) {
 function Root() {
   installLocaleEffect();
   const [settings, setSettings] = createSignal<ConnectionSettings>(readSettings());
-  const [snapshot, setSnapshot] = createSignal<DashboardSnapshot>(createEmptyDashboardSnapshot());
   const [providers, setProviders] = createSignal<ProviderWorkspace[]>([]);
+  const [modelAliases, setModelAliases] = createSignal<ModelAlias[]>([]);
   const [apiKeys, setApiKeys] = createSignal<ApiKeyWorkspace[]>([]);
   const [prices, setPrices] = createSignal<ModelPrice[]>([]);
   const [systemConfig, setSystemConfig] = createSignal<SystemConfigResponse | null>(null);
+  const [runtimeSettings, setRuntimeSettings] = createSignal<RuntimeSettingsResponse | null>(null);
+  const [runtimeEnvPreview, setRuntimeEnvPreview] = createSignal<RuntimeEnvPreviewResponse | null>(null);
   const [status, setStatus] = createSignal<LoadState>('idle');
   const [message, setMessage] = createSignal(t('未连接后台。'));
   const [refreshKey, setRefreshKey] = createSignal(0);
-  const [accessMode, setAccessMode] = createSignal<ConsoleAccessMode>(
+  const [consoleMode, setConsoleMode] = createSignal<ConsoleMode>(
     settings().adminToken.trim() ? 'console' : 'connect',
   );
+
+  const clearWorkspace = () => {
+    setProviders([]);
+    setModelAliases([]);
+    setApiKeys([]);
+    setPrices([]);
+    setSystemConfig(null);
+    setRuntimeSettings(null);
+    setRuntimeEnvPreview(null);
+  };
+
+  const loadProviders = async (successMessage?: string) => {
+    const current = settings();
+    if (!current.adminToken.trim()) {
+      setProviders([]);
+      return;
+    }
+    setStatus('loading');
+    try {
+      const providerWorkspace = await loadProviderWorkspace(current);
+      setProviders(providerWorkspace);
+      if (successMessage) setMessage(t(successMessage));
+    } catch (error) {
+      setProviders([]);
+      setMessage(error instanceof Error ? error.message : '读取上游失败。');
+    } finally {
+      setStatus('ready');
+    }
+  };
+
+  const loadModelAliasesForState = async (successMessage?: string) => {
+    const current = settings();
+    if (!current.adminToken.trim()) {
+      setModelAliases([]);
+      return;
+    }
+    setStatus('loading');
+    try {
+      const aliases = await loadModelAliases(current);
+      setModelAliases(aliases);
+      if (successMessage) setMessage(t(successMessage));
+    } catch (error) {
+      setModelAliases([]);
+      setMessage(error instanceof Error ? error.message : '读取模型别名失败。');
+    } finally {
+      setStatus('ready');
+    }
+  };
+
+  const loadApiKeys = async (successMessage?: string) => {
+    const current = settings();
+    if (!current.adminToken.trim()) {
+      setApiKeys([]);
+      return;
+    }
+    setStatus('loading');
+    try {
+      const apiKeyWorkspace = await loadApiKeyWorkspace(current);
+      setApiKeys(apiKeyWorkspace);
+      if (successMessage) setMessage(t(successMessage));
+    } catch (error) {
+      setApiKeys([]);
+      setMessage(error instanceof Error ? error.message : '读取密钥失败。');
+    } finally {
+      setStatus('ready');
+    }
+  };
+
+  const loadPricesAndConfig = async (successMessage?: string) => {
+    const current = settings();
+    if (!current.adminToken.trim()) {
+      setPrices([]);
+      setSystemConfig(null);
+      setRuntimeSettings(null);
+      setRuntimeEnvPreview(null);
+      return;
+    }
+    setStatus('loading');
+    try {
+      const [priceItems, config, runtime, envPreview] = await Promise.all([
+        loadPrices(current),
+        loadSystemConfig(current).catch(() => null),
+        loadRuntimeSettings(current).catch(() => null),
+        previewRuntimeEnv(current).catch(() => null),
+      ]);
+      setPrices(priceItems);
+      setSystemConfig(config);
+      setRuntimeSettings(runtime);
+      setRuntimeEnvPreview(envPreview);
+      if (successMessage) setMessage(t(successMessage));
+    } catch (error) {
+      setPrices([]);
+      setSystemConfig(null);
+      setRuntimeSettings(null);
+      setRuntimeEnvPreview(null);
+      setMessage(error instanceof Error ? error.message : '读取设置失败。');
+    } finally {
+      setStatus('ready');
+    }
+  };
 
   const refreshData = async (successMessage?: string) => {
     const current = settings();
@@ -962,44 +1159,26 @@ function Root() {
     setStatus('loading');
 
     if (!current.adminToken.trim()) {
-      setSnapshot(createEmptyDashboardSnapshot());
-      setProviders([]);
-      setApiKeys([]);
-      setPrices([]);
-      setSystemConfig(null);
+      clearWorkspace();
       setMessage(t('请输入管理员口令。'));
-      setAccessMode('connect');
+      setConsoleMode('connect');
       setRefreshKey((value) => value + 1);
       setStatus('ready');
       return;
     }
 
     try {
-      const [dashboardBundle, providerWorkspace, apiKeyWorkspace, priceItems, config] = await Promise.all([
-        loadDashboardData(current),
-        loadProviderWorkspace(current),
-        loadApiKeyWorkspace(current),
-        loadPrices(current),
-        loadSystemConfig(current).catch(() => null),
-      ]);
-      setSnapshot(buildDashboardSnapshot(dashboardBundle));
-      setProviders(providerWorkspace);
-      setApiKeys(apiKeyWorkspace);
-      setPrices(priceItems);
+      const config = await loadSystemConfig(current).catch(() => null);
       setSystemConfig(config);
+      setRefreshKey((value) => value + 1);
       setMessage(successMessage ? t(successMessage) : t('已连接。'));
-      setAccessMode('console');
+      setConsoleMode('console');
     } catch (error) {
       console.error('Failed to load admin console data', error);
-      setSnapshot(createEmptyDashboardSnapshot());
-      setProviders([]);
-      setApiKeys([]);
-      setPrices([]);
-      setSystemConfig(null);
+      clearWorkspace();
       setMessage(error instanceof Error ? t('{{message}}；请检查服务地址和管理员口令。', { message: error.message }) : t('连接失败；请检查服务地址和管理员口令。'));
-      setAccessMode('connect');
+      setConsoleMode('connect');
     } finally {
-      setRefreshKey((value) => value + 1);
       setStatus('ready');
     }
   };
@@ -1010,14 +1189,20 @@ function Root() {
 
   const data: AppDataContext = {
     settings,
-    snapshot,
     providers,
+    modelAliases,
     apiKeys,
     prices,
     systemConfig,
+    runtimeSettings,
+    runtimeEnvPreview,
     status,
     message,
     refreshKey,
+    loadProviders,
+    loadModelAliases: loadModelAliasesForState,
+    loadApiKeys,
+    loadPricesAndConfig,
     onApiBaseChange: (value) => setSettings((current) => ({ ...current, apiBase: value })),
     onAdminTokenChange: (value) => setSettings((current) => ({ ...current, adminToken: value })),
     onRefresh: refreshData,
@@ -1026,7 +1211,7 @@ function Root() {
 
   return (
     <Show
-      when={accessMode() === 'console'}
+      when={consoleMode() === 'console'}
       fallback={
         <ConnectionGate
           settings={settings}
@@ -1041,7 +1226,6 @@ function Root() {
       <Router root={(props) => <TopShell data={data}>{props.children}</TopShell>}>
         <Route path="/" component={() => <Navigate href="/overview" />} />
         <Route path="/overview" component={() => <OverviewPage data={data} />} />
-        <Route path="/access" component={() => <AccessPage data={data} />} />
         <Route path="/keys" component={() => <KeysRoutePage data={data} />} />
         <Route path="/logs" component={() => <LogsRoutePage data={data} />} />
         <Route path="/usage" component={() => <UsagePage data={data} />} />

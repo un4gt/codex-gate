@@ -45,7 +45,7 @@ impl Config {
             .or_else(|| getenv_string("DATABASE_URL"))
             .unwrap_or_else(|| "sqlite://./data/codex_gate.sqlite".to_string());
 
-        let db_max_connections = getenv_usize("DB_MAX_CONNECTIONS").unwrap_or(10) as u32;
+        let db_max_connections = getenv_usize("DB_MAX_CONNECTIONS").unwrap_or(2) as u32;
 
         let admin_token = getenv_string("ADMIN_TOKEN").ok_or("missing env ADMIN_TOKEN")?;
         if admin_token.trim().is_empty() {
@@ -69,25 +69,25 @@ impl Config {
         let api_key_cache_ttl =
             Duration::from_millis(getenv_u64("API_KEY_CACHE_TTL_MS").unwrap_or(30_000));
         let api_key_cache_max_entries = getenv_usize("API_KEY_CACHE_MAX_ENTRIES")
-            .unwrap_or(100_000)
+            .unwrap_or(2_048)
             .max(1);
         let upstream_cache_ttl =
             Duration::from_millis(getenv_u64("UPSTREAM_CACHE_TTL_MS").unwrap_or(2_000));
         let upstream_cache_stale_grace =
             Duration::from_millis(getenv_u64("UPSTREAM_CACHE_STALE_GRACE_MS").unwrap_or(30_000));
 
-        let max_request_bytes = getenv_usize("MAX_REQUEST_BYTES").unwrap_or(10 * 1024 * 1024);
+        let max_request_bytes = getenv_usize("MAX_REQUEST_BYTES").unwrap_or(4 * 1024 * 1024);
         let legacy_max_response_bytes = getenv_usize("MAX_RESPONSE_BYTES");
         let usage_capture_bytes = getenv_usize("USAGE_CAPTURE_BYTES")
             .or(legacy_max_response_bytes)
-            .unwrap_or(2 * 1024 * 1024)
+            .unwrap_or(64 * 1024)
             .max(1);
         let usage_capture_tail_bytes = getenv_usize("USAGE_CAPTURE_TAIL_BYTES")
             .unwrap_or_else(|| (usage_capture_bytes / 2).max(1))
             .min(usage_capture_bytes);
-        let log_queue_capacity = getenv_usize("LOG_QUEUE_CAPACITY").unwrap_or(2048);
+        let log_queue_capacity = getenv_usize("LOG_QUEUE_CAPACITY").unwrap_or(256);
         let stats_flush_interval =
-            Duration::from_millis(getenv_u64("STATS_FLUSH_INTERVAL_MS").unwrap_or(2_000));
+            Duration::from_millis(getenv_u64("STATS_FLUSH_INTERVAL_MS").unwrap_or(5_000));
 
         // Upstream timeouts: keep bounded so failover/circuit-breaker can engage.
         let upstream_connect_timeout = Duration::from_millis(

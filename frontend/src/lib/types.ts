@@ -7,6 +7,8 @@ export interface StatsDailyRow {
   output_tokens: number;
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
+  reasoning_output_tokens: number;
+  usage_observed_requests: number;
   cost_in_usd: string;
   cost_out_usd: string;
   cost_total_usd: string;
@@ -30,6 +32,8 @@ export interface RequestLogRow {
   output_tokens: number;
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
+  reasoning_output_tokens: number;
+  usage_observed: boolean;
   cost_in_usd: string;
   cost_out_usd: string;
   cost_total_usd: string;
@@ -59,6 +63,9 @@ export interface RequestLogSearchParams {
   duration_ms_max?: number;
   total_tokens_min?: number;
   total_tokens_max?: number;
+  usage_observed?: boolean;
+  reasoning_output_tokens_min?: number;
+  reasoning_output_tokens_max?: number;
   cost_total_min?: number;
   cost_total_max?: number;
   cache_read_input_tokens_min?: number;
@@ -153,6 +160,7 @@ export interface ProviderSummary {
   weight: number;
   supports_include_usage: boolean;
   websocket_enabled: boolean;
+  key_selection_strategy: 'round_robin' | 'weighted';
   health?: ProviderHealthSummary;
 }
 
@@ -199,6 +207,28 @@ export interface ProviderModel {
   updated_at_ms: number;
 }
 
+export interface ModelAliasTarget {
+  id: number;
+  alias_id: number;
+  provider_id: number;
+  upstream_model: string;
+  enabled: boolean;
+  priority: number;
+  weight: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface ModelAlias {
+  id: number;
+  name: string;
+  enabled: boolean;
+  mode: 'ordered' | 'weighted';
+  created_at_ms: number;
+  updated_at_ms: number;
+  targets: ModelAliasTarget[];
+}
+
 export interface GatewayModelPolicy {
   model_name: string;
   enabled: boolean;
@@ -220,6 +250,7 @@ export interface CreateProviderInput {
   weight: number;
   supports_include_usage: boolean;
   websocket_enabled: boolean;
+  key_selection_strategy: 'round_robin' | 'weighted';
 }
 
 export interface UpdateProviderInput {
@@ -230,6 +261,7 @@ export interface UpdateProviderInput {
   weight?: number;
   supports_include_usage?: boolean;
   websocket_enabled?: boolean;
+  key_selection_strategy?: 'round_robin' | 'weighted';
 }
 
 export interface CreateEndpointInput {
@@ -311,6 +343,37 @@ export interface ConnectionSettings {
   adminToken: string;
 }
 
+export interface RuntimeSettingView {
+  key: string;
+  group: string;
+  label: string;
+  value: string | number | boolean | null;
+  default_value: string | number | boolean | null;
+  editable: boolean;
+  requires_restart: boolean;
+  updated_at_ms: number | null;
+}
+
+export interface RuntimeSettingsResponse {
+  settings: RuntimeSettingView[];
+  updated_at_ms: number;
+}
+
+export interface RuntimeEnvPreviewResponse {
+  profile: string;
+  hot_settings: Array<{
+    key: string;
+    label: string;
+    value: string | number | boolean | null;
+  }>;
+  restart_settings: Array<{
+    key: string;
+    label: string;
+    current: string | number | boolean | null;
+    recommended: string | number | boolean | null;
+  }>;
+}
+
 export interface SystemConfigResponse {
   connection: {
     api_base: string;
@@ -352,58 +415,21 @@ export interface SystemConfigResponse {
   };
 }
 
-export interface HeatmapDay {
-  date: string;
-  label: string;
-  value: number;
-  level: 0 | 1 | 2 | 3 | 4;
-  isFuture: boolean;
-}
-
-export type HeatmapMetric = 'requests' | 'tokens' | 'cost';
-
-export interface DashboardSnapshot {
-  hero: {
-    providers: number;
-    routes: number;
-    prices: number;
-    logEnabledKeys: number;
-  };
-  totals: {
-    requests: number;
-    success: number;
-    failed: number;
-    tokens: number;
-    cost: number;
-    averageWaitMs: number;
-    activeDays: number;
-    requestsToday: number;
-  };
-  trend: Array<{ label: string; value: number }>;
-  heatmaps: Record<HeatmapMetric, HeatmapDay[]>;
-  recentLogs: RequestLogRow[];
-  topModels: Array<{ model: string; requests: number; cost: number }>;
-}
-
-export interface DashboardResponseBundle {
-  statsDaily: StatsDailyRow[];
-  requestLogs: RequestLogRow[];
-  providers: ProviderSummary[];
-  routes: ModelRoute[];
-  prices: ModelPrice[];
-  apiKeys: ApiKeySummary[];
-}
-
 export interface UsageBreakdownRow {
   key: string;
   requests: number;
   failed: number;
   tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  reasoning_output_tokens: number;
   cost_total_usd: string;
 }
 
 export interface UsageBreakdownResponse {
-  by: 'model' | 'api_key';
+  by: 'model' | 'api_key' | 'provider' | 'endpoint' | 'upstream_key';
   period: 'today' | '7d' | '30d';
   window: {
     from_ms: number;
@@ -432,6 +458,16 @@ export interface StatsOverviewResponse {
     healthy: number;
     warning: number;
     error: number;
+  };
+  token_usage: {
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    visible_output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    reasoning_output_tokens: number;
+    usage_observed_requests: number;
   };
   recent_anomalies: RequestLogRow[];
   top_models: UsageBreakdownRow[];

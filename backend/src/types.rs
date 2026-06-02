@@ -20,6 +20,7 @@ pub struct UpstreamProvider {
     pub weight: i32,
     pub supports_include_usage: bool,
     pub websocket_enabled: bool,
+    pub key_selection_strategy: String,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +92,29 @@ pub struct ModelRoute {
     pub provider_ids: Vec<i64>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelAlias {
+    pub id: i64,
+    pub name: String,
+    pub enabled: bool,
+    pub mode: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelAliasTarget {
+    pub id: i64,
+    pub alias_id: i64,
+    pub provider_id: i64,
+    pub upstream_model: String,
+    pub enabled: bool,
+    pub priority: i32,
+    pub weight: i32,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 /// Matches `claude-code-hub`'s `ModelPriceData` *fields* for the ones we need in v1.
 /// We store the raw JSON in DB, but extract these numeric fields for fast cost computation.
 #[derive(Clone, Debug, Default)]
@@ -119,6 +143,7 @@ pub struct Usage {
     pub output_tokens: i64,
     pub cache_read_input_tokens: i64,
     pub cache_creation_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -137,10 +162,49 @@ pub struct StatsDailyRow {
     pub output_tokens: i64,
     pub cache_read_input_tokens: i64,
     pub cache_creation_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub usage_observed_requests: i64,
     pub cost_in_usd: String,    // fixed scale 15
     pub cost_out_usd: String,   // fixed scale 15
     pub cost_total_usd: String, // fixed scale 15
     pub wait_time_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StatsHourlyRow {
+    pub bucket_ms: i64,
+    pub api_key_id: i64,
+    pub provider_id: i64,
+    pub endpoint_id: i64,
+    pub upstream_key_id: i64,
+    pub api_format: String,
+    pub model: String,
+    pub request_success: i64,
+    pub request_failed: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_creation_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub usage_observed_requests: i64,
+    pub cost_in_usd: String,
+    pub cost_out_usd: String,
+    pub cost_total_usd: String,
+    pub wait_time_ms: i64,
+    pub latency_lt_500ms: i64,
+    pub latency_lt_1000ms: i64,
+    pub latency_lt_2000ms: i64,
+    pub latency_lt_5000ms: i64,
+    pub latency_lt_15000ms: i64,
+    pub latency_gte_15000ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RuntimeSettingRow {
+    pub key: String,
+    pub value_json: String,
     pub updated_at_ms: i64,
 }
 
@@ -161,6 +225,8 @@ pub struct RequestLogRow {
     pub output_tokens: i64,
     pub cache_read_input_tokens: i64,
     pub cache_creation_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub usage_observed: bool,
     pub cost_in_usd: String,    // fixed scale 15
     pub cost_out_usd: String,   // fixed scale 15
     pub cost_total_usd: String, // fixed scale 15

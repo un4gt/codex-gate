@@ -68,7 +68,9 @@ export function setLocale(next: Locale) {
 }
 
 export function t(key: string, params?: TranslationParams) {
-  return translate(key, params) ?? key;
+  const translated = translate(key, params);
+  if (translated !== undefined) return translated;
+  return params ? resolveTemplate(key, params) : key;
 }
 
 export function translateJsx(node: JSX.Element): JSX.Element {

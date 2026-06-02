@@ -15,7 +15,9 @@ use crate::health::{
 };
 use crate::http::{self, HttpResponse};
 use crate::state::SharedState;
-use crate::types::{ApiKeyAuth, UpstreamEndpoint, UpstreamKeyMeta, UpstreamProvider};
+use crate::types::{
+    ApiKeyAuth, ModelAlias, ModelAliasTarget, UpstreamEndpoint, UpstreamKeyMeta, UpstreamProvider,
+};
 use crate::util;
 use rust_decimal::Decimal;
 use tokio::time as tokio_time;
@@ -64,11 +66,21 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         (Method::GET, "/api/v1/prices") => return list_prices(req, state).await,
         (Method::POST, "/api/v1/prices") => return create_price(req, state).await,
         (Method::GET, "/api/v1/system/config") => return system_config(req, state).await,
+        (Method::GET, "/api/v1/runtime-settings") => return runtime_settings(req, state).await,
+        (Method::PATCH, "/api/v1/runtime-settings") => {
+            return patch_runtime_setting(req, state).await;
+        }
+        (Method::POST, "/api/v1/runtime-settings/env-preview") => {
+            return runtime_settings_env_preview(req, state).await;
+        }
         (Method::GET, "/api/v1/gateway-models") => return list_gateway_models(req, state).await,
         (Method::PATCH, "/api/v1/gateway-models") => return patch_gateway_model(req, state).await,
+        (Method::GET, "/api/v1/model-aliases") => return list_model_aliases(req, state).await,
+        (Method::POST, "/api/v1/model-aliases") => return create_model_alias(req, state).await,
 
         (Method::GET, "/api/v1/stats/daily") => return stats_daily(req, state).await,
         (Method::GET, "/api/v1/stats/overview") => return stats_overview(req, state).await,
+        (Method::GET, "/api/v1/stats/live") => return stats_live(req, state).await,
         (Method::GET, "/api/v1/stats/usage-breakdown") => {
             return stats_usage_breakdown(req, state).await;
         }
@@ -140,6 +152,28 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         }
         if req.method() == Method::DELETE {
             return delete_provider_model(req, state).await;
+        }
+    }
+    if path.starts_with("/api/v1/model-aliases/") {
+        if req.method() == Method::PATCH && !path.ends_with("/targets") {
+            return patch_model_alias(req, state).await;
+        }
+        if req.method() == Method::DELETE && !path.ends_with("/targets") {
+            return delete_model_alias(req, state).await;
+        }
+        if req.method() == Method::GET && path.ends_with("/targets") {
+            return list_model_alias_targets(req, state).await;
+        }
+        if req.method() == Method::POST && path.ends_with("/targets") {
+            return create_model_alias_target(req, state).await;
+        }
+    }
+    if path.starts_with("/api/v1/model-alias-targets/") {
+        if req.method() == Method::PATCH {
+            return patch_model_alias_target(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return delete_model_alias_target(req, state).await;
         }
     }
     if path.starts_with("/api/v1/key-models/") {
@@ -269,12 +303,9 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
     };
 
     let status = response.status();
-    let body_bytes = match Limited::new(
-        response.into_body(),
-        ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES,
-    )
-    .collect()
-    .await
+    let body_bytes = match Limited::new(response.into_body(), ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES)
+        .collect()
+        .await
     {
         Ok(collected) => collected.to_bytes(),
         Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
@@ -493,12 +524,9 @@ async fn sync_key_models(req: Request<Incoming>, state: SharedState) -> HttpResp
     };
 
     let status = response.status();
-    let body_bytes = match Limited::new(
-        response.into_body(),
-        ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES,
-    )
-    .collect()
-    .await
+    let body_bytes = match Limited::new(response.into_body(), ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES)
+        .collect()
+        .await
     {
         Ok(collected) => collected.to_bytes(),
         Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
@@ -660,6 +688,385 @@ async fn list_gateway_models(_req: Request<Incoming>, state: SharedState) -> Htt
         Ok(items) => http::json(StatusCode::OK, &items),
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+async fn list_model_aliases(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let aliases = match state.db.list_model_aliases().await {
+        Ok(items) => items,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let targets = match state.db.list_model_alias_targets(None).await {
+        Ok(items) => items,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let payload = aliases
+        .iter()
+        .map(|alias| {
+            let alias_targets = targets
+                .iter()
+                .filter(|target| target.alias_id == alias.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            model_alias_to_json(alias, alias_targets)
+        })
+        .collect::<Vec<_>>();
+    http::json(StatusCode::OK, &payload)
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateModelAliasReq {
+    name: String,
+    enabled: Option<bool>,
+    mode: Option<String>,
+}
+
+async fn create_model_alias(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let (_, body, _raw) =
+        match http::read_json_limited::<CreateModelAliasReq>(req, state.config.max_request_bytes)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+    let name = body.name.trim();
+    if name.is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "name is empty");
+    }
+    let mode = body.mode.as_deref().unwrap_or("ordered").trim();
+    if !is_valid_alias_mode(mode) {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid mode");
+    }
+    match state
+        .db
+        .insert_model_alias(name, body.enabled.unwrap_or(true), mode, util::now_ms())
+        .await
+    {
+        Ok(id) => {
+            state.caches.upstream.invalidate();
+            http::json(StatusCode::OK, &serde_json::json!({ "id": id }))
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchModelAliasReq {
+    name: Option<String>,
+    enabled: Option<bool>,
+    mode: Option<String>,
+}
+
+async fn patch_model_alias(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(alias_id) = parse_id_suffix(path, "/api/v1/model-aliases/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid alias id");
+    };
+    let (_, patch, _raw) =
+        match http::read_json_limited::<PatchModelAliasReq>(req, state.config.max_request_bytes)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+    let aliases = match state.db.list_model_aliases().await {
+        Ok(v) => v,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let Some(current) = aliases.into_iter().find(|item| item.id == alias_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "alias not found");
+    };
+    let name = patch.name.unwrap_or(current.name).trim().to_string();
+    if name.is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "name is empty");
+    }
+    let mode = patch.mode.unwrap_or(current.mode).trim().to_string();
+    if !is_valid_alias_mode(&mode) {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid mode");
+    }
+    let enabled = patch.enabled.unwrap_or(current.enabled);
+    match state
+        .db
+        .update_model_alias(alias_id, &name, enabled, &mode, util::now_ms())
+        .await
+    {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn delete_model_alias(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(alias_id) = parse_id_suffix(path, "/api/v1/model-aliases/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid alias id");
+    };
+    match state.db.delete_model_alias(alias_id).await {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::empty(StatusCode::NO_CONTENT)
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn list_model_alias_targets(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(alias_id) =
+        parse_provider_id_with_prefix_and_suffix(path, "/api/v1/model-aliases/", "/targets")
+    else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid alias id");
+    };
+    match state.db.list_model_alias_targets(Some(alias_id)).await {
+        Ok(items) => http::json(StatusCode::OK, &items),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAliasTargetReq {
+    #[serde(alias = "providerId")]
+    provider_id: i64,
+    #[serde(alias = "upstreamModel")]
+    upstream_model: String,
+    enabled: Option<bool>,
+    priority: Option<i32>,
+    weight: Option<i32>,
+}
+
+async fn create_model_alias_target(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(alias_id) =
+        parse_provider_id_with_prefix_and_suffix(path, "/api/v1/model-aliases/", "/targets")
+    else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid alias id");
+    };
+    let (_, body, _raw) =
+        match http::read_json_limited::<CreateAliasTargetReq>(req, state.config.max_request_bytes)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+    if body.upstream_model.trim().is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "upstream_model is empty");
+    }
+    match state
+        .db
+        .insert_model_alias_target(
+            alias_id,
+            body.provider_id,
+            body.upstream_model.trim(),
+            body.enabled.unwrap_or(true),
+            body.priority.unwrap_or(100),
+            body.weight.unwrap_or(1),
+            util::now_ms(),
+        )
+        .await
+    {
+        Ok(id) => {
+            state.caches.upstream.invalidate();
+            http::json(StatusCode::OK, &serde_json::json!({ "id": id }))
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchAliasTargetReq {
+    #[serde(alias = "providerId")]
+    provider_id: Option<i64>,
+    #[serde(alias = "upstreamModel")]
+    upstream_model: Option<String>,
+    enabled: Option<bool>,
+    priority: Option<i32>,
+    weight: Option<i32>,
+}
+
+async fn patch_model_alias_target(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(target_id) = parse_id_suffix(path, "/api/v1/model-alias-targets/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid target id");
+    };
+    let (_, patch, _raw) =
+        match http::read_json_limited::<PatchAliasTargetReq>(req, state.config.max_request_bytes)
+            .await
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+    let targets = match state.db.list_model_alias_targets(None).await {
+        Ok(v) => v,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let Some(current) = targets.into_iter().find(|target| target.id == target_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "target not found");
+    };
+    let upstream_model = patch
+        .upstream_model
+        .unwrap_or(current.upstream_model)
+        .trim()
+        .to_string();
+    if upstream_model.is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "upstream_model is empty");
+    }
+    match state
+        .db
+        .update_model_alias_target(
+            target_id,
+            patch.provider_id.unwrap_or(current.provider_id),
+            &upstream_model,
+            patch.enabled.unwrap_or(current.enabled),
+            patch.priority.unwrap_or(current.priority),
+            patch.weight.unwrap_or(current.weight),
+            util::now_ms(),
+        )
+        .await
+    {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn delete_model_alias_target(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(target_id) = parse_id_suffix(path, "/api/v1/model-alias-targets/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid target id");
+    };
+    match state.db.delete_model_alias_target(target_id).await {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::empty(StatusCode::NO_CONTENT)
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchRuntimeSettingReq {
+    key: String,
+    value: Value,
+}
+
+async fn runtime_settings(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    match state.runtime_settings.views(&state.config, &state.db).await {
+        Ok(settings) => http::json(
+            StatusCode::OK,
+            &serde_json::json!({
+                "settings": settings,
+                "updated_at_ms": util::now_ms()
+            }),
+        ),
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn patch_runtime_setting(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let (_, body, _raw) = match http::read_json_limited::<PatchRuntimeSettingReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    let key = body.key.trim();
+    if key.is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "key is empty");
+    }
+
+    match state
+        .runtime_settings
+        .update(&state.db, key, body.value, util::now_ms())
+        .await
+    {
+        Ok(()) => http::json(StatusCode::OK, &serde_json::json!({ "ok": true })),
+        Err(message) if message == "unknown setting" => {
+            http::json_error(StatusCode::NOT_FOUND, message)
+        }
+        Err(message) if message == "setting requires restart" => {
+            http::json_error(StatusCode::CONFLICT, message)
+        }
+        Err(message) => http::json_error(StatusCode::BAD_REQUEST, message),
+    }
+}
+
+async fn runtime_settings_env_preview(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let runtime = state.runtime_settings.snapshot();
+    let payload = serde_json::json!({
+        "profile": "low_memory",
+        "hot_settings": [
+            {
+                "key": "inject_include_usage",
+                "label": "返回用量",
+                "value": runtime.inject_include_usage,
+            },
+            {
+                "key": "endpoint_selector_strategy",
+                "label": "节点分配",
+                "value": format!("{:?}", runtime.endpoint_selector_strategy).to_ascii_lowercase(),
+            },
+            {
+                "key": "usage_capture_bytes",
+                "label": "用量采样",
+                "value": runtime.usage_capture_bytes,
+            },
+            {
+                "key": "usage_capture_tail_bytes",
+                "label": "尾部采样",
+                "value": runtime.usage_capture_tail_bytes,
+            },
+            {
+                "key": "request_log_retention_days",
+                "label": "日志保留",
+                "value": runtime.request_log_retention_days,
+            },
+            {
+                "key": "stats_daily_retention_days",
+                "label": "统计保留",
+                "value": runtime.stats_daily_retention_days,
+            }
+        ],
+        "restart_settings": [
+            {
+                "key": "db_max_connections",
+                "label": "数据库连接",
+                "current": state.config.db_max_connections,
+                "recommended": 2,
+            },
+            {
+                "key": "api_key_cache_max_entries",
+                "label": "密钥缓存",
+                "current": state.config.api_key_cache_max_entries,
+                "recommended": 2048,
+            },
+            {
+                "key": "max_request_bytes",
+                "label": "请求大小",
+                "current": state.config.max_request_bytes,
+                "recommended": 4 * 1024 * 1024,
+            },
+            {
+                "key": "log_queue_capacity",
+                "label": "日志队列",
+                "current": state.config.log_queue_capacity,
+                "recommended": 256,
+            },
+            {
+                "key": "stats_flush_interval_ms",
+                "label": "统计刷新",
+                "current": state.config.stats_flush_interval.as_millis() as u64,
+                "recommended": 5000,
+            }
+        ]
+    });
+    http::json(StatusCode::OK, &payload)
 }
 
 #[derive(Debug, Deserialize)]
@@ -922,6 +1329,8 @@ struct CreateProviderReq {
     supports_include_usage: Option<bool>,
     #[serde(alias = "websocketEnabled")]
     websocket_enabled: Option<bool>,
+    #[serde(alias = "keySelectionStrategy")]
+    key_selection_strategy: Option<String>,
 }
 
 async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -983,6 +1392,14 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     let weight = body.weight.unwrap_or(1);
     let supports_include_usage = body.supports_include_usage.unwrap_or(true);
     let websocket_enabled = body.websocket_enabled.unwrap_or(false);
+    let key_selection_strategy = body
+        .key_selection_strategy
+        .as_deref()
+        .unwrap_or("round_robin")
+        .trim();
+    if !is_valid_key_selection_strategy(key_selection_strategy) {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid key_selection_strategy");
+    }
 
     let now_ms = util::now_ms();
     let id = match state
@@ -995,6 +1412,7 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
             weight,
             supports_include_usage,
             websocket_enabled,
+            key_selection_strategy,
             now_ms,
         )
         .await
@@ -1019,6 +1437,8 @@ struct PatchProviderReq {
     supports_include_usage: Option<bool>,
     #[serde(alias = "websocketEnabled")]
     websocket_enabled: Option<bool>,
+    #[serde(alias = "keySelectionStrategy")]
+    key_selection_strategy: Option<String>,
 }
 
 async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -1074,6 +1494,13 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     }
     if let Some(v) = patch.websocket_enabled {
         current.websocket_enabled = v;
+    }
+    if let Some(v) = patch.key_selection_strategy {
+        let value = v.trim();
+        if !is_valid_key_selection_strategy(value) {
+            return http::json_error(StatusCode::BAD_REQUEST, "invalid key_selection_strategy");
+        }
+        current.key_selection_strategy = value.to_string();
     }
 
     if let Err(e) = state
@@ -1282,26 +1709,24 @@ async fn test_endpoint(req: Request<Incoming>, state: SharedState) -> HttpRespon
     {
         Ok(Ok(resp)) => {
             let status = resp.status().as_u16();
-            let body_bytes = match Limited::new(
-                resp.into_body(),
-                ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES,
-            )
-            .collect()
-            .await
-            {
-                Ok(collected) => collected.to_bytes(),
-                Err(e) => {
-                    return http::json(
-                        StatusCode::OK,
-                        &serde_json::json!({
-                            "ok": status < 500,
-                            "status": status,
-                            "url": url,
-                            "message": e.to_string(),
-                        }),
-                    )
-                }
-            };
+            let body_bytes =
+                match Limited::new(resp.into_body(), ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES)
+                    .collect()
+                    .await
+                {
+                    Ok(collected) => collected.to_bytes(),
+                    Err(e) => {
+                        return http::json(
+                            StatusCode::OK,
+                            &serde_json::json!({
+                                "ok": status < 500,
+                                "status": status,
+                                "url": url,
+                                "message": e.to_string(),
+                            }),
+                        );
+                    }
+                };
             let body_text = String::from_utf8_lossy(&body_bytes).trim().to_string();
             http::json(
                 StatusCode::OK,
@@ -1737,59 +2162,43 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         _ => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
     };
 
-    // KPIs must represent *all traffic*, even when request logging is disabled per API key.
-    // `stats_daily` is always updated by telemetry, while `request_logs` is optional.
-    let now = time::OffsetDateTime::now_utc();
-    let (start_date, end_date) = match period.as_str() {
-        "today" => {
-            let fmt =
-                time::format_description::parse("[year][month][day]").expect("valid date format");
-            let day = now.format(&fmt).unwrap_or_else(|_| "19700101".to_string());
-            (day.clone(), day)
-        }
-        "7d" => {
-            let fmt =
-                time::format_description::parse("[year][month][day]").expect("valid date format");
-            let end = now.format(&fmt).unwrap_or_else(|_| "19700101".to_string());
-            let start = (now - time::Duration::days(6))
-                .format(&fmt)
-                .unwrap_or_else(|_| "19700101".to_string());
-            (start, end)
-        }
-        "30d" => {
-            let fmt =
-                time::format_description::parse("[year][month][day]").expect("valid date format");
-            let end = now.format(&fmt).unwrap_or_else(|_| "19700101".to_string());
-            let start = (now - time::Duration::days(29))
-                .format(&fmt)
-                .unwrap_or_else(|_| "19700101".to_string());
-            (start, end)
-        }
-        _ => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
-    };
-
-    let daily_rows = match state
-        .db
-        .list_stats_daily_range(0, &start_date, &end_date)
-        .await
-    {
+    let hourly_rows = match state.db.list_stats_hourly_range(from_ms, to_ms).await {
         Ok(rows) => rows,
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let mut requests_total: i64 = 0;
     let mut failed_total: i64 = 0;
+    let mut input_tokens: i64 = 0;
+    let mut output_tokens: i64 = 0;
+    let mut cache_read_input_tokens: i64 = 0;
+    let mut cache_creation_input_tokens: i64 = 0;
+    let mut reasoning_output_tokens: i64 = 0;
+    let mut usage_observed_requests: i64 = 0;
     let mut cost_total = Decimal::ZERO;
-    for row in &daily_rows {
+    let mut latency_buckets = [0_i64; 6];
+    for row in &hourly_rows {
         requests_total += row.request_success + row.request_failed;
         failed_total += row.request_failed;
+        input_tokens += row.input_tokens;
+        output_tokens += row.output_tokens;
+        cache_read_input_tokens += row.cache_read_input_tokens;
+        cache_creation_input_tokens += row.cache_creation_input_tokens;
+        reasoning_output_tokens += row.reasoning_output_tokens;
+        usage_observed_requests += row.usage_observed_requests;
         cost_total += Decimal::from_str(&row.cost_total_usd).unwrap_or(Decimal::ZERO);
+        latency_buckets[0] += row.latency_lt_500ms;
+        latency_buckets[1] += row.latency_lt_1000ms;
+        latency_buckets[2] += row.latency_lt_2000ms;
+        latency_buckets[3] += row.latency_lt_5000ms;
+        latency_buckets[4] += row.latency_lt_15000ms;
+        latency_buckets[5] += row.latency_gte_15000ms;
     }
+    let total_tokens =
+        input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens;
+    let visible_output_tokens = output_tokens.saturating_sub(reasoning_output_tokens);
 
-    let p95 = match state.db.p95_request_latency_ms(from_ms, to_ms).await {
-        Ok(value) => value,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
+    let p95 = approximate_p95_latency_ms(&latency_buckets);
 
     let error_rate = if requests_total > 0 {
         (failed_total as f64 / requests_total as f64) * 100.0
@@ -1937,6 +2346,16 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             "warning": warning,
             "error": error
         },
+        "token_usage": {
+            "total_tokens": total_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "visible_output_tokens": visible_output_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "reasoning_output_tokens": reasoning_output_tokens,
+            "usage_observed_requests": usage_observed_requests
+        },
         "recent_anomalies": anomalies,
         "top_models": top_models,
         "top_keys": top_keys
@@ -1948,6 +2367,9 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
 async fn stats_usage_breakdown(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let by = match query_string(req.uri().query(), "by").as_deref() {
         Some("api_key") => UsageBreakdownBy::ApiKey,
+        Some("provider") => UsageBreakdownBy::Provider,
+        Some("endpoint") => UsageBreakdownBy::Endpoint,
+        Some("upstream_key") => UsageBreakdownBy::UpstreamKey,
         Some("model") | None => UsageBreakdownBy::Model,
         _ => return http::json_error(StatusCode::BAD_REQUEST, "invalid by"),
     };
@@ -1977,6 +2399,9 @@ async fn stats_usage_breakdown(req: Request<Incoming>, state: SharedState) -> Ht
                 "by": match by {
                     UsageBreakdownBy::Model => "model",
                     UsageBreakdownBy::ApiKey => "api_key",
+                    UsageBreakdownBy::Provider => "provider",
+                    UsageBreakdownBy::Endpoint => "endpoint",
+                    UsageBreakdownBy::UpstreamKey => "upstream_key",
                 },
                 "period": period,
                 "window": { "from_ms": from_ms, "to_ms": to_ms },
@@ -1985,6 +2410,19 @@ async fn stats_usage_breakdown(req: Request<Incoming>, state: SharedState) -> Ht
         ),
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+async fn stats_live(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    http::json(
+        StatusCode::OK,
+        &serde_json::json!({
+            "metrics": state.metrics.live_snapshot(),
+            "process": {
+                "rss_bytes": util::process_resident_memory_bytes(),
+                "now_ms": util::now_ms()
+            }
+        }),
+    )
 }
 
 async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -2014,6 +2452,14 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let duration_ms_max = query_i64(req.uri().query(), "duration_ms_max");
     let total_tokens_min = query_i64(req.uri().query(), "total_tokens_min");
     let total_tokens_max = query_i64(req.uri().query(), "total_tokens_max");
+    let usage_observed = match query_string(req.uri().query(), "usage_observed").as_deref() {
+        Some("true") | Some("1") => Some(true),
+        Some("false") | Some("0") => Some(false),
+        Some(_) => return http::json_error(StatusCode::BAD_REQUEST, "invalid usage_observed"),
+        None => None,
+    };
+    let reasoning_output_tokens_min = query_i64(req.uri().query(), "reasoning_output_tokens_min");
+    let reasoning_output_tokens_max = query_i64(req.uri().query(), "reasoning_output_tokens_max");
     let cost_total_min = query_f64(req.uri().query(), "cost_total_min");
     let cost_total_max = query_f64(req.uri().query(), "cost_total_max");
     let cache_read_input_tokens_min = query_i64(req.uri().query(), "cache_read_input_tokens_min");
@@ -2055,6 +2501,15 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
         return http::json_error(
             StatusCode::BAD_REQUEST,
             "total_tokens_min must be <= total_tokens_max",
+        );
+    }
+    if let (Some(min_tokens), Some(max_tokens)) =
+        (reasoning_output_tokens_min, reasoning_output_tokens_max)
+        && min_tokens > max_tokens
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "reasoning_output_tokens_min must be <= reasoning_output_tokens_max",
         );
     }
     if let (Some(min_cost), Some(max_cost)) = (cost_total_min, cost_total_max)
@@ -2102,6 +2557,9 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
         duration_ms_max,
         total_tokens_min,
         total_tokens_max,
+        usage_observed,
+        reasoning_output_tokens_min,
+        reasoning_output_tokens_max,
         cost_total_min,
         cost_total_max,
         cache_read_input_tokens_min,
@@ -2136,12 +2594,33 @@ fn provider_to_json(p: &UpstreamProvider, health: ProviderHealthView) -> Value {
         "weight": p.weight,
         "supports_include_usage": p.supports_include_usage,
         "websocket_enabled": p.websocket_enabled,
+        "key_selection_strategy": p.key_selection_strategy,
         "health": health
     })
 }
 
 fn is_valid_provider_type(provider_type: &str) -> bool {
     ALLOWED_PROVIDER_TYPES.contains(&provider_type)
+}
+
+fn is_valid_key_selection_strategy(value: &str) -> bool {
+    matches!(value, "round_robin" | "weighted")
+}
+
+fn model_alias_to_json(alias: &ModelAlias, targets: Vec<ModelAliasTarget>) -> Value {
+    serde_json::json!({
+        "id": alias.id,
+        "name": alias.name,
+        "enabled": alias.enabled,
+        "mode": alias.mode,
+        "created_at_ms": alias.created_at_ms,
+        "updated_at_ms": alias.updated_at_ms,
+        "targets": targets,
+    })
+}
+
+fn is_valid_alias_mode(value: &str) -> bool {
+    matches!(value, "ordered" | "weighted")
 }
 
 fn endpoint_to_json(e: &UpstreamEndpoint, health: EndpointHealthView) -> Value {
@@ -2169,6 +2648,23 @@ fn upstream_key_to_json(k: &UpstreamKeyMeta, health: UpstreamKeyHealthView) -> V
     })
 }
 
+fn approximate_p95_latency_ms(buckets: &[i64; 6]) -> Option<i64> {
+    let total: i64 = buckets.iter().sum();
+    if total <= 0 {
+        return None;
+    }
+    let target = ((total as f64) * 0.95).ceil() as i64;
+    let mut seen = 0_i64;
+    let bounds = [500_i64, 1_000, 2_000, 5_000, 15_000, 15_000];
+    for (idx, count) in buckets.iter().enumerate() {
+        seen += *count;
+        if seen >= target {
+            return Some(bounds[idx]);
+        }
+    }
+    Some(15_000)
+}
+
 fn parse_id_suffix(path: &str, prefix: &str) -> Option<i64> {
     let rest = path.strip_prefix(prefix)?;
     let rest = rest.trim_matches('/');
@@ -2189,6 +2685,13 @@ fn parse_string_suffix(path: &str, prefix: &str) -> Option<String> {
 fn parse_provider_id_with_suffix(path: &str, suffix: &str) -> Option<i64> {
     // /api/v1/providers/{id}{suffix}
     let rest = path.strip_prefix("/api/v1/providers/")?;
+    let rest = rest.strip_suffix(suffix)?;
+    let rest = rest.trim_matches('/');
+    rest.parse::<i64>().ok()
+}
+
+fn parse_provider_id_with_prefix_and_suffix(path: &str, prefix: &str, suffix: &str) -> Option<i64> {
+    let rest = path.strip_prefix(prefix)?;
     let rest = rest.strip_suffix(suffix)?;
     let rest = rest.trim_matches('/');
     rest.parse::<i64>().ok()

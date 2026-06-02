@@ -2,19 +2,32 @@ import { For, Show, createSignal } from 'solid-js';
 import { ChevronDown } from 'lucide-solid';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
-import { createPrice } from '../lib/api';
+import { createPrice, updateRuntimeSetting } from '../lib/api';
 import { formatDateTime, formatMs, formatRoutingStrategy } from '../lib/format';
-import type { ConnectionSettings, CreatePriceInput, ModelPrice, ProviderWorkspace, SystemConfigResponse } from '../lib/types';
+import type {
+  ConnectionSettings,
+  CreatePriceInput,
+  ModelPrice,
+  ProviderWorkspace,
+  RuntimeEnvPreviewResponse,
+  RuntimeSettingView,
+  RuntimeSettingsResponse,
+  SystemConfigResponse,
+} from '../lib/types';
 
 interface SettingsPageProps {
   settings: ConnectionSettings;
   systemConfig: SystemConfigResponse | null;
+  runtimeSettings: RuntimeSettingsResponse | null;
+  runtimeEnvPreview: RuntimeEnvPreviewResponse | null;
   prices: ModelPrice[];
   providers: ProviderWorkspace[];
   onApiBaseChange: (value: string) => void;
@@ -23,7 +36,7 @@ interface SettingsPageProps {
   onMessage: (message: string) => void;
 }
 
-type SectionKey = 'basic' | 'routing' | 'stability' | 'retention' | 'pricing';
+type SectionKey = 'basic' | 'runtime' | 'routing' | 'stability' | 'retention' | 'pricing';
 
 function readString(formData: FormData, key: string) {
   return String(formData.get(key) ?? '').trim();
@@ -34,6 +47,42 @@ export function SettingsPage(props: SettingsPageProps) {
   const [busy, setBusy] = createSignal(false);
 
   const toggleSection = (key: SectionKey) => setOpenSection((current) => (current === key ? current : key));
+
+  const submitRuntimeSetting = async (event: SubmitEvent, setting: RuntimeSettingView) => {
+    event.preventDefault();
+    if (!props.settings.adminToken.trim()) {
+      props.onMessage('请先填写管理员口令。');
+      return;
+    }
+    if (!setting.editable) {
+      props.onMessage('该设置需要重启后调整。');
+      return;
+    }
+
+    const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const raw = readString(formData, `runtime_${setting.key}`);
+    let value: string | number | boolean | null = raw;
+    if (typeof setting.value === 'boolean') {
+      value = formData.get(`runtime_${setting.key}`) === 'on';
+    } else if (typeof setting.value === 'number') {
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed)) {
+        props.onMessage('请输入有效数字。');
+        return;
+      }
+      value = parsed;
+    }
+
+    setBusy(true);
+    try {
+      await updateRuntimeSetting(props.settings, setting.key, value);
+      await props.onRefresh(`${setting.label} 已更新。`);
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '更新设置失败。');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submitPrice = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -137,6 +186,68 @@ export function SettingsPage(props: SettingsPageProps) {
           <InfoTile label="请求大小" value={props.systemConfig ? String(props.systemConfig.basic.max_request_bytes) : '—'} />
           <InfoTile label="用量采样" value={props.systemConfig ? `${props.systemConfig.basic.usage_capture_bytes} / ${props.systemConfig.basic.usage_capture_tail_bytes}` : '—'} />
           <InfoTile label="统计刷新" value={props.systemConfig ? `${props.systemConfig.basic.stats_flush_interval_ms}ms` : '—'} />
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="运行设置"
+        description="常用设置可直接生效，资源类设置按建议调整后重启。"
+        open={openSection() === 'runtime'}
+        onToggle={() => toggleSection('runtime')}
+      >
+        <div class="grid gap-6">
+          <div class="grid gap-4 md:grid-cols-2">
+            <For each={props.runtimeSettings?.settings ?? []}>
+              {(setting) => (
+                <form class="border border-border/50 bg-muted/10 p-4" onSubmit={(event) => void submitRuntimeSetting(event, setting)}>
+                  <div class="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium text-foreground">{setting.label}</div>
+                      <div class="mt-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
+                        {setting.requires_restart ? '重启生效' : '立即生效'}
+                      </div>
+                    </div>
+                    <StatusBadge tone={setting.editable ? 'normal' : 'warning'}>{setting.editable ? '可修改' : '需重启'}</StatusBadge>
+                  </div>
+
+                  <RuntimeSettingControl setting={setting} />
+
+                  <div class="mt-4 flex items-center justify-between gap-3 border-t border-border/40 pt-4">
+                    <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
+                      默认 {formatSettingValue(setting.default_value)}
+                    </span>
+                    <Button type="submit" size="sm" disabled={!setting.editable || busy()}>
+                      保存
+                    </Button>
+                  </div>
+                </form>
+              )}
+            </For>
+          </div>
+
+          <Show when={props.runtimeEnvPreview}>
+            {(preview) => (
+              <div class="border border-border/50 bg-muted/10 p-4">
+                <div class="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 class="text-sm font-medium text-foreground">低内存建议</h3>
+                    <p class="mt-1 text-xs text-muted-foreground">适合少量用户和低请求量部署。</p>
+                  </div>
+                  <StatusBadge tone="normal">建议值</StatusBadge>
+                </div>
+                <div class="grid gap-3 md:grid-cols-2">
+                  <For each={preview().restart_settings}>
+                    {(item) => (
+                      <InfoTile
+                        label={item.label}
+                        value={`${formatSettingValue(item.current)} → ${formatSettingValue(item.recommended)}`}
+                      />
+                    )}
+                  </For>
+                </div>
+              </div>
+            )}
+          </Show>
         </div>
       </SettingsSection>
 
@@ -323,4 +434,50 @@ function InfoTile(props: { label: string; value: string }) {
       <div class="mt-2 break-all text-sm text-foreground">{t(props.value)}</div>
     </div>
   );
+}
+
+function RuntimeSettingControl(props: { setting: RuntimeSettingView }) {
+  const setting = props.setting;
+  if (typeof setting.value === 'boolean') {
+    return (
+      <label class="flex min-h-10 items-center gap-3 border border-border/40 px-3 text-sm text-muted-foreground">
+        <Checkbox name={`runtime_${setting.key}`} checked={setting.value} disabled={!setting.editable} />
+        <span>{setting.value ? '开启' : '关闭'}</span>
+      </label>
+    );
+  }
+
+  if (setting.key === 'endpoint_selector_strategy') {
+    return (
+      <Select name={`runtime_${setting.key}`} value={String(setting.value ?? 'weighted')} disabled={!setting.editable}>
+        <option value="weighted">按权重</option>
+        <option value="latency">低延迟</option>
+      </Select>
+    );
+  }
+
+  if (typeof setting.value === 'number') {
+    return (
+      <Input
+        name={`runtime_${setting.key}`}
+        type="number"
+        value={String(setting.value)}
+        disabled={!setting.editable}
+      />
+    );
+  }
+
+  return (
+    <Input
+      name={`runtime_${setting.key}`}
+      value={String(setting.value ?? '')}
+      disabled={!setting.editable}
+    />
+  );
+}
+
+function formatSettingValue(value: string | number | boolean | null) {
+  if (typeof value === 'boolean') return value ? '开启' : '关闭';
+  if (value === null) return '—';
+  return String(value);
 }

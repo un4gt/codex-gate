@@ -7,7 +7,10 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::cache::policy::UpstreamCachePolicy;
 use crate::db::Database;
-use crate::types::{ModelPriceData, ModelRoute, UpstreamEndpoint, UpstreamKey, UpstreamProvider};
+use crate::types::{
+    ModelAlias, ModelAliasTarget, ModelPriceData, ModelRoute, UpstreamEndpoint, UpstreamKey,
+    UpstreamProvider,
+};
 
 #[derive(Clone, Debug)]
 pub struct UpstreamSnapshot {
@@ -17,6 +20,8 @@ pub struct UpstreamSnapshot {
     pub routes_by_model: HashMap<String, ModelRoute>,
     pub provider_models_by_provider: HashMap<i64, HashMap<String, bool>>,
     pub alias_to_provider_model: HashMap<String, ProviderModelAliasTarget>,
+    pub model_aliases_by_name: HashMap<String, ModelAlias>,
+    pub alias_targets_by_alias: HashMap<i64, Vec<ModelAliasTarget>>,
     pub key_models_by_key: HashMap<i64, HashMap<String, bool>>,
     pub globally_disabled_models: HashSet<String>,
     pub provider_prices_by_model: HashMap<i64, HashMap<String, ModelPriceData>>,
@@ -156,6 +161,11 @@ impl UpstreamCache {
             .list_all_provider_models()
             .await
             .map_err(|e| e.to_string())?;
+        let model_aliases = db.list_model_aliases().await.map_err(|e| e.to_string())?;
+        let model_alias_targets = db
+            .list_model_alias_targets(None)
+            .await
+            .map_err(|e| e.to_string())?;
         let gateway_model_policies = db
             .list_gateway_model_policies()
             .await
@@ -214,6 +224,27 @@ impl UpstreamCache {
             }
         }
 
+        let mut model_aliases_by_name = HashMap::new();
+        for alias in model_aliases {
+            model_aliases_by_name.insert(alias.name.clone(), alias);
+        }
+
+        let mut alias_targets_by_alias: HashMap<i64, Vec<ModelAliasTarget>> = HashMap::new();
+        for target in model_alias_targets {
+            alias_targets_by_alias
+                .entry(target.alias_id)
+                .or_default()
+                .push(target);
+        }
+        for targets in alias_targets_by_alias.values_mut() {
+            targets.sort_by(|left, right| {
+                left.priority
+                    .cmp(&right.priority)
+                    .then_with(|| right.weight.cmp(&left.weight))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+        }
+
         let mut key_models_by_key: HashMap<i64, HashMap<String, bool>> = HashMap::new();
         for model in key_models {
             key_models_by_key
@@ -249,6 +280,8 @@ impl UpstreamCache {
             routes_by_model,
             provider_models_by_provider,
             alias_to_provider_model,
+            model_aliases_by_name,
+            alias_targets_by_alias,
             key_models_by_key,
             globally_disabled_models,
             provider_prices_by_model,
@@ -273,10 +306,8 @@ mod tests {
 
     fn snapshot_with_prices() -> UpstreamSnapshot {
         let mut provider_prices_by_model = HashMap::new();
-        provider_prices_by_model.insert(
-            7,
-            HashMap::from([("upstream-model".to_string(), price(7))]),
-        );
+        provider_prices_by_model
+            .insert(7, HashMap::from([("upstream-model".to_string(), price(7))]));
 
         let global_prices_by_model = HashMap::from([("gateway-alias".to_string(), price(3))]);
 
@@ -287,6 +318,8 @@ mod tests {
             routes_by_model: HashMap::new(),
             provider_models_by_provider: HashMap::new(),
             alias_to_provider_model: HashMap::new(),
+            model_aliases_by_name: HashMap::new(),
+            alias_targets_by_alias: HashMap::new(),
             key_models_by_key: HashMap::new(),
             globally_disabled_models: HashSet::new(),
             provider_prices_by_model,

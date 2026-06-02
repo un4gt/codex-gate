@@ -1,4 +1,3 @@
-import { parseDecimal } from './format';
 import type {
   ApiKeySummary,
   ApiKeyWorkspace,
@@ -11,17 +10,19 @@ import type {
   CreateProviderInput,
   CreateProviderKeyInput,
   CreatedApiKey,
-  DashboardResponseBundle,
   GatewayModelPolicy,
+  ModelAlias,
+  ModelAliasTarget,
   ModelPrice,
-  ModelRoute,
   ProviderModel,
   ProviderSummary,
   ProviderWorkspace,
   RequestLogRow,
   RequestLogSearchParams,
-  StatsOverviewResponse,
+  RuntimeEnvPreviewResponse,
+  RuntimeSettingsResponse,
   StatsDailyRow,
+  StatsOverviewResponse,
   UsageBreakdownResponse,
   SystemConfigResponse,
   UpdateApiKeyInput,
@@ -107,26 +108,25 @@ export async function loadSystemConfig(settings: ConnectionSettings): Promise<Sy
   return fetchJson<SystemConfigResponse>(apiBase, '/api/v1/system/config', adminToken);
 }
 
-export async function loadDashboardData(settings: ConnectionSettings): Promise<DashboardResponseBundle> {
+export async function loadRuntimeSettings(settings: ConnectionSettings): Promise<RuntimeSettingsResponse> {
   const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<RuntimeSettingsResponse>(apiBase, '/api/v1/runtime-settings', adminToken);
+}
 
-  const [statsDaily, requestLogs, providers, routes, prices, apiKeys] = await Promise.all([
-    fetchJson<StatsDailyRow[]>(apiBase, '/api/v1/stats/daily?days=378', adminToken),
-    fetchJson<RequestLogRow[]>(apiBase, '/api/v1/logs?page=1&page_size=100', adminToken),
-    fetchJson<ProviderSummary[]>(apiBase, '/api/v1/providers', adminToken),
-    fetchJson<ModelRoute[]>(apiBase, '/api/v1/routes', adminToken),
-    fetchJson<ModelPrice[]>(apiBase, '/api/v1/prices', adminToken),
-    fetchJson<ApiKeySummary[]>(apiBase, '/api/v1/api-keys', adminToken),
-  ]);
+export async function updateRuntimeSetting(settings: ConnectionSettings, key: string, value: string | number | boolean | null) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{ ok: boolean }>(apiBase, '/api/v1/runtime-settings', adminToken, { key, value });
+}
 
-  return {
-    statsDaily,
-    requestLogs,
-    providers,
-    routes,
-    prices,
-    apiKeys,
-  };
+export async function previewRuntimeEnv(settings: ConnectionSettings): Promise<RuntimeEnvPreviewResponse> {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<RuntimeEnvPreviewResponse>(apiBase, '/api/v1/runtime-settings/env-preview', adminToken, {});
+}
+
+export async function loadStatsDaily(settings: ConnectionSettings, days: number): Promise<StatsDailyRow[]> {
+  const { apiBase, adminToken } = requireConnection(settings);
+  const safeDays = Math.max(1, Math.min(Math.trunc(days), 2000));
+  return fetchJson<StatsDailyRow[]>(apiBase, `/api/v1/stats/daily?days=${safeDays}`, adminToken);
 }
 
 export async function loadRequestLogs(settings: ConnectionSettings, params: RequestLogSearchParams): Promise<RequestLogRow[]> {
@@ -181,6 +181,15 @@ export async function loadRequestLogs(settings: ConnectionSettings, params: Requ
   }
   if (typeof params.total_tokens_max === 'number') {
     search.set('total_tokens_max', String(params.total_tokens_max));
+  }
+  if (typeof params.usage_observed === 'boolean') {
+    search.set('usage_observed', String(params.usage_observed));
+  }
+  if (typeof params.reasoning_output_tokens_min === 'number') {
+    search.set('reasoning_output_tokens_min', String(params.reasoning_output_tokens_min));
+  }
+  if (typeof params.reasoning_output_tokens_max === 'number') {
+    search.set('reasoning_output_tokens_max', String(params.reasoning_output_tokens_max));
   }
   if (typeof params.cost_total_min === 'number') {
     search.set('cost_total_min', String(params.cost_total_min));
@@ -244,53 +253,73 @@ export async function loadProviderWorkspace(settings: ConnectionSettings): Promi
   );
 }
 
+export async function loadModelAliases(settings: ConnectionSettings) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<ModelAlias[]>(apiBase, '/api/v1/model-aliases', adminToken);
+}
+
+export async function createModelAlias(
+  settings: ConnectionSettings,
+  payload: { name: string; enabled: boolean; mode: 'ordered' | 'weighted' },
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<{ id: number }>(apiBase, '/api/v1/model-aliases', adminToken, payload);
+}
+
+export async function updateModelAlias(
+  settings: ConnectionSettings,
+  aliasId: number,
+  payload: { name?: string; enabled?: boolean; mode?: 'ordered' | 'weighted' },
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{ ok: boolean }>(apiBase, `/api/v1/model-aliases/${aliasId}`, adminToken, payload);
+}
+
+export async function deleteModelAlias(settings: ConnectionSettings, aliasId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/model-aliases/${aliasId}`, adminToken);
+}
+
+export async function createModelAliasTarget(
+  settings: ConnectionSettings,
+  aliasId: number,
+  payload: { provider_id: number; upstream_model: string; enabled: boolean; priority: number; weight: number },
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<{ id: number }>(apiBase, `/api/v1/model-aliases/${aliasId}/targets`, adminToken, payload);
+}
+
+export async function updateModelAliasTarget(
+  settings: ConnectionSettings,
+  targetId: number,
+  payload: Partial<{ provider_id: number; upstream_model: string; enabled: boolean; priority: number; weight: number }>,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{ ok: boolean }>(apiBase, `/api/v1/model-alias-targets/${targetId}`, adminToken, payload);
+}
+
+export async function deleteModelAliasTarget(settings: ConnectionSettings, targetId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/model-alias-targets/${targetId}`, adminToken);
+}
+
 export async function loadApiKeyWorkspace(settings: ConnectionSettings): Promise<ApiKeyWorkspace[]> {
   const { apiBase, adminToken } = requireConnection(settings);
-  const [apiKeys, requestLogs] = await Promise.all([
-    fetchJson<ApiKeySummary[]>(apiBase, '/api/v1/api-keys', adminToken),
-    fetchJson<RequestLogRow[]>(apiBase, '/api/v1/logs?page=1&page_size=200', adminToken),
-  ]);
+  const apiKeys = await fetchJson<ApiKeySummary[]>(apiBase, '/api/v1/api-keys', adminToken);
 
-  return Promise.all(
-    apiKeys.map(async (apiKey) => {
-      const statsDaily = await fetchJson<StatsDailyRow[]>(apiBase, `/api/v1/stats/daily?api_key_id=${apiKey.id}&days=90`, adminToken);
-      const recentModels = Array.from(
-        new Set(
-          requestLogs
-            .filter((row) => row.api_key_id === apiKey.id && row.model)
-            .map((row) => row.model as string),
-        ),
-      ).slice(0, 4);
-
-      const totals = statsDaily.reduce(
-        (acc, row) => {
-          acc.requests += row.request_success + row.request_failed;
-          acc.success += row.request_success;
-          acc.failed += row.request_failed;
-          acc.tokens += row.input_tokens + row.output_tokens + row.cache_read_input_tokens + row.cache_creation_input_tokens;
-          acc.cost += parseDecimal(row.cost_total_usd);
-          acc.waitTime += row.wait_time_ms;
-          acc.activeDays += row.request_success + row.request_failed > 0 ? 1 : 0;
-          return acc;
-        },
-        { requests: 0, success: 0, failed: 0, tokens: 0, cost: 0, waitTime: 0, activeDays: 0 },
-      );
-
-      return {
-        apiKey,
-        totals: {
-          requests: totals.requests,
-          success: totals.success,
-          failed: totals.failed,
-          tokens: totals.tokens,
-          cost: totals.cost,
-          averageWaitMs: Math.round(totals.waitTime / Math.max(totals.requests, 1)),
-          activeDays: totals.activeDays,
-        },
-        recentModels,
-      };
-    }),
-  );
+  return apiKeys.map((apiKey) => ({
+    apiKey,
+    totals: {
+      requests: 0,
+      success: 0,
+      failed: 0,
+      tokens: 0,
+      cost: 0,
+      averageWaitMs: 0,
+      activeDays: 0,
+    },
+    recentModels: [],
+  }));
 }
 
 export async function createProvider(settings: ConnectionSettings, payload: CreateProviderInput) {

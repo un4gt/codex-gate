@@ -18,6 +18,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time;
 
+use crate::cache::upstream_cache::UpstreamSnapshot;
 use crate::health::{should_trip_endpoint, should_trip_key};
 use crate::http::{self, HttpResponse};
 use crate::metrics::{FailoverKind, RequestMetric};
@@ -25,7 +26,7 @@ use crate::openai::{OpenAiRequestInfo, ensure_include_usage, parse_request_info}
 use crate::selector;
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
-use crate::types::{ApiFormat, ModelPriceData, Usage};
+use crate::types::{ApiFormat, ModelAlias, ModelAliasTarget, ModelPriceData, UpstreamKey, Usage};
 use crate::util;
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -167,8 +168,25 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         ids.insert(upstream_model);
     }
 
-    // Aliases are stored separately as well; only advertise those that are actually routable (alias
-    // forces a provider_id, and model_routes may further restrict providers).
+    for alias in snap.model_aliases_by_name.values() {
+        if !alias.enabled || !snap.is_model_globally_enabled(&alias.name) {
+            continue;
+        }
+        let Some(targets) = snap.alias_targets_by_alias.get(&alias.id) else {
+            continue;
+        };
+        let routable = targets.iter().any(|target| {
+            target.enabled
+                && snap.is_model_globally_enabled(&target.upstream_model)
+                && route_allows_provider(&target.upstream_model, target.provider_id)
+                && provider_can_serve_model(target.provider_id, &target.upstream_model)
+        });
+        if routable {
+            ids.insert(alias.name.clone());
+        }
+    }
+
+    // Keep legacy provider-model aliases routable while they are migrated into model_aliases.
     for (alias, target) in &snap.alias_to_provider_model {
         if !target.enabled {
             continue;
@@ -272,14 +290,11 @@ async fn proxy_openai(
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
     };
 
-    let mut telemetry_permit = match state.telemetry.reserve_permit().await {
+    let mut telemetry_permit = match state.telemetry.try_reserve_permit() {
         Ok(p) => Some(p),
         Err(_) => {
-            record_request_metric(
-                Some(StatusCode::SERVICE_UNAVAILABLE.as_u16() as i32),
-                Some("telemetry_unavailable"),
-            );
-            return http::json_error(StatusCode::SERVICE_UNAVAILABLE, "telemetry unavailable");
+            state.metrics.record_telemetry_dropped();
+            None
         }
     };
 
@@ -322,6 +337,7 @@ async fn proxy_openai(
                 t_first_token_ms: None,
                 duration_ms: Some(start.elapsed().as_millis() as i64),
                 usage: Usage::default(),
+                usage_observed: false,
                 cost_in_usd: Decimal::ZERO,
                 cost_out_usd: Decimal::ZERO,
                 time_ms: util::now_ms(),
@@ -401,31 +417,6 @@ async fn proxy_openai(
         }
     };
 
-    let base_body = if plan.upstream_model == model_name {
-        body_bytes.clone()
-    } else {
-        match rewrite_model_name(body_bytes.clone(), &plan.upstream_model) {
-            Ok(v) => v,
-            Err(_) => {
-                submit_err(
-                    &mut telemetry_permit,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_model",
-                    "invalid model".to_string(),
-                    None,
-                    None,
-                    None,
-                    Some(model_name.clone()),
-                );
-                record_request_metric(
-                    Some(StatusCode::BAD_REQUEST.as_u16() as i32),
-                    Some("invalid_model"),
-                );
-                return http::json_error(StatusCode::BAD_REQUEST, "invalid model");
-            }
-        }
-    };
-
     let mut exclusions = AttemptExclusions::default();
     let mut last_failure: Option<AttemptFailure> = None;
 
@@ -439,12 +430,35 @@ async fn proxy_openai(
         }
         state.metrics.record_upstream_attempt();
 
-        let mut out_body = base_body.clone();
+        let mut out_body = if resolved.upstream_model == model_name {
+            body_bytes.clone()
+        } else {
+            match rewrite_model_name(body_bytes.clone(), &resolved.upstream_model) {
+                Ok(v) => v,
+                Err(_) => {
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_model",
+                        "invalid model".to_string(),
+                        None,
+                        None,
+                        None,
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                        Some("invalid_model"),
+                    );
+                    return http::json_error(StatusCode::BAD_REQUEST, "invalid model");
+                }
+            }
+        };
         if should_inject_include_usage(
             api_format,
             &info,
             resolved.provider.supports_include_usage,
-            state.config.inject_include_usage,
+            plan.runtime.inject_include_usage,
         ) && let Ok(body) = ensure_include_usage(out_body.clone())
         {
             out_body = body;
@@ -671,8 +685,8 @@ async fn proxy_openai(
                 start,
                 is_sse,
                 price: resolved.price.clone(),
-                usage_capture_bytes: state.config.usage_capture_bytes,
-                usage_capture_tail_bytes: state.config.usage_capture_tail_bytes,
+                usage_capture_bytes: plan.runtime.usage_capture_bytes,
+                usage_capture_tail_bytes: plan.runtime.usage_capture_tail_bytes,
                 endpoint_health: state.endpoint_health.clone(),
                 upstream_key_health: state.upstream_key_health.clone(),
                 metrics: state.metrics.clone(),
@@ -877,6 +891,7 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
 
 #[derive(Clone)]
 struct ResolvedUpstream {
+    upstream_model: String,
     provider: crate::types::UpstreamProvider,
     endpoint: crate::types::UpstreamEndpoint,
     key: crate::types::UpstreamKey,
@@ -941,7 +956,7 @@ impl AttemptFailure {
 }
 
 struct UpstreamPlan {
-    upstream_model: String,
+    runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
     attempts: Vec<ResolvedUpstream>,
 }
 
@@ -959,6 +974,22 @@ async fn build_upstream_plan(
 
     if !snap.is_model_globally_enabled(requested_model) {
         return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+    }
+
+    let runtime = state.runtime_settings.snapshot();
+
+    if let Some(alias) = snap.model_aliases_by_name.get(requested_model) {
+        if !alias.enabled {
+            return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+        }
+        return build_alias_upstream_plan(
+            state,
+            &snap,
+            api_format,
+            requested_model,
+            alias,
+            runtime,
+        );
     }
 
     let mut upstream_model = requested_model.to_string();
@@ -1039,6 +1070,12 @@ async fn build_upstream_plan(
             .unwrap_or_default();
         let ranked_keys =
             selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
+        let ranked_keys = order_keys_for_provider(
+            state,
+            provider.id,
+            &provider.key_selection_strategy,
+            &ranked_keys,
+        );
         if ranked_keys.is_empty() {
             continue;
         }
@@ -1051,7 +1088,7 @@ async fn build_upstream_plan(
         let ranked_endpoints = selector::rank_endpoint_refs_with_health(
             &endpoints,
             &state.endpoint_health,
-            state.config.endpoint_selector_strategy,
+            runtime.endpoint_selector_strategy,
             now_ms,
         );
         if ranked_endpoints.is_empty() {
@@ -1062,6 +1099,7 @@ async fn build_upstream_plan(
         for key in &ranked_keys {
             for endpoint in &ranked_endpoints {
                 attempts.push(ResolvedUpstream {
+                    upstream_model: upstream_model.clone(),
                     provider: provider.clone(),
                     endpoint: (*endpoint).clone(),
                     key: (*key).clone(),
@@ -1078,10 +1116,205 @@ async fn build_upstream_plan(
         ));
     }
 
-    Ok(UpstreamPlan {
-        upstream_model,
-        attempts,
-    })
+    Ok(UpstreamPlan { runtime, attempts })
+}
+
+fn build_alias_upstream_plan(
+    state: &SharedState,
+    snap: &UpstreamSnapshot,
+    api_format: ApiFormat,
+    requested_model: &str,
+    alias: &ModelAlias,
+    runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
+) -> Result<UpstreamPlan, (StatusCode, String)> {
+    let Some(targets) = snap.alias_targets_by_alias.get(&alias.id) else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no available upstream targets".to_string(),
+        ));
+    };
+
+    let mut enabled_targets = targets
+        .iter()
+        .filter(|target| {
+            target.enabled
+                && snap.is_model_globally_enabled(&target.upstream_model)
+                && route_allows_provider_for_model(snap, &target.upstream_model, target.provider_id)
+        })
+        .collect::<Vec<_>>();
+    if alias.mode == "weighted" {
+        enabled_targets = weighted_order_alias_targets(enabled_targets);
+    }
+
+    let now_ms = util::now_ms();
+    let mut attempts = Vec::new();
+    for target in enabled_targets {
+        let Some(provider) = snap
+            .providers
+            .iter()
+            .find(|provider| provider.id == target.provider_id)
+        else {
+            continue;
+        };
+        if !provider.enabled || !provider_supports_api_format(&provider.provider_type, api_format) {
+            continue;
+        }
+        if !provider_model_enabled(snap, provider.id, &target.upstream_model) {
+            continue;
+        }
+
+        let keys = snap
+            .keys_by_provider
+            .get(&provider.id)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|key| key_allows_model(snap, key.id, &target.upstream_model))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let ranked_keys =
+            selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
+        let ranked_keys = order_keys_for_provider(
+            state,
+            provider.id,
+            &provider.key_selection_strategy,
+            &ranked_keys,
+        );
+        if ranked_keys.is_empty() {
+            continue;
+        }
+
+        let endpoints = snap
+            .endpoints_by_provider
+            .get(&provider.id)
+            .map(|items| items.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let ranked_endpoints = selector::rank_endpoint_refs_with_health(
+            &endpoints,
+            &state.endpoint_health,
+            runtime.endpoint_selector_strategy,
+            now_ms,
+        );
+        if ranked_endpoints.is_empty() {
+            continue;
+        }
+
+        let price =
+            snap.find_price_for_request(provider.id, requested_model, &target.upstream_model);
+        for key in &ranked_keys {
+            for endpoint in &ranked_endpoints {
+                attempts.push(ResolvedUpstream {
+                    upstream_model: target.upstream_model.clone(),
+                    provider: provider.clone(),
+                    endpoint: (*endpoint).clone(),
+                    key: (*key).clone(),
+                    price: price.clone(),
+                });
+            }
+        }
+    }
+
+    if attempts.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no available upstream targets".to_string(),
+        ));
+    }
+
+    Ok(UpstreamPlan { runtime, attempts })
+}
+
+fn route_allows_provider_for_model(
+    snap: &UpstreamSnapshot,
+    upstream_model: &str,
+    provider_id: i64,
+) -> bool {
+    let Some(route) = snap.routes_by_model.get(upstream_model) else {
+        return true;
+    };
+    if !route.enabled || route.provider_ids.is_empty() {
+        return true;
+    }
+    route.provider_ids.contains(&provider_id)
+}
+
+fn provider_model_enabled(snap: &UpstreamSnapshot, provider_id: i64, upstream_model: &str) -> bool {
+    snap.provider_models_by_provider
+        .get(&provider_id)
+        .and_then(|items| items.get(upstream_model).copied())
+        .unwrap_or(true)
+}
+
+fn key_allows_model(snap: &UpstreamSnapshot, key_id: i64, upstream_model: &str) -> bool {
+    match snap.key_models_by_key.get(&key_id) {
+        Some(models) => models.get(upstream_model).copied().unwrap_or(false),
+        None => true,
+    }
+}
+
+fn order_keys_for_provider(
+    state: &SharedState,
+    provider_id: i64,
+    strategy: &str,
+    ranked_keys: &[&UpstreamKey],
+) -> Vec<UpstreamKey> {
+    let keys = ranked_keys
+        .iter()
+        .map(|key| (*key).clone())
+        .collect::<Vec<_>>();
+    if strategy == "round_robin" {
+        state.key_rotation.rotate_provider(provider_id, &keys)
+    } else {
+        keys
+    }
+}
+
+fn weighted_order_alias_targets(mut targets: Vec<&ModelAliasTarget>) -> Vec<&ModelAliasTarget> {
+    let mut out = Vec::with_capacity(targets.len());
+    while !targets.is_empty() {
+        let best_priority = targets
+            .iter()
+            .map(|target| target.priority)
+            .min()
+            .expect("non-empty");
+        let mut group = Vec::new();
+        let mut next = Vec::new();
+        for target in targets {
+            if target.priority == best_priority {
+                group.push(target);
+            } else {
+                next.push(target);
+            }
+        }
+        out.extend(weighted_pick_alias_group(group));
+        targets = next;
+    }
+    out
+}
+
+fn weighted_pick_alias_group(mut group: Vec<&ModelAliasTarget>) -> Vec<&ModelAliasTarget> {
+    let mut out = Vec::with_capacity(group.len());
+    while !group.is_empty() {
+        let total_weight: i32 = group.iter().map(|target| target.weight.max(0)).sum();
+        let index = if total_weight <= 0 {
+            fastrand::usize(..group.len())
+        } else {
+            let mut offset = fastrand::i32(0..total_weight);
+            let mut picked = 0usize;
+            for (index, target) in group.iter().enumerate() {
+                let weight = target.weight.max(0);
+                if offset < weight {
+                    picked = index;
+                    break;
+                }
+                offset -= weight;
+            }
+            picked
+        };
+        out.push(group.swap_remove(index));
+    }
+    out
 }
 
 fn reserve_attempt(state: &SharedState, resolved: &ResolvedUpstream, now_ms: i64) -> bool {
@@ -1210,6 +1443,7 @@ struct TapFinalizeInputs<'a> {
     first_byte_ms: Option<i64>,
     first_token_ms: Option<i64>,
     usage: &'a mut Usage,
+    usage_observed: &'a mut bool,
     error_type: &'a Option<String>,
     error_message: &'a Option<String>,
     capture: &'a UsageCaptureBuffer,
@@ -1226,6 +1460,7 @@ pin_project! {
         first_byte_ms: Option<i64>,
         first_token_ms: Option<i64>,
         usage: Usage,
+        usage_observed: bool,
         error_type: Option<String>,
         error_message: Option<String>,
 
@@ -1244,6 +1479,7 @@ pin_project! {
                     first_byte_ms: *this.first_byte_ms,
                     first_token_ms: *this.first_token_ms,
                     usage: this.usage,
+                    usage_observed: this.usage_observed,
                     error_type: this.error_type,
                     error_message: this.error_message,
                     capture: this.capture,
@@ -1274,6 +1510,7 @@ impl ProxyTapBody {
             first_byte_ms: None,
             first_token_ms: None,
             usage: Usage::default(),
+            usage_observed: false,
             error_type: None,
             error_message: None,
             capture,
@@ -1304,6 +1541,7 @@ impl hyper::body::Body for ProxyTapBody {
                         first_byte_ms: *this.first_byte_ms,
                         first_token_ms: *this.first_token_ms,
                         usage: this.usage,
+                        usage_observed: this.usage_observed,
                         error_type: this.error_type,
                         error_message: this.error_message,
                         capture: this.capture,
@@ -1325,6 +1563,7 @@ impl hyper::body::Body for ProxyTapBody {
                         }
                         if let Some(u) = out.usage {
                             *this.usage = u;
+                            *this.usage_observed = true;
                         }
                     } else {
                         this.capture.push(data);
@@ -1343,6 +1582,7 @@ impl hyper::body::Body for ProxyTapBody {
                         first_byte_ms: *this.first_byte_ms,
                         first_token_ms: *this.first_token_ms,
                         usage: this.usage,
+                        usage_observed: this.usage_observed,
                         error_type: this.error_type,
                         error_message: this.error_message,
                         capture: this.capture,
@@ -1458,6 +1698,7 @@ fn finalize_tap(
         && let Some(u) = extract_usage_from_capture(cfg.api_format, inputs.capture)
     {
         *inputs.usage = u;
+        *inputs.usage_observed = true;
     }
 
     let (cost_in, cost_out) = compute_cost(inputs.usage, cfg.price.as_ref());
@@ -1497,6 +1738,7 @@ fn finalize_tap(
         t_first_token_ms: inputs.first_token_ms,
         duration_ms: Some(cfg.start.elapsed().as_millis() as i64),
         usage: *inputs.usage,
+        usage_observed: *inputs.usage_observed,
         cost_in_usd: cost_in,
         cost_out_usd: cost_out,
         time_ms: util::now_ms(),
@@ -1846,12 +2088,18 @@ fn parse_chat_usage(v: &Value) -> Option<Usage> {
         .and_then(|d| d.get("cache_creation_tokens"))
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
+    let reasoning = v
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
 
     Some(Usage {
         input_tokens: (prompt - cached - cache_created).max(0),
         output_tokens: completion.max(0),
         cache_read_input_tokens: cached.max(0),
         cache_creation_input_tokens: cache_created.max(0),
+        reasoning_output_tokens: reasoning.max(0),
     })
 }
 
@@ -1868,12 +2116,18 @@ fn parse_responses_usage(v: &Value) -> Option<Usage> {
         .and_then(|d| d.get("cache_creation_tokens"))
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
+    let reasoning = v
+        .get("output_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
 
     Some(Usage {
         input_tokens: (input - cached - cache_created).max(0),
         output_tokens: output.max(0),
         cache_read_input_tokens: cached.max(0),
         cache_creation_input_tokens: cache_created.max(0),
+        reasoning_output_tokens: reasoning.max(0),
     })
 }
 
@@ -1963,10 +2217,13 @@ mod tests {
     fn parse_chat_usage_should_split_cached_and_cache_creation_tokens() {
         let usage = parse_chat_usage(&json!({
             "prompt_tokens": 20,
-            "completion_tokens": 7,
-            "prompt_tokens_details": {
-                "cached_tokens": 3,
-                "cache_creation_tokens": 5
+        "completion_tokens": 7,
+        "completion_tokens_details": {
+            "reasoning_tokens": 2
+        },
+        "prompt_tokens_details": {
+            "cached_tokens": 3,
+            "cache_creation_tokens": 5
             }
         }))
         .expect("usage");
@@ -1975,6 +2232,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_read_input_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 5);
+        assert_eq!(usage.reasoning_output_tokens, 2);
     }
 
     #[test]
@@ -1982,6 +2240,9 @@ mod tests {
         let usage = parse_responses_usage(&json!({
             "input_tokens": 18,
             "output_tokens": 4,
+            "output_tokens_details": {
+                "reasoning_tokens": 3
+            },
             "input_tokens_details": {
                 "cached_tokens": 2,
                 "cache_creation_tokens": 6
@@ -1993,6 +2254,37 @@ mod tests {
         assert_eq!(usage.output_tokens, 4);
         assert_eq!(usage.cache_read_input_tokens, 2);
         assert_eq!(usage.cache_creation_input_tokens, 6);
+        assert_eq!(usage.reasoning_output_tokens, 3);
+    }
+
+    #[test]
+    fn parse_chat_usage_should_record_reasoning_as_part_of_output_tokens() {
+        let usage = parse_chat_usage(&json!({
+            "prompt_tokens": 5,
+            "completion_tokens": 11,
+            "completion_tokens_details": {
+                "reasoning_tokens": 7
+            }
+        }))
+        .expect("usage");
+
+        assert_eq!(usage.output_tokens, 11);
+        assert_eq!(usage.reasoning_output_tokens, 7);
+    }
+
+    #[test]
+    fn parse_responses_usage_should_record_reasoning_as_part_of_output_tokens() {
+        let usage = parse_responses_usage(&json!({
+            "input_tokens": 6,
+            "output_tokens": 13,
+            "output_tokens_details": {
+                "reasoning_tokens": 8
+            }
+        }))
+        .expect("usage");
+
+        assert_eq!(usage.output_tokens, 13);
+        assert_eq!(usage.reasoning_output_tokens, 8);
     }
 
     #[test]
@@ -2002,6 +2294,7 @@ mod tests {
             output_tokens: 4,
             cache_read_input_tokens: 2,
             cache_creation_input_tokens: 6,
+            reasoning_output_tokens: 3,
         };
         let price = ModelPriceData {
             input_cost_per_token: Some(Decimal::new(2, 0)),
@@ -2032,6 +2325,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_read_input_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 5);
+        assert_eq!(usage.reasoning_output_tokens, 0);
     }
 
     #[test]
@@ -2053,5 +2347,6 @@ mod tests {
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_read_input_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 5);
+        assert_eq!(usage.reasoning_output_tokens, 0);
     }
 }
