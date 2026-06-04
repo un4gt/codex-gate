@@ -131,10 +131,10 @@ export function SettingsPage(props: SettingsPageProps) {
   };
 
   return (
-    <div class="flex flex-col gap-6">
+    <div class="section-stack">
       <PageHeader title="设置" description="维护连接信息与高级设置。" />
 
-      <Card class="border-border/80 bg-card/95">
+      <Card>
         <CardHeader>
           <div class="flex items-center justify-between gap-3">
             <div>
@@ -197,9 +197,9 @@ export function SettingsPage(props: SettingsPageProps) {
       >
         <div class="grid gap-6">
           <div class="grid gap-4 md:grid-cols-2">
-            <For each={props.runtimeSettings?.settings ?? []}>
+            <For each={props.runtimeSettings?.settings ?? []} fallback={<div class="surface-tile md:col-span-2"><div class="surface-label">{t('运行设置')}</div><div class="surface-value">{t('暂未读取到运行设置，请刷新连接。')}</div></div>}>
               {(setting) => (
-                <form class="border border-border/50 bg-muted/10 p-4" onSubmit={(event) => void submitRuntimeSetting(event, setting)}>
+                <form class="surface-tile" onSubmit={(event) => void submitRuntimeSetting(event, setting)}>
                   <div class="mb-4 flex items-center justify-between gap-3">
                     <div>
                       <div class="text-sm font-medium text-foreground">{setting.label}</div>
@@ -227,7 +227,7 @@ export function SettingsPage(props: SettingsPageProps) {
 
           <Show when={props.runtimeEnvPreview}>
             {(preview) => (
-              <div class="border border-border/50 bg-muted/10 p-4">
+              <div class="surface-tile">
                 <div class="mb-4 flex items-center justify-between gap-3">
                   <div>
                     <h3 class="text-sm font-medium text-foreground">低内存建议</h3>
@@ -303,7 +303,7 @@ export function SettingsPage(props: SettingsPageProps) {
         onToggle={() => toggleSection('pricing')}
       >
         <div class="grid gap-6 xl:grid-cols-[420px_minmax(0,1fr)]">
-          <Card class="border-border/70 bg-muted/20">
+          <Card>
             <CardHeader>
               <CardTitle>新增价格</CardTitle>
             </CardHeader>
@@ -314,7 +314,7 @@ export function SettingsPage(props: SettingsPageProps) {
                     <FieldLabel>上游</FieldLabel>
                     <select
                       name="provider_id"
-                      class="flex h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground"
+                      class="flex h-10 w-full rounded-none border border-border bg-transparent px-3 text-sm text-foreground"
                     >
                       <option value="">{t('全局默认')}</option>
                       <For each={props.providers}>
@@ -352,7 +352,7 @@ export function SettingsPage(props: SettingsPageProps) {
             </CardContent>
           </Card>
 
-          <Card class="border-border/70 bg-muted/20">
+          <Card>
             <CardHeader>
               <CardTitle>当前价格项</CardTitle>
             </CardHeader>
@@ -405,9 +405,9 @@ function SettingsSection(props: {
   warning?: boolean;
 }) {
   return (
-    <Card class={`border-border/80 bg-card/95 ${props.warning ? 'border-amber-200' : ''}`}>
+    <Card class={props.warning ? 'border-amber-500/40' : ''}>
       <CardHeader>
-        <button type="button" class="flex w-full items-center justify-between gap-4 text-left" onClick={props.onToggle}>
+        <button type="button" class="flex w-full cursor-pointer items-center justify-between gap-4 text-left" onClick={props.onToggle}>
           <div>
             <CardTitle>{props.title}</CardTitle>
             <CardDescription>{props.description}</CardDescription>
@@ -429,9 +429,9 @@ function SettingsSection(props: {
 
 function InfoTile(props: { label: string; value: string }) {
   return (
-    <div class="rounded-xl border border-border/70 bg-muted/25 p-4">
-      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t(props.label)}</div>
-      <div class="mt-2 break-all text-sm text-foreground">{t(props.value)}</div>
+    <div class="surface-tile">
+      <div class="surface-label">{t(props.label)}</div>
+      <div class="surface-value">{t(props.value)}</div>
     </div>
   );
 }
@@ -440,7 +440,7 @@ function RuntimeSettingControl(props: { setting: RuntimeSettingView }) {
   const setting = props.setting;
   if (typeof setting.value === 'boolean') {
     return (
-      <label class="flex min-h-10 items-center gap-3 border border-border/40 px-3 text-sm text-muted-foreground">
+      <label class="check-row">
         <Checkbox name={`runtime_${setting.key}`} checked={setting.value} disabled={!setting.editable} />
         <span>{setting.value ? '开启' : '关闭'}</span>
       </label>

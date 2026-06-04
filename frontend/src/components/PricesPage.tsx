@@ -42,8 +42,8 @@ function formatUnitCost(value: unknown): string {
 
 function SummaryTile(props: { label: string; value: string; hint?: string }) {
   return (
-    <div class="rounded-2xl border border-border bg-muted/50 p-4">
-      <div class="text-[0.72rem] uppercase tracking-[0.22em] text-muted-foreground">{t(props.label)}</div>
+    <div class="surface-tile">
+      <div class="surface-label">{t(props.label)}</div>
       <div class="mt-2 text-2xl font-semibold tracking-tight text-foreground">{props.value}</div>
       <Show when={props.hint}>
         <p class="mt-2 text-sm leading-6 text-muted-foreground">{t(props.hint!)}</p>

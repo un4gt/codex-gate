@@ -58,11 +58,11 @@ export function TrendChart(props: TrendChartProps) {
             <CardDescription>用单条轨迹快速看出峰值、回落和最近一天的节奏。</CardDescription>
           </div>
           <div class="grid gap-3 sm:grid-cols-2">
-            <div class="rounded-xl border border-border bg-background/70 px-4 py-3">
+            <div class="surface-tile px-4 py-3">
               <div class="panel__eyebrow mb-1">{t('峰值')}</div>
               <div class="text-2xl font-semibold tracking-[-0.04em] text-foreground">{peak()}</div>
             </div>
-            <div class="rounded-xl border border-border bg-background/70 px-4 py-3">
+            <div class="surface-tile px-4 py-3">
               <div class="panel__eyebrow mb-1">{t('最新')}</div>
               <div class="text-2xl font-semibold tracking-[-0.04em] text-foreground">{latest()}</div>
             </div>
@@ -70,7 +70,7 @@ export function TrendChart(props: TrendChartProps) {
         </div>
       </CardHeader>
       <CardContent class="flex flex-col gap-4">
-        <div class="rounded-[1.45rem] border border-border bg-background/75 p-4">
+        <div class="border border-border bg-background/75 p-4">
           <svg class="h-60 w-full overflow-visible" viewBox={`0 0 ${chart().width} ${chart().height}`} preserveAspectRatio="none">
             <For each={guideLines()}>{(guideY) => <line x1="18" x2={chart().width - 18} y1={guideY} y2={guideY} stroke="rgba(41, 37, 30, 0.1)" stroke-dasharray="4 8" />}</For>
             <line x1="18" x2="18" y1="18" y2={chart().height - 28} stroke="rgba(41, 37, 30, 0.08)" />

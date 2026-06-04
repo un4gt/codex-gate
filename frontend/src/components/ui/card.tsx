@@ -11,9 +11,9 @@ function createDivComponent(baseClass: string, translateChildren = false) {
   };
 }
 
-export const Card = createDivComponent('rounded-none border border-border bg-background shadow-none');
-export const CardHeader = createDivComponent('flex flex-col gap-3 p-6');
+export const Card = createDivComponent('rounded-none border border-border bg-card shadow-none');
+export const CardHeader = createDivComponent('flex flex-col gap-3 p-6 pb-5');
 export const CardContent = createDivComponent('p-6 pt-0');
 export const CardFooter = createDivComponent('flex items-center gap-3 p-6 pt-0');
-export const CardTitle = createDivComponent('text-lg font-medium tracking-tight', true);
-export const CardDescription = createDivComponent('text-xs uppercase tracking-widest font-mono text-muted-foreground', true);
+export const CardTitle = createDivComponent('text-xl font-medium tracking-tight text-foreground', true);
+export const CardDescription = createDivComponent('mt-1 font-mono text-xs uppercase tracking-wider text-muted-foreground', true);

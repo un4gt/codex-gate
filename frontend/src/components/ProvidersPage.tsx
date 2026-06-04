@@ -905,7 +905,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
   };
 
   return (
-    <div class="flex flex-col gap-6">
+    <div class="section-stack">
       <PageHeader
         title="上游"
         description="查看连接目标、流量去向与健康状态。"
@@ -920,7 +920,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
             }}
           >
             <Plus class="mr-2 size-3" />
-            CREATE PROVIDER
+            {t('CREATE PROVIDER')}
           </Button>
         }
       />
@@ -934,7 +934,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         </Alert>
       </Show>
 
-      <Card class="rounded-none border border-border bg-background shadow-none">
+      <Card>
         <CardHeader class="pb-6">
           <CardTitle class="text-xl font-medium tracking-tight">上游列表</CardTitle>
           <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('查看目标与健康状态。')}</CardDescription>
@@ -956,7 +956,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       setCreateOpen(true);
                     }}
                   >
-                    CREATE PROVIDER
+                    {t('CREATE PROVIDER')}
                   </Button>
                 }
               />
@@ -1054,7 +1054,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <option value="ordered">按顺序</option>
                         <option value="weighted">按权重</option>
                       </Select>
-                      <label class="flex min-h-10 items-center gap-3 border border-border/40 px-3 text-sm text-muted-foreground">
+                      <label class="check-row min-h-10 py-2">
                         <Checkbox name={`alias_enabled_${alias.id}`} checked={alias.enabled} />
                         <span>{t('启用')}</span>
                       </label>
@@ -1062,7 +1062,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <Button type="submit" size="sm" disabled={busy() === `alias-${alias.id}`}>
                           保存
                         </Button>
-                        <Button type="button" size="sm" variant="ghost" onClick={() => void removeAlias(alias)}>
+                        <Button type="button" size="sm" variant="ghost" aria-label={t('删除模型')} onClick={() => void removeAlias(alias)}>
                           <Trash2 class="size-4" />
                         </Button>
                       </div>
@@ -1106,7 +1106,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                                       <Button type="button" size="sm" variant="ghost" onClick={() => void toggleAliasTarget(target.id, !target.enabled)}>
                                         {target.enabled ? '停用' : '启用'}
                                       </Button>
-                                      <Button type="button" size="sm" variant="ghost" onClick={() => void removeAliasTarget(target.id)}>
+                                      <Button type="button" size="sm" variant="ghost" aria-label={t('删除目标')} onClick={() => void removeAliasTarget(target.id)}>
                                         <Trash2 class="size-4" />
                                       </Button>
                                     </div>
@@ -1362,7 +1362,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </div>
                   <div class="flex justify-end pt-4 border-t border-border/40 mt-2">
                     <Button type="submit" disabled={busy() === `provider-${item.provider.id}`}>
-                      {busy() === `provider-${item.provider.id}` ? 'SAVING...' : 'SAVE PROVIDER'}
+                      {busy() === `provider-${item.provider.id}` ? '保存中…' : t('SAVE PROVIDER')}
                     </Button>
                   </div>
                 </form>
@@ -1377,7 +1377,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <div class="flex flex-wrap items-center gap-4">
                         <Button type="button" size="sm" class="rounded-none font-mono tracking-widest text-[0.65rem] px-4" onClick={() => void startLogin(item)} disabled={busy() === `codex-oauth-start-${item.provider.id}`}>
                           <ShieldCheck class="size-3 mr-2" />
-                          START LOGIN
+                          {t('START LOGIN')}
                         </Button>
                         <Show when={codexOauthView()?.status.state === 'pending'}>
                           <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70 animate-pulse">{t('WAITING FOR AUTHORIZATION...')}</span>
@@ -1400,7 +1400,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                                 onClick={() => void copyValue('登录地址', (codexOauthView()?.login_url ?? codexOauthStart()?.login_url ?? '').trim())}
                                 disabled={!((codexOauthView()?.login_url ?? codexOauthStart()?.login_url ?? '').trim())}
                               >
-                                [ COPY ]
+                                {t('[ COPY ]')}
                               </Button>
                             </div>
                             <div class="break-all font-mono text-[0.7rem] bg-background border border-border/40 p-3 opacity-90 mt-1">
@@ -1465,10 +1465,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             </div>
                             <div class="flex items-center gap-2">
                               <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-3 shrink-0" disabled={busy() === `test-${endpoint.id}`} onClick={() => void handleTestEndpoint(endpoint.id)}>
-                                [ TEST CONNECTION ]
+                                {t('[ TEST CONNECTION ]')}
                               </Button>
                               <Button type="submit" size="sm" class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-4 ml-2" disabled={busy() === `endpoint-${endpoint.id}`}>
-                                {busy() === `endpoint-${endpoint.id}` ? 'SAVING...' : 'SAVE'}
+                                {busy() === `endpoint-${endpoint.id}` ? '保存中…' : '保存'}
                               </Button>
                             </div>
                           </div>
@@ -1532,7 +1532,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">{t('创建后启用')}</span>
                       </label>
                       <Button type="submit" disabled={busy() === `endpoint-create-${item.provider.id}`} class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-6">
-                        {busy() === `endpoint-create-${item.provider.id}` ? 'ADDING...' : 'ADD ENDPOINT'}
+                        {busy() === `endpoint-create-${item.provider.id}` ? '添加中…' : t('ADD ENDPOINT')}
                       </Button>
                     </div>
                   </form>
@@ -1556,7 +1556,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                               <StatusBadge tone={keyHealth.tone}>{keyHealth.label}</StatusBadge>
                             </div>
                             <Button type="submit" size="sm" class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-4 ml-2" disabled={busy() === `key-${key.id}`}>
-                              {busy() === `key-${key.id}` ? 'SAVING...' : 'SAVE'}
+                              {busy() === `key-${key.id}` ? '保存中…' : '保存'}
                             </Button>
                           </div>
                           <FieldGroup class="grid gap-6 md:grid-cols-2 pt-2">
@@ -1579,7 +1579,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                               <Input name={`upstream_key_weight_${key.id}`} type="number" value={String(key.weight)} class="bg-background" />
                             </Field>
                           </FieldGroup>
-                          <label class="flex items-center gap-3 border border-border/40 bg-background px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors mt-2">
+                          <label class="check-row mt-2 cursor-pointer font-mono uppercase tracking-widest opacity-80 hover:bg-muted/10">
                             <Checkbox name={`upstream_key_enabled_${key.id}`} checked={key.enabled} />
                             <span>{t('启用密钥')}</span>
                           </label>
@@ -1616,7 +1616,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">{t('创建后启用')}</span>
                       </label>
                       <Button type="submit" disabled={busy() === `key-create-${item.provider.id}`} class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-6">
-                        {busy() === `key-create-${item.provider.id}` ? 'ADDING...' : 'ADD KEY'}
+                        {busy() === `key-create-${item.provider.id}` ? '添加中…' : t('ADD KEY')}
                       </Button>
                     </div>
                   </form>
@@ -1675,7 +1675,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             disabled={selectedUpstreamKeyId() === null || busy() === `key-models-sync-${selectedUpstreamKeyId() ?? 0}`}
                           >
                             <RefreshCw class={`mr-2 size-3 ${busy() === `key-models-sync-${selectedUpstreamKeyId() ?? 0}` ? 'animate-spin' : undefined}`} />
-                            SYNC
+                            {t('SYNC')}
                           </Button>
                         </div>
                       </CardHeader>
@@ -1690,8 +1690,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           when={item.keys.length > 0}
                           fallback={
                             <div class="border border-dashed border-border/60 bg-transparent px-4 py-6 text-sm text-muted-foreground opacity-70">
-                                  {t('还没有上游密钥，请先创建。')}
-                                </div>
+                              {t('还没有上游密钥，请先创建。')}
+                            </div>
                           }
                         >
                           <div class="flex flex-col gap-4 border border-dashed border-border/60 bg-transparent p-6">
@@ -1719,82 +1719,82 @@ export function ProvidersPage(props: ProvidersPageProps) {
                                   }}
                                   disabled={selectedUpstreamKeyId() === null || busy() === `key-models-add-${selectedUpstreamKeyId() ?? 0}`}
                                 >
-                                  ADD MODELS
+                                  {t('添加模型')}
                                 </Button>
                               </div>
                             </Field>
                           </div>
 
                           <div class="border border-border/40 bg-muted/5">
-                          {(() => {
-                            const keyId = selectedUpstreamKeyId();
-                            if (keyId === null) {
-                              return (
-                                <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                  {t('请选择一个密钥。')}
-                                </div>
-                              );
-                            }
+                            {(() => {
+                              const keyId = selectedUpstreamKeyId();
+                              if (keyId === null) {
+                                return (
+                                  <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
+                                    {t('请选择一个密钥。')}
+                                  </div>
+                                );
+                              }
 
-                            const models = upstreamKeyModels();
-                            if (models === null) {
-                              return (
-                                <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                  LOADING...
-                                </div>
-                              );
-                            }
+                              const models = upstreamKeyModels();
+                              if (models === null) {
+                                return (
+                                  <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
+                                    {t('读取中…')}
+                                  </div>
+                                );
+                              }
 
-                            if (models.length === 0) {
-                              return (
-                                <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                  {t('当前未限制模型；同步或添加后将按列表限制。')}
-                                </div>
-                              );
-                            }
+                              if (models.length === 0) {
+                                return (
+                                  <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
+                                    {t('当前未限制模型；同步或添加后将按列表限制。')}
+                                  </div>
+                                );
+                              }
 
-                            return (
-                              <Table>
-                                <TableHeader>
-                                  <TableRow class="border-b border-border/40 hover:bg-transparent bg-background">
-                                    <TableHead class="h-10">模型</TableHead>
-                                    <TableHead class="h-10">启用</TableHead>
-                                    <TableHead class="h-10 text-right">操作</TableHead>
-                                  </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                  <For each={models}>
-                                    {(model) => (
-                                      <TableRow class={`border-b border-border/40 hover:bg-muted/30 transition-colors ${model.enabled ? '' : 'opacity-50'}`}>
-                                        <TableCell class="font-mono text-sm max-w-[200px] truncate" title={model.model_name}>{model.model_name}</TableCell>
-                                        <TableCell>
-                                          <Checkbox
-                                            checked={model.enabled}
-                                            disabled={busy() === `key-model-${model.id}`}
-                                            onChange={(event) =>
-                                              void toggleKeyModelEnabled(model, event.currentTarget.checked)
-                                            }
-                                          />
-                                        </TableCell>
-                                        <TableCell class="text-right">
-                                          <Button
-                                            type="button"
-                                            size="sm"
-                                            variant="ghost"
-                                            class="font-mono text-[0.65rem] uppercase tracking-widest hover:bg-transparent hover:text-destructive px-0 shrink-0"
-                                            onClick={() => void removeKeyModel(model)}
-                                            disabled={busy() === `key-model-${model.id}`}
-                                          >
-                                            [ REMOVE ]
-                                          </Button>
-                                        </TableCell>
-                                      </TableRow>
-                                    )}
-                                  </For>
-                                </TableBody>
-                              </Table>
-                            );
-                          })()}
+                              return (
+                                <Table>
+                                  <TableHeader>
+                                    <TableRow class="border-b border-border/40 hover:bg-transparent bg-background">
+                                      <TableHead class="h-10">模型</TableHead>
+                                      <TableHead class="h-10">启用</TableHead>
+                                      <TableHead class="h-10 text-right">操作</TableHead>
+                                    </TableRow>
+                                  </TableHeader>
+                                  <TableBody>
+                                    <For each={models}>
+                                      {(model) => (
+                                        <TableRow class={`border-b border-border/40 hover:bg-muted/30 transition-colors ${model.enabled ? '' : 'opacity-50'}`}>
+                                          <TableCell class="font-mono text-sm max-w-[200px] truncate" title={model.model_name}>{model.model_name}</TableCell>
+                                          <TableCell>
+                                            <Checkbox
+                                              checked={model.enabled}
+                                              disabled={busy() === `key-model-${model.id}`}
+                                              onChange={(event) =>
+                                                void toggleKeyModelEnabled(model, event.currentTarget.checked)
+                                              }
+                                            />
+                                          </TableCell>
+                                          <TableCell class="text-right">
+                                            <Button
+                                              type="button"
+                                              size="sm"
+                                              variant="ghost"
+                                              class="font-mono text-[0.65rem] uppercase tracking-widest hover:bg-transparent hover:text-destructive px-0 shrink-0"
+                                              onClick={() => void removeKeyModel(model)}
+                                              disabled={busy() === `key-model-${model.id}`}
+                                            >
+                                              {t('移除')}
+                                            </Button>
+                                          </TableCell>
+                                        </TableRow>
+                                      )}
+                                    </For>
+                                  </TableBody>
+                                </Table>
+                              );
+                            })()}
                           </div>
                         </Show>
                       </CardContent>
@@ -1828,7 +1828,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         </div>
                         <Button type="button" size="sm" class="rounded-none text-xs tracking-wider" onClick={() => void syncModels(item)} disabled={busy() === `models-sync-${item.provider.id}`}>
                           <RefreshCw class={`mr-2 size-3 ${busy() === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} />
-                          SYNC MODELS
+                          {t('SYNC MODELS')}
                         </Button>
                       </CardHeader>
                       <CardContent class="grid gap-0 border-t border-border/40 pt-0 p-0">
@@ -1850,7 +1850,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           if (models === null) {
                             return (
                               <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                LOADING...
+                                {t('读取中…')}
                               </div>
                             );
                           }
@@ -1858,7 +1858,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           if (models.length === 0) {
                             return (
                               <div class="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                NO MODELS. CLICK SYNC TO FETCH.
+                                {t('NO MODELS. CLICK SYNC TO FETCH.')}
                               </div>
                             );
                           }
@@ -1924,6 +1924,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                                           size="icon"
                                           variant="ghost"
                                           class="size-8 hover:text-destructive opacity-70 hover:opacity-100"
+                                          aria-label={t('删除模型')}
                                           onClick={() => void removeModel(model)}
                                           disabled={busy() === `provider-model-${model.id}`}
                                         >

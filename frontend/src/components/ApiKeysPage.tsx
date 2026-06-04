@@ -175,7 +175,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
   ]);
 
   return (
-    <div class="flex flex-col gap-6">
+    <div class="section-stack">
       <PageHeader
         title="密钥"
         description="创建和管理访问密钥。"
@@ -189,7 +189,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
 
       <StatsGrid items={stats()} />
 
-      <Card class="border-border/80 bg-card/95">
+      <Card>
         <CardHeader>
           <CardTitle>密钥列表</CardTitle>
           <CardDescription>优先展示正在使用的密钥。</CardDescription>
@@ -253,6 +253,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                               type="button"
                               size="sm"
                               variant="ghost"
+                              aria-label={item.apiKey.enabled ? t('停用密钥') : t('启用密钥')}
                               disabled={busy() === `toggle-${item.apiKey.id}`}
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -287,11 +288,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
             </Field>
           </FieldGroup>
           <div class="grid gap-3 md:grid-cols-2">
-            <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
+            <label class="check-row">
               <Checkbox name="enabled" checked />
               <span>{t('创建后立即启用')}</span>
             </label>
-            <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
+            <label class="check-row">
               <Checkbox name="log_enabled" checked />
               <span>{t('记录请求元数据')}</span>
             </label>
@@ -301,17 +302,17 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
           </Button>
           <Show when={created()}>
             {(createdKey) => (
-              <Card class="border-emerald-200 bg-emerald-50">
+              <Card class="border-emerald-500/40 bg-emerald-500/10">
                 <CardContent class="flex flex-col gap-2 p-4">
-                    <div class="text-sm font-medium text-emerald-900">{t('明文密钥只展示一次')}</div>
-                    <code class="break-all text-sm text-emerald-900">{createdKey().api_key}</code>
-                    <div>
+                  <div class="text-sm font-medium text-foreground">{t('明文密钥只展示一次')}</div>
+                  <code class="break-all text-sm text-foreground">{createdKey().api_key}</code>
+                  <div>
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                        onClick={() => void navigator.clipboard.writeText(createdKey().api_key).then(() => props.onMessage(t('新密钥已复制。')))}
-                      >
+                      onClick={() => void navigator.clipboard.writeText(createdKey().api_key).then(() => props.onMessage(t('新密钥已复制。')))}
+                    >
                       <Copy />
                       复制
                     </Button>
@@ -336,26 +337,20 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
             return (
               <div class="flex flex-col gap-6">
                 <div class="grid gap-3 md:grid-cols-3">
-                  <Card class="border-border/70 bg-muted/25">
-                    <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('状态')}</div>
+                  <div class="surface-tile">
+                      <div class="surface-label">{t('状态')}</div>
                       <div class="mt-2">
                         <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                       </div>
-                    </CardContent>
-                  </Card>
-                  <Card class="border-border/70 bg-muted/25">
-                    <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('请求元数据')}</div>
+                  </div>
+                  <div class="surface-tile">
+                      <div class="surface-label">{t('请求元数据')}</div>
                       <div class="mt-2 text-xl font-semibold text-foreground">{data.apiKey.log_enabled ? '开启' : '关闭'}</div>
-                    </CardContent>
-                  </Card>
-                  <Card class="border-border/70 bg-muted/25">
-                    <CardContent class="p-4">
-                      <div class="text-[0.72rem] uppercase tracking-[0.18em] text-muted-foreground">{t('到期')}</div>
+                  </div>
+                  <div class="surface-tile">
+                      <div class="surface-label">{t('到期')}</div>
                       <div class="mt-2 text-xl font-semibold text-foreground">{data.apiKey.expires_at_ms ? formatDateTime(data.apiKey.expires_at_ms) : '不过期'}</div>
-                    </CardContent>
-                  </Card>
+                  </div>
                 </div>
 
                 <form class="flex flex-col gap-4" onSubmit={(event) => void submitUpdate(event)}>
@@ -371,11 +366,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   </FieldGroup>
 
                   <div class="grid gap-3 md:grid-cols-2">
-                    <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
+                    <label class="check-row">
                       <Checkbox name="enabled" checked={data.apiKey.enabled} />
                       <span>{t('启用密钥')}</span>
                     </label>
-                    <label class="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-3 text-sm">
+                    <label class="check-row">
                       <Checkbox name="log_enabled" checked={data.apiKey.log_enabled} />
                       <span>{t('记录请求元数据')}</span>
                     </label>

@@ -34,7 +34,7 @@ export function StatCard(props: StatCardProps) {
               </div>
               <p class="text-sm font-medium text-muted-foreground">{t(props.title)}</p>
             </div>
-            <div class={cn('flex size-12 items-center justify-center rounded-2xl border', accentClasses[accent()])}>{props.icon}</div>
+            <div class={cn('flex size-12 items-center justify-center border', accentClasses[accent()])}>{props.icon}</div>
           </div>
           <div class="flex flex-col gap-4">
             <div class="flex items-end gap-2">

@@ -19,14 +19,14 @@ export function DetailDrawer(props: DetailDrawerProps) {
       <Portal>
         <div class="fixed inset-0 z-50 flex justify-end bg-background/80 backdrop-blur-sm transition-opacity" onClick={props.onClose}>
           <aside
-            class="flex h-full w-full max-w-3xl flex-col border-l border-border bg-background shadow-2xl"
+            class="flex h-full w-full max-w-3xl flex-col border-l border-border bg-card shadow-none"
             onClick={(event) => event.stopPropagation()}
           >
-            <div class="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border/40 bg-background/95 px-8 py-6 backdrop-blur-md">
+            <div class="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border/40 bg-card/95 px-8 py-6 backdrop-blur-md">
               <div class="flex min-w-0 flex-col gap-2">
-                <h2 class="text-3xl font-medium tracking-tight text-foreground truncate" title={t(props.title)}>{t(props.title)}</h2>
+                <h2 class="truncate text-3xl font-medium tracking-tight text-foreground" title={t(props.title)}>{t(props.title)}</h2>
                 <Show when={props.description}>
-                  <p class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70 truncate">{t(props.description!)}</p>
+                  <p class="truncate font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t(props.description!)}</p>
                 </Show>
               </div>
               <Button type="button" variant="ghost" size="icon" onClick={props.onClose} aria-label={t('关闭')} class="-mr-2">

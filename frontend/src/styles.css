@@ -132,6 +132,62 @@
 }
 
 @layer components {
+  .app-shell {
+    @apply flex min-h-dvh w-full flex-col bg-background lg:flex-row;
+  }
+
+  .app-sidebar {
+    @apply w-full shrink-0 border-r border-border bg-sidebar px-4 py-8 lg:min-h-dvh lg:w-[280px];
+  }
+
+  .app-main {
+    @apply min-w-0 flex-1 bg-background px-5 py-8 sm:px-6 lg:px-12 lg:py-12;
+  }
+
+  .app-content {
+    @apply flex w-full max-w-6xl flex-col gap-10;
+  }
+
+  .app-pagebar {
+    @apply flex flex-col gap-6 border-b border-border pb-8 md:flex-row md:items-end md:justify-between;
+  }
+
+  .app-kicker {
+    @apply font-mono text-[0.65rem] uppercase tracking-[0.25em] text-muted-foreground;
+  }
+
+  .app-title {
+    @apply text-4xl font-bold tracking-tight text-foreground md:text-5xl;
+  }
+
+  .app-description {
+    @apply mt-5 max-w-2xl font-mono text-sm leading-6 text-muted-foreground md:text-[0.95rem];
+  }
+
+  .app-toolbar {
+    @apply flex flex-wrap items-center gap-3 pb-1;
+  }
+
+  .section-stack {
+    @apply flex flex-col gap-6;
+  }
+
+  .surface-tile {
+    @apply border border-border/70 bg-muted/20 p-4;
+  }
+
+  .surface-label {
+    @apply font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground;
+  }
+
+  .surface-value {
+    @apply mt-2 break-all text-sm text-foreground;
+  }
+
+  .check-row {
+    @apply flex min-h-11 items-center gap-3 border border-border/60 bg-muted/20 px-3 py-3 text-sm text-muted-foreground;
+  }
+
   .panel {
     @apply border border-border bg-background p-6;
   }
@@ -391,7 +447,7 @@
   }
 
   .sidebar-nav-item {
-    @apply flex items-center gap-3 rounded-xl border border-transparent px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground;
+    @apply flex items-center gap-3 rounded-none border border-transparent px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground;
   }
 
   .sidebar-nav-item svg {

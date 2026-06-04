@@ -127,8 +127,8 @@ function TopShell(props: { data: AppDataContext; children: any }) {
 
   return (
     <div class="min-h-screen bg-background">
-      <div class="mx-auto flex min-h-screen max-w-[1520px] flex-col lg:flex-row">
-        <aside class="w-full lg:w-[280px] flex-shrink-0 border-r border-border bg-sidebar px-4 py-8">
+      <div class="app-shell">
+        <aside class="app-sidebar">
           <div class="flex items-center gap-3 px-2 pb-12">
             <div class="flex size-8 items-center justify-center bg-foreground text-background">
               <SquareTerminal class="size-4" />
@@ -160,30 +160,30 @@ function TopShell(props: { data: AppDataContext; children: any }) {
               }}
             </For>
           </nav>
-          <div class="mt-16 flex flex-col gap-4 pt-8 border-t border-border/40 px-3">
-              <div class="flex items-center justify-between">
-                <span class="text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground font-mono">{t('SYSTEM STATUS')}</span>
-                <span class="flex h-2 w-2 relative">
-                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
-                  <span class="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
-                </span>
-              </div>
-              <p class="text-xs text-muted-foreground font-mono truncate">{props.data.message()}</p>
+          <div class="mt-16 flex flex-col gap-4 border-t border-border/40 px-3 pt-8">
+            <div class="flex items-center justify-between">
+              <span class="font-mono text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">{t('SYSTEM STATUS')}</span>
+              <span class="relative flex h-2 w-2">
+                <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75"></span>
+                <span class="relative inline-flex h-2 w-2 rounded-full bg-primary"></span>
+              </span>
+            </div>
+            <p class="truncate font-mono text-xs text-muted-foreground">{props.data.message()}</p>
           </div>
         </aside>
 
-        <main class="min-w-0 flex-1 bg-background px-6 py-8 lg:px-12 lg:py-12">
-          <div class="flex flex-col gap-12 max-w-5xl">
-            <div class="flex flex-col gap-6 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
+        <main class="app-main">
+          <div class="app-content">
+            <div class="app-pagebar">
               <div class="min-w-0">
                 <div class="mb-3 flex items-center gap-3">
                   <span class="size-1.5 rounded-full bg-primary" />
-                  <p class="text-[0.65rem] uppercase tracking-[0.25em] text-muted-foreground font-mono">{`${t(currentItem().label)} ${t('MODULE')}`}</p>
+                  <p class="app-kicker">{`${t(currentItem().label)} ${t('MODULE')}`}</p>
                 </div>
-                <h1 class="text-5xl font-bold tracking-tight text-foreground">{t(currentItem().label)}</h1>
-                <p class="mt-6 text-[0.95rem] text-muted-foreground max-w-2xl leading-relaxed font-mono">{t(pageDescription(location.pathname))}</p>
+                <h1 class="app-title">{t(currentItem().label)}</h1>
+                <p class="app-description">{t(pageDescription(location.pathname))}</p>
               </div>
-              <div class="flex items-center gap-4 pb-1">
+              <div class="app-toolbar">
                 <LocaleSwitch />
                 <StatusBadge tone="normal">实时</StatusBadge>
                 <div class="flex items-center gap-2">
@@ -191,16 +191,16 @@ function TopShell(props: { data: AppDataContext; children: any }) {
                   <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">{t('已连接')}</span>
                 </div>
                 <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                class="font-mono text-xs uppercase tracking-widest border-border text-foreground hover:bg-muted"
-                onClick={() => void props.data.onRefresh()}
-                disabled={props.data.status() === 'loading'}
-              >
-                <RefreshCw class={`mr-2 size-3 ${props.data.status() === 'loading' ? 'animate-spin' : ''}`} />
-                SYNC
-              </Button>
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  class="border-border text-foreground hover:bg-muted"
+                  onClick={() => void props.data.onRefresh()}
+                  disabled={props.data.status() === 'loading'}
+                >
+                  <RefreshCw class={`mr-2 size-3 ${props.data.status() === 'loading' ? 'animate-spin' : ''}`} />
+                  {t('SYNC')}
+                </Button>
               </div>
             </div>
             {props.children}
@@ -524,7 +524,7 @@ function OverviewPage(props: { data: AppDataContext }) {
               description: props.data.settings().apiBase,
               action: (
                 <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
-                  [ COPY ]
+                  {t('[ COPY ]')}
                 </Button>
               ),
             },
@@ -948,22 +948,20 @@ function UpstreamsPage(props: { data: AppDataContext }) {
   });
 
   return (
-    <div class="flex flex-col gap-6">
+    <div class="section-stack">
       <PageHeader title="上游" description="查看连接目标与健康状态。" />
-      <div class="mt-4">
-        <ProvidersPage
-          settings={props.data.settings()}
-          items={props.data.providers()}
-          aliases={props.data.modelAliases()}
-          onRefresh={async (successMessage?: string) => {
-            await Promise.all([
-              props.data.loadProviders(),
-              props.data.loadModelAliases(successMessage),
-            ]);
-          }}
-          onMessage={props.data.onMessage}
-        />
-      </div>
+      <ProvidersPage
+        settings={props.data.settings()}
+        items={props.data.providers()}
+        aliases={props.data.modelAliases()}
+        onRefresh={async (successMessage?: string) => {
+          await Promise.all([
+            props.data.loadProviders(),
+            props.data.loadModelAliases(successMessage),
+          ]);
+        }}
+        onMessage={props.data.onMessage}
+      />
     </div>
   );
 }
@@ -976,14 +974,12 @@ function KeysRoutePage(props: { data: AppDataContext }) {
   });
 
   return (
-    <div class="mt-4">
-      <ApiKeysPage
-        settings={props.data.settings()}
-        items={props.data.apiKeys()}
-        onRefresh={props.data.loadApiKeys}
-        onMessage={props.data.onMessage}
-      />
-    </div>
+    <ApiKeysPage
+      settings={props.data.settings()}
+      items={props.data.apiKeys()}
+      onRefresh={props.data.loadApiKeys}
+      onMessage={props.data.onMessage}
+    />
   );
 }
 
@@ -998,15 +994,13 @@ function LogsRoutePage(props: { data: AppDataContext }) {
   });
 
   return (
-    <div class="mt-4">
-      <LogsPage
-        settings={props.data.settings()}
-        providers={props.data.providers()}
-        apiKeys={props.data.apiKeys()}
-        refreshKey={props.data.refreshKey()}
-        onMessage={props.data.onMessage}
-      />
-    </div>
+    <LogsPage
+      settings={props.data.settings()}
+      providers={props.data.providers()}
+      apiKeys={props.data.apiKeys()}
+      refreshKey={props.data.refreshKey()}
+      onMessage={props.data.onMessage}
+    />
   );
 }
 
@@ -1019,20 +1013,18 @@ function SettingsRoutePage(props: { data: AppDataContext }) {
   });
 
   return (
-    <div class="mt-4">
-      <SettingsPage
-        settings={props.data.settings()}
-        systemConfig={props.data.systemConfig()}
-        runtimeSettings={props.data.runtimeSettings()}
-        runtimeEnvPreview={props.data.runtimeEnvPreview()}
-        prices={props.data.prices()}
-        providers={props.data.providers()}
-        onApiBaseChange={props.data.onApiBaseChange}
-        onAdminTokenChange={props.data.onAdminTokenChange}
-        onRefresh={props.data.loadPricesAndConfig}
-        onMessage={props.data.onMessage}
-      />
-    </div>
+    <SettingsPage
+      settings={props.data.settings()}
+      systemConfig={props.data.systemConfig()}
+      runtimeSettings={props.data.runtimeSettings()}
+      runtimeEnvPreview={props.data.runtimeEnvPreview()}
+      prices={props.data.prices()}
+      providers={props.data.providers()}
+      onApiBaseChange={props.data.onApiBaseChange}
+      onAdminTokenChange={props.data.onAdminTokenChange}
+      onRefresh={props.data.loadPricesAndConfig}
+      onMessage={props.data.onMessage}
+    />
   );
 }
 

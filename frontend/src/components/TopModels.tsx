@@ -28,8 +28,8 @@ export function TopModels(props: TopModelsProps) {
           <div class="flex flex-col gap-3">
             <For each={props.items.slice(0, 5)}>
               {(item, index) => (
-                <article class="grid grid-cols-[auto_1fr_auto] items-center gap-4 rounded-[1.35rem] border border-border bg-background/70 p-4">
-                  <div class="flex size-10 items-center justify-center rounded-2xl border border-border bg-muted/70 text-sm font-semibold text-muted-foreground">
+                <article class="grid grid-cols-[auto_1fr_auto] items-center gap-4 border border-border bg-background/70 p-4">
+                  <div class="flex size-10 items-center justify-center border border-border bg-muted/70 text-sm font-semibold text-muted-foreground">
                     {String(index() + 1).padStart(2, '0')}
                   </div>
                   <div class="min-w-0">
