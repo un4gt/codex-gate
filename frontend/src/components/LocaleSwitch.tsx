@@ -14,7 +14,7 @@ export function LocaleSwitch(props: { class?: string }) {
           type="button"
           size="sm"
           variant={locale() === item ? 'default' : 'ghost'}
-          class="h-7 px-3 text-[0.65rem] tracking-widest"
+          class="h-7 px-3 font-mono text-[0.72rem] tracking-[0.08em]"
           onClick={() => setLocale(item)}
           disabled={isSwitching() && locale() !== item}
           title={item === 'zh' ? t('切换到中文') : t('Switch to English')}

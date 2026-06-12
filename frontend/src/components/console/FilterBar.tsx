@@ -21,7 +21,7 @@ export function FilterBar(props: FilterBarProps) {
           <div class="flex flex-wrap gap-2 items-center">
             {props.actions}
             <Show when={props.advanced}>
-              <Button type="button" variant="ghost" size="sm" onClick={props.onToggleAdvanced} class="font-mono text-[0.65rem] tracking-widest px-3 ml-2">
+              <Button type="button" variant="ghost" size="sm" onClick={props.onToggleAdvanced} class="px-3 ml-2">
                 <Filter class="mr-2 size-3" />
                 {props.advancedOpen ? t('HIDE FILTERS') : t('ADVANCED')}
               </Button>

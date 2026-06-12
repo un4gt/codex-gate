@@ -430,7 +430,7 @@ export interface UsageBreakdownRow {
 
 export interface UsageBreakdownResponse {
   by: 'model' | 'api_key' | 'provider' | 'endpoint' | 'upstream_key';
-  period: 'today' | '7d' | '30d';
+  period: StatsPeriod;
   window: {
     from_ms: number;
     to_ms: number;
@@ -438,8 +438,10 @@ export interface UsageBreakdownResponse {
   rows: UsageBreakdownRow[];
 }
 
+export type StatsPeriod = 'today' | '7h' | '24h' | 'week' | 'month' | '7d' | '30d';
+
 export interface StatsOverviewResponse {
-  period: 'today' | '7d' | '30d';
+  period: StatsPeriod;
   window: {
     from_ms: number;
     to_ms: number;
@@ -449,6 +451,7 @@ export interface StatsOverviewResponse {
     failed: number;
     error_rate: number;
     p95_latency_ms: number;
+    avg_latency_ms: number;
     cost_total_usd: string;
   };
   service_health: {

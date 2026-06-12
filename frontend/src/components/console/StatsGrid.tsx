@@ -1,6 +1,5 @@
 import { For, Show } from 'solid-js';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardContent } from '@/components/ui/card';
 import { t } from '@/lib/i18n';
 
 export interface StatItem {
@@ -24,12 +23,12 @@ function trendVariant(tone?: StatItem['tone']) {
 
 export function StatsGrid(props: StatsGridProps) {
   return (
-    <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-4 border-t border-border/40 pt-8 mt-2">
-      <For each={props.items.slice(0, 4)}>
+    <div class="grid gap-5 border-t border-border/40 pt-8 mt-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+      <For each={props.items}>
         {(item) => (
-          <div class="flex flex-col gap-1 pr-6 border-r border-border/40 last:border-r-0">
+          <div class="flex min-h-[132px] flex-col gap-1 border border-border/60 bg-background p-5">
             <div class="flex items-center justify-between">
-              <span class="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground">{t(item.label)}</span>
+              <span class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t(item.label)}</span>
               <Show when={item.trend}>
                 <Badge variant={trendVariant(item.tone)}>{item.trend}</Badge>
               </Show>
@@ -43,9 +42,9 @@ export function StatsGrid(props: StatsGridProps) {
                 <span class="size-1.5 rounded-full bg-red-500" />
               </Show>
             </div>
-            <div class="mt-2 text-4xl font-medium tracking-tight text-foreground">{item.value}</div>
+            <div class="mt-2 text-3xl font-medium tracking-normal text-foreground">{item.value}</div>
             <Show when={item.hint}>
-              <div class="mt-1 font-mono text-[0.65rem] text-muted-foreground opacity-70 uppercase tracking-wider truncate">{t(item.hint!)}</div>
+              <div class="mt-auto pt-2 text-xs leading-5 text-muted-foreground opacity-80">{t(item.hint!)}</div>
             </Show>
           </div>
         )}

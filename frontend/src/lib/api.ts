@@ -21,6 +21,7 @@ import type {
   RequestLogSearchParams,
   RuntimeEnvPreviewResponse,
   RuntimeSettingsResponse,
+  StatsPeriod,
   StatsDailyRow,
   StatsOverviewResponse,
   UsageBreakdownResponse,
@@ -71,7 +72,18 @@ async function requestJson<T>(apiBase: string, path: string, adminToken: string,
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (!contentType.includes('application/json')) {
+    const body = await response.text();
+    const looksLikeHtml = body.trimStart().startsWith('<');
+    throw new Error(looksLikeHtml ? '服务地址返回的不是后台数据，请确认服务地址。' : '服务返回格式不正确。');
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new Error('服务返回格式不正确。');
+  }
 }
 
 async function fetchJson<T>(apiBase: string, path: string, adminToken: string): Promise<T> {
@@ -214,7 +226,7 @@ export async function loadRequestLogs(settings: ConnectionSettings, params: Requ
 
 export async function loadStatsOverview(
   settings: ConnectionSettings,
-  period: 'today' | '7d' | '30d' = 'today',
+  period: StatsPeriod = 'today',
 ): Promise<StatsOverviewResponse> {
   const { apiBase, adminToken } = requireConnection(settings);
   return fetchJson<StatsOverviewResponse>(apiBase, `/api/v1/stats/overview?period=${encodeURIComponent(period)}`, adminToken);
@@ -222,7 +234,7 @@ export async function loadStatsOverview(
 
 export async function loadUsageBreakdown(
   settings: ConnectionSettings,
-  params: { by?: 'model' | 'api_key'; period?: 'today' | '7d' | '30d'; limit?: number } = {},
+  params: { by?: 'model' | 'api_key'; period?: StatsPeriod; limit?: number } = {},
 ): Promise<UsageBreakdownResponse> {
   const { apiBase, adminToken } = requireConnection(settings);
   const search = new URLSearchParams();

@@ -33,6 +33,22 @@ const ALLOWED_PROVIDER_TYPES: [&str; 4] = [
 // Keep these payloads bounded to avoid untrusted memory spikes.
 const ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES: usize = 1024 * 1024;
 const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
+const MILLIS_PER_HOUR: i64 = 3_600_000;
+const MILLIS_PER_DAY: i64 = 86_400_000;
+
+fn stats_window(period: &str, now_ms: i64) -> Option<(i64, i64)> {
+    match period {
+        "today" => {
+            let today = (now_ms / MILLIS_PER_DAY) * MILLIS_PER_DAY;
+            Some((today, now_ms))
+        }
+        "7h" => Some((now_ms.saturating_sub(7 * MILLIS_PER_HOUR), now_ms)),
+        "24h" => Some((now_ms.saturating_sub(24 * MILLIS_PER_HOUR), now_ms)),
+        "week" | "7d" => Some((now_ms.saturating_sub(7 * MILLIS_PER_DAY), now_ms)),
+        "month" | "30d" => Some((now_ms.saturating_sub(30 * MILLIS_PER_DAY), now_ms)),
+        _ => None,
+    }
+}
 
 fn validate_upstream_base_url(value: &str) -> Result<(), &'static str> {
     let uri: Uri = value.parse().map_err(|_| "invalid base_url")?;
@@ -2152,14 +2168,9 @@ async fn stats_daily(req: Request<Incoming>, state: SharedState) -> HttpResponse
 async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let period = query_string(req.uri().query(), "period").unwrap_or_else(|| "today".to_string());
     let now_ms = util::now_ms();
-    let (from_ms, to_ms) = match period.as_str() {
-        "today" => {
-            let today = (now_ms / 86_400_000) * 86_400_000;
-            (today, now_ms)
-        }
-        "7d" => (now_ms - 7 * 86_400_000, now_ms),
-        "30d" => (now_ms - 30 * 86_400_000, now_ms),
-        _ => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
+    let (from_ms, to_ms) = match stats_window(period.as_str(), now_ms) {
+        Some(window) => window,
+        None => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
     };
 
     let hourly_rows = match state.db.list_stats_hourly_range(from_ms, to_ms).await {
@@ -2175,6 +2186,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
     let mut cache_creation_input_tokens: i64 = 0;
     let mut reasoning_output_tokens: i64 = 0;
     let mut usage_observed_requests: i64 = 0;
+    let mut wait_time_ms: i64 = 0;
     let mut cost_total = Decimal::ZERO;
     let mut latency_buckets = [0_i64; 6];
     for row in &hourly_rows {
@@ -2186,6 +2198,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         cache_creation_input_tokens += row.cache_creation_input_tokens;
         reasoning_output_tokens += row.reasoning_output_tokens;
         usage_observed_requests += row.usage_observed_requests;
+        wait_time_ms += row.wait_time_ms;
         cost_total += Decimal::from_str(&row.cost_total_usd).unwrap_or(Decimal::ZERO);
         latency_buckets[0] += row.latency_lt_500ms;
         latency_buckets[1] += row.latency_lt_1000ms;
@@ -2199,6 +2212,11 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
     let visible_output_tokens = output_tokens.saturating_sub(reasoning_output_tokens);
 
     let p95 = approximate_p95_latency_ms(&latency_buckets);
+    let avg_latency_ms = if requests_total > 0 {
+        wait_time_ms / requests_total
+    } else {
+        0
+    };
 
     let error_rate = if requests_total > 0 {
         (failed_total as f64 / requests_total as f64) * 100.0
@@ -2336,6 +2354,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             "failed": failed_total,
             "error_rate": error_rate,
             "p95_latency_ms": p95,
+            "avg_latency_ms": avg_latency_ms,
             "cost_total_usd": format!("{:.15}", cost_total)
         },
         "service_health": {
@@ -2375,14 +2394,9 @@ async fn stats_usage_breakdown(req: Request<Incoming>, state: SharedState) -> Ht
     };
     let period = query_string(req.uri().query(), "period").unwrap_or_else(|| "today".to_string());
     let now_ms = util::now_ms();
-    let (from_ms, to_ms) = match period.as_str() {
-        "today" => {
-            let today = (now_ms / 86_400_000) * 86_400_000;
-            (today, now_ms)
-        }
-        "7d" => (now_ms - 7 * 86_400_000, now_ms),
-        "30d" => (now_ms - 30 * 86_400_000, now_ms),
-        _ => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
+    let (from_ms, to_ms) = match stats_window(period.as_str(), now_ms) {
+        Some(window) => window,
+        None => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
     };
     let limit = query_i64(req.uri().query(), "limit")
         .unwrap_or(20)

@@ -4,7 +4,7 @@ import { translateJsx } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 const badgeVariants = cva(
-  'inline-flex items-center gap-1 border border-border px-3 py-1 font-mono text-[0.65rem] uppercase tracking-widest font-medium transition-colors bg-transparent text-foreground',
+  'inline-flex items-center gap-1 border border-border px-3 py-1 text-[0.72rem] uppercase tracking-[0.08em] font-medium transition-colors bg-transparent text-foreground',
   {
     variants: {
       variant: {

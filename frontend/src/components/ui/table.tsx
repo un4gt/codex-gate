@@ -6,7 +6,7 @@ export function Table(props: JSX.HTMLAttributes<HTMLTableElement>) {
   const [local, rest] = splitProps(props, ['class']);
   return (
     <div class="relative w-full overflow-x-auto border border-border bg-background">
-      <table class={cn('w-full caption-bottom text-sm font-mono', local.class)} {...rest} />
+      <table class={cn('w-full caption-bottom text-sm', local.class)} {...rest} />
     </div>
   );
 }
@@ -35,7 +35,7 @@ export function TableHead(props: JSX.ThHTMLAttributes<HTMLTableCellElement>) {
   const [local, rest] = splitProps(props, ['children', 'class']);
   const resolvedChildren = children(() => local.children);
   const content = createMemo(() => translateJsx(resolvedChildren()));
-  return <th class={cn('h-12 px-5 text-left align-middle font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20', local.class)} {...rest}>{content()}</th>;
+  return <th class={cn('h-12 px-5 text-left align-middle text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground bg-muted/20', local.class)} {...rest}>{content()}</th>;
 }
 
 export function TableCell(props: JSX.TdHTMLAttributes<HTMLTableCellElement>) {

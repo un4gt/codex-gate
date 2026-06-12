@@ -1380,7 +1380,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           {t('START LOGIN')}
                         </Button>
                         <Show when={codexOauthView()?.status.state === 'pending'}>
-                          <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70 animate-pulse">{t('WAITING FOR AUTHORIZATION...')}</span>
+                          <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">{t('WAITING FOR AUTHORIZATION...')}</span>
                         </Show>
                       </div>
 
@@ -1674,7 +1674,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             }}
                             disabled={selectedUpstreamKeyId() === null || busy() === `key-models-sync-${selectedUpstreamKeyId() ?? 0}`}
                           >
-                            <RefreshCw class={`mr-2 size-3 ${busy() === `key-models-sync-${selectedUpstreamKeyId() ?? 0}` ? 'animate-spin' : undefined}`} />
+                            <RefreshCw class="mr-2 size-3" />
                             {t('SYNC')}
                           </Button>
                         </div>
@@ -1827,7 +1827,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           <CardDescription class="font-mono text-[0.65rem] uppercase tracking-wider mt-1">{t('同步模型并管理显示名称与启用状态。')}</CardDescription>
                         </div>
                         <Button type="button" size="sm" class="rounded-none text-xs tracking-wider" onClick={() => void syncModels(item)} disabled={busy() === `models-sync-${item.provider.id}`}>
-                          <RefreshCw class={`mr-2 size-3 ${busy() === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} />
+                          <RefreshCw class="mr-2 size-3" />
                           {t('SYNC MODELS')}
                         </Button>
                       </CardHeader>

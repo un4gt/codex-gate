@@ -16,14 +16,14 @@ export function FieldLabel(props: JSX.LabelHTMLAttributes<HTMLLabelElement>) {
   const [local, rest] = splitProps(props, ['children', 'class']);
   const resolvedChildren = children(() => local.children);
   const content = createMemo(() => translateJsx(resolvedChildren()));
-  return <label class={cn('font-mono text-[0.65rem] uppercase tracking-widest text-foreground font-medium', local.class)} {...rest}>{content()}</label>;
+  return <label class={cn('text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-foreground', local.class)} {...rest}>{content()}</label>;
 }
 
 export function FieldDescription(props: JSX.HTMLAttributes<HTMLParagraphElement>) {
   const [local, rest] = splitProps(props, ['children', 'class']);
   const resolvedChildren = children(() => local.children);
   const content = createMemo(() => translateJsx(resolvedChildren()));
-  return <p class={cn('font-mono text-[0.65rem] text-muted-foreground opacity-70', local.class)} {...rest}>{content()}</p>;
+  return <p class={cn('text-xs leading-5 text-muted-foreground opacity-80', local.class)} {...rest}>{content()}</p>;
 }
 
 export function FieldSet(props: JSX.FieldsetHTMLAttributes<HTMLFieldSetElement>) {
@@ -35,5 +35,5 @@ export function FieldLegend(props: JSX.HTMLAttributes<HTMLLegendElement>) {
   const [local, rest] = splitProps(props, ['children', 'class']);
   const resolvedChildren = children(() => local.children);
   const content = createMemo(() => translateJsx(resolvedChildren()));
-  return <legend class={cn('px-2 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground', local.class)} {...rest}>{content()}</legend>;
+  return <legend class={cn('px-2 text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground', local.class)} {...rest}>{content()}</legend>;
 }

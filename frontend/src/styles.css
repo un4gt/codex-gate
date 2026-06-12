@@ -1,6 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
 @import "tailwindcss";
-@import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
@@ -38,6 +36,8 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-data);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -47,6 +47,8 @@
 
 :root {
   --radius: 0;
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+  --font-data: "SFMono-Regular", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, "Liberation Mono", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", monospace;
   --background: oklch(0.97 0.005 95); /* light grey background */
   --foreground: oklch(0.2 0 0); /* almost black */
   --card: oklch(0.99 0.002 95); /* lighter than background */
@@ -94,10 +96,13 @@
   }
 
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply bg-background text-foreground subpixel-antialiased;
     margin: 0;
-    font-family: "Public Sans", "Avenir Next", "Segoe UI", sans-serif;
-    letter-spacing: -0.01em;
+    font-family: var(--font-ui);
+    font-size: 15px;
+    line-height: 1.5;
+    letter-spacing: 0;
+    text-rendering: optimizeLegibility;
   }
 
   a {
@@ -122,7 +127,7 @@
   .log-drawer__subtitle,
   .status-chip,
   .log-row__meta {
-    font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: var(--font-data);
   }
 
   ::selection {
@@ -137,31 +142,31 @@
   }
 
   .app-sidebar {
-    @apply w-full shrink-0 border-r border-border bg-sidebar px-4 py-8 lg:min-h-dvh lg:w-[280px];
+    @apply flex w-full shrink-0 flex-col border-r border-border bg-sidebar px-4 py-7 lg:min-h-dvh lg:w-[264px] xl:w-[272px];
   }
 
   .app-main {
-    @apply min-w-0 flex-1 bg-background px-5 py-8 sm:px-6 lg:px-12 lg:py-12;
+    @apply min-w-0 flex-1 bg-background px-5 py-7 sm:px-6 lg:px-8 lg:py-9 xl:px-10 2xl:px-12;
   }
 
   .app-content {
-    @apply flex w-full max-w-6xl flex-col gap-10;
+    @apply flex w-full max-w-[1600px] flex-col gap-8;
   }
 
   .app-pagebar {
-    @apply flex flex-col gap-6 border-b border-border pb-8 md:flex-row md:items-end md:justify-between;
+    @apply flex flex-col gap-5 border-b border-border pb-7 md:flex-row md:items-end md:justify-between;
   }
 
   .app-kicker {
-    @apply font-mono text-[0.65rem] uppercase tracking-[0.25em] text-muted-foreground;
+    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .app-title {
-    @apply text-4xl font-bold tracking-tight text-foreground md:text-5xl;
+    @apply text-3xl font-semibold tracking-normal text-foreground md:text-4xl;
   }
 
   .app-description {
-    @apply mt-5 max-w-2xl font-mono text-sm leading-6 text-muted-foreground md:text-[0.95rem];
+    @apply mt-3 max-w-3xl text-sm leading-6 text-muted-foreground;
   }
 
   .app-toolbar {
@@ -177,7 +182,7 @@
   }
 
   .surface-label {
-    @apply font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground;
+    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .surface-value {
@@ -198,11 +203,11 @@
 
   .panel__header h2,
   .panel__header h3 {
-    @apply m-0 text-xl font-semibold tracking-[-0.03em] text-foreground;
+    @apply m-0 text-xl font-semibold tracking-normal text-foreground;
   }
 
   .panel__eyebrow {
-    @apply mb-2 text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply mb-2 text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .panel__muted {
@@ -210,7 +215,7 @@
   }
 
   .button {
-    @apply inline-flex h-10 items-center justify-center gap-2 bg-foreground px-6 py-2 text-xs uppercase tracking-widest font-bold text-background transition-colors hover:bg-foreground/92 disabled:pointer-events-none disabled:opacity-50;
+    @apply inline-flex h-10 items-center justify-center gap-2 bg-foreground px-6 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-background transition-colors hover:bg-foreground/92 disabled:pointer-events-none disabled:opacity-50;
   }
 
   .button--ghost {
@@ -218,11 +223,11 @@
   }
 
   .empty-state {
-    @apply border border-dashed border-border bg-transparent p-6 text-center text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground opacity-70;
+    @apply border border-dashed border-border bg-transparent p-6 text-center text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground opacity-70;
   }
 
   .status-banner {
-    @apply border border-border bg-transparent px-4 py-3 text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply border border-border bg-transparent px-4 py-3 text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .status-banner--page {
@@ -230,7 +235,7 @@
   }
 
   .status-chip {
-    @apply inline-flex items-center border border-border bg-transparent px-3 py-1 text-[0.65rem] uppercase tracking-[0.2em] font-mono text-muted-foreground;
+    @apply inline-flex items-center border border-border bg-transparent px-3 py-1 text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .status-chip--enabled {
@@ -246,7 +251,7 @@
   }
 
   .log-row__status {
-    @apply inline-flex items-center rounded-full border px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.16em];
+    @apply inline-flex items-center rounded-full border px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.08em];
   }
 
   .log-row__status.is-ok {
@@ -276,7 +281,7 @@
   .logs-filters label span,
   .logs-pagination span,
   .logs-table__head {
-    @apply text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .logs-filters input,
@@ -419,11 +424,11 @@
   }
 
   .overview-tile__value {
-    @apply text-3xl font-bold tracking-tight text-foreground mt-2;
+    @apply text-3xl font-semibold tracking-normal text-foreground mt-2;
   }
 
   .overview-tile__hint {
-    @apply text-[0.7rem] uppercase tracking-[0.1em] font-mono text-muted-foreground mt-1;
+    @apply text-xs uppercase tracking-[0.06em] text-muted-foreground mt-1;
   }
 
   .sidebar-shell {
@@ -435,7 +440,7 @@
   }
 
   .sidebar-shell__title {
-    @apply text-sm font-medium uppercase tracking-widest font-mono text-foreground;
+    @apply text-sm font-semibold uppercase tracking-[0.08em] text-foreground;
   }
 
   .sidebar-shell__subtitle {
@@ -463,7 +468,7 @@
   }
 
   .sidebar-nav-item small {
-    @apply text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply text-xs uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .sidebar-nav-item.is-active {
@@ -479,7 +484,7 @@
   }
 
   .page-top__title {
-    @apply text-2xl font-semibold tracking-[-0.03em] text-foreground;
+    @apply text-2xl font-semibold tracking-normal text-foreground;
   }
 
   .page-top__alert {
@@ -491,7 +496,7 @@
   }
 
   .page-section-title {
-    @apply text-2xl font-semibold tracking-[-0.03em] text-foreground;
+    @apply text-2xl font-semibold tracking-normal text-foreground;
   }
 
   .page-section-desc {
@@ -507,7 +512,7 @@
   }
 
   .overview-health-tile span {
-    @apply text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .overview-health-tile strong {
@@ -519,7 +524,7 @@
   }
 
   .quick-start-row span {
-    @apply text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .quick-start-row code,
@@ -536,7 +541,7 @@
   }
 
   .provider-section__title {
-    @apply text-xl font-semibold tracking-[-0.04em] text-foreground;
+    @apply text-xl font-semibold tracking-normal text-foreground;
   }
 
   .provider-section__description {
@@ -568,7 +573,16 @@
   }
 
   .provider-entity-card__title {
-    @apply text-lg font-semibold tracking-[-0.03em] text-foreground;
+    @apply text-lg font-semibold tracking-normal text-foreground;
+  }
+}
+
+@layer utilities {
+  .tracking-tight,
+  .tracking-\[-0\.03em\],
+  .tracking-\[-0\.04em\],
+  .tracking-\[-0\.05em\] {
+    letter-spacing: 0;
   }
 }
 
