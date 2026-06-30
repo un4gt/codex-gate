@@ -1,3 +1,4 @@
+import { Field as ArkField } from '@ark-ui/solid/field';
 import { splitProps, type JSX } from 'solid-js';
 import { t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -8,7 +9,7 @@ export function Input(props: InputProps) {
   const [local, rest] = splitProps(props, ['class', 'type', 'placeholder']);
 
   return (
-    <input
+    <ArkField.Input
       type={local.type ?? 'text'}
       placeholder={typeof local.placeholder === 'string' ? t(local.placeholder) : local.placeholder}
       class={cn(

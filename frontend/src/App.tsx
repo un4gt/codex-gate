@@ -5,11 +5,9 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
-import { EmptyState } from '@/components/console/EmptyState';
 import { LocaleSwitch } from '@/components/LocaleSwitch';
 import { ApiKeysPage } from '@/components/ApiKeysPage';
 import { LogsPage } from '@/components/LogsPage';
@@ -26,7 +24,7 @@ import {
   loadSystemConfig,
   previewRuntimeEnv,
 } from '@/lib/api';
-import { formatCompactInteger, formatCost, formatDateTime, formatModelName, formatMs, parseDecimal } from '@/lib/format';
+import { formatCompactInteger, formatCost, formatMs, parseDecimal } from '@/lib/format';
 import type {
   ApiKeyWorkspace,
   ConnectionSettings,
@@ -170,7 +168,7 @@ async function copyText(value: string, success: string, onMessage: (message: str
 }
 
 function pageDescription(pathname: string) {
-  if (pathname.startsWith('/overview')) return '查看服务状态、请求趋势与最近异常。';
+  if (pathname.startsWith('/overview')) return '查看请求、用量与响应表现。';
   if (pathname.startsWith('/keys')) return '创建和管理访问密钥。';
   if (pathname.startsWith('/logs')) return '筛选并排查最近请求。';
   if (pathname.startsWith('/upstreams')) return '查看连接目标与健康状态。';
@@ -492,8 +490,6 @@ function OverviewPage(props: { data: AppDataContext }) {
     ];
   });
 
-  const anomalies = createMemo(() => overview()?.recent_anomalies ?? []);
-  const topModels = createMemo(() => overview()?.top_models ?? []);
   return (
     <div class="flex flex-col gap-6">
       <PageHeader
@@ -531,13 +527,13 @@ function OverviewPage(props: { data: AppDataContext }) {
 
       <StatsGrid items={metrics()} />
 
-      <div class="grid gap-6 xl:grid-cols-12">
-        <Card class="rounded-none border border-border bg-background shadow-none xl:col-span-7 2xl:col-span-8">
+      <div class="grid gap-6">
+        <Card class="rounded-none border border-border bg-background shadow-none">
           <CardHeader>
             <div class="flex items-center justify-between gap-3">
               <div>
                 <CardTitle>服务状态</CardTitle>
-                <CardDescription>{t('健康状态与近期异常。')}</CardDescription>
+                <CardDescription>{t('健康状态与可用资源。')}</CardDescription>
               </div>
               <StatusBadge
                 tone={
@@ -552,7 +548,7 @@ function OverviewPage(props: { data: AppDataContext }) {
               </StatusBadge>
             </div>
           </CardHeader>
-          <CardContent class="grid gap-4 md:grid-cols-3">
+          <CardContent class="grid gap-4 md:grid-cols-2">
             <div class="border-l-2 border-primary/20 pl-4 py-1">
               <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">上游健康</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
@@ -570,110 +566,19 @@ function OverviewPage(props: { data: AppDataContext }) {
               </p>
             </div>
             <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('最近 24h 错误')}</div>
-              <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">{formatCompactInteger(anomalies().length)}</div>
-              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('最近异常请求数。')}</p>
-            </div>
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
               <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('活跃密钥')}</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
                 {overview() ? formatCompactInteger(overview()?.service_health.upstream_keys_enabled ?? 0) : '—'}
               </div>
               <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('当前可用密钥。')}</p>
             </div>
-            <div class="md:col-span-3 pt-2">
+            <div class="md:col-span-2 pt-2">
               <A href="/upstreams">
                 <Button type="button" variant="ghost" class="w-full justify-start pl-0 hover:bg-transparent hover:text-primary shrink-0">
                   {`[ ${t('查看上游详情')} ]`}
                 </Button>
               </A>
             </div>
-          </CardContent>
-        </Card>
-
-        <Card class="rounded-none border border-border bg-background shadow-none xl:col-span-5 2xl:col-span-4">
-          <CardHeader>
-            <CardTitle>热门模型</CardTitle>
-            <CardDescription>{t('按请求量与成本排序。')}</CardDescription>
-          </CardHeader>
-          <CardContent class="flex flex-col gap-0">
-            <Show
-              when={topModels().length > 0}
-              fallback={<EmptyState title="NO DATA" description="等待数据" />}
-            >
-              <For each={topModels()}>
-                {(item) => (
-                  <div class="flex items-center justify-between gap-4 border-b border-border/40 py-4 last:border-0 last:pb-0 first:pt-0">
-                    <div class="min-w-0">
-                      <div class="truncate text-sm font-medium text-foreground">{item.key}</div>
-                      <div class="mt-1 font-mono text-[0.72rem] uppercase tracking-[0.08em] text-muted-foreground opacity-75">
-                        {t('REQ / ERR {{rate}}', {
-                          rate: item.requests > 0 ? `${((item.failed / item.requests) * 100).toFixed(1)}%` : '0%',
-                        })}
-                      </div>
-                    </div>
-                    <div class="text-xl font-medium tracking-tight text-foreground">{formatCost(parseDecimal(item.cost_total_usd))}</div>
-                  </div>
-                )}
-              </For>
-            </Show>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div class="grid gap-6">
-        <Card class="rounded-none border border-border bg-background shadow-none">
-          <CardHeader>
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <CardTitle>最近异常</CardTitle>
-                <CardDescription>{t('最近 5 条异常请求。')}</CardDescription>
-              </div>
-              <A href="/logs" class="shrink-0">
-                <Button type="button" size="sm" variant="ghost" class="text-xs hover:bg-transparent hover:text-primary px-0 shrink-0">
-                  [ VIEW ALL LOGS ]
-                </Button>
-              </A>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                  <TableRow class="border-b border-border hover:bg-transparent">
-                  <TableHead class="h-10">时间</TableHead>
-                  <TableHead class="h-10">模型</TableHead>
-                  <TableHead class="h-10">状态</TableHead>
-                  <TableHead class="h-10">延迟</TableHead>
-                  <TableHead class="h-10">密钥</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <Show
-                  when={anomalies().length > 0}
-                  fallback={
-                    <TableRow class="hover:bg-transparent">
-                      <TableCell colspan={5} class="text-center text-sm text-muted-foreground opacity-70 h-24">
-                        {t('ALL SYSTEMS NOMINAL.')}
-                      </TableCell>
-                    </TableRow>
-                  }
-                >
-                  <For each={anomalies()}>
-                    {(row) => (
-                      <TableRow class="border-b border-border/40 hover:bg-muted/30 transition-colors">
-                        <TableCell class="font-mono text-xs">{formatDateTime(row.time_ms)}</TableCell>
-                        <TableCell class="font-mono text-xs truncate max-w-[150px]" title={formatModelName(row.model)}>{formatModelName(row.model)}</TableCell>
-                        <TableCell>
-                          <StatusBadge tone={(row.http_status ?? 500) >= 500 ? 'error' : 'warning'}>{String(row.http_status ?? '—')}</StatusBadge>
-                        </TableCell>
-                        <TableCell class="font-mono text-xs">{formatMs(row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? 0)}</TableCell>
-                        <TableCell class="font-mono text-xs text-muted-foreground">#{row.api_key_id}</TableCell>
-                      </TableRow>
-                    )}
-                  </For>
-                </Show>
-              </TableBody>
-            </Table>
           </CardContent>
         </Card>
       </div>

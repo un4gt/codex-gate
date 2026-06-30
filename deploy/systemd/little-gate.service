@@ -1,0 +1,22 @@
+[Unit]
+Description=Little Gate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=little-gate
+Group=little-gate
+WorkingDirectory=/opt/little-gate
+EnvironmentFile=/etc/little-gate/little-gate.env
+ExecStart=/opt/little-gate/little-gate
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/little-gate/data
+
+[Install]
+WantedBy=multi-user.target

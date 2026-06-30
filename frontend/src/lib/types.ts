@@ -395,29 +395,6 @@ export interface SystemConfigResponse {
   };
 }
 
-export interface UsageBreakdownRow {
-  key: string;
-  requests: number;
-  failed: number;
-  tokens: number;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens: number;
-  cache_creation_input_tokens: number;
-  reasoning_output_tokens: number;
-  cost_total_usd: string;
-}
-
-export interface UsageBreakdownResponse {
-  by: 'model' | 'api_key' | 'provider' | 'endpoint' | 'upstream_key';
-  period: StatsPeriod;
-  window: {
-    from_ms: number;
-    to_ms: number;
-  };
-  rows: UsageBreakdownRow[];
-}
-
 export type StatsPeriod = 'today' | '7h' | '24h' | 'week' | 'month' | '7d' | '30d';
 
 export interface StatsOverviewResponse {
@@ -452,7 +429,4 @@ export interface StatsOverviewResponse {
     reasoning_output_tokens: number;
     usage_observed_requests: number;
   };
-  recent_anomalies: RequestLogRow[];
-  top_models: UsageBreakdownRow[];
-  top_keys: UsageBreakdownRow[];
 }

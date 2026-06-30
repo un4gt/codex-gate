@@ -3,7 +3,6 @@ use std::fmt;
 use std::str::FromStr;
 
 use rust_decimal::Decimal;
-use serde::Serialize;
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool, postgres::PgPoolOptions};
@@ -14,29 +13,6 @@ use crate::types::{
     ModelRoute, ProviderModel, RequestLogRow, RuntimeSettingRow, StatsDailyRow, StatsHourlyRow,
     UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta, UpstreamKeyModel, UpstreamProvider,
 };
-
-#[derive(Clone, Debug, Serialize)]
-pub struct UsageBreakdownRow {
-    pub key: String,
-    pub requests: i64,
-    pub failed: i64,
-    pub tokens: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_input_tokens: i64,
-    pub cache_creation_input_tokens: i64,
-    pub reasoning_output_tokens: i64,
-    pub cost_total_usd: String,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum UsageBreakdownBy {
-    Model,
-    ApiKey,
-    Provider,
-    Endpoint,
-    UpstreamKey,
-}
 
 #[derive(Debug)]
 pub struct DbError {
@@ -1128,23 +1104,6 @@ RETURNING id
             }
             Database::Postgres(pool) => {
                 list_request_logs_postgres(pool, offset, page_size, filter).await
-            }
-        }
-    }
-
-    pub async fn list_usage_breakdown(
-        &self,
-        by: UsageBreakdownBy,
-        time_from_ms: i64,
-        time_to_ms: i64,
-        limit: i64,
-    ) -> Result<Vec<UsageBreakdownRow>, DbError> {
-        match self {
-            Database::Sqlite(pool) => {
-                list_usage_breakdown_sqlite(pool, by, time_from_ms, time_to_ms, limit).await
-            }
-            Database::Postgres(pool) => {
-                list_usage_breakdown_postgres(pool, by, time_from_ms, time_to_ms, limit).await
             }
         }
     }
@@ -3432,148 +3391,6 @@ fn row_to_request_log_postgres(row: sqlx::postgres::PgRow) -> RequestLogRow {
     }
 }
 
-// `request_logs` is optional per API key; usage breakdowns must use telemetry aggregates.
-
-async fn list_usage_breakdown_sqlite(
-    pool: &SqlitePool,
-    by: UsageBreakdownBy,
-    time_from_ms: i64,
-    time_to_ms: i64,
-    limit: i64,
-) -> Result<Vec<UsageBreakdownRow>, DbError> {
-    let safe_limit = limit.clamp(1, 100);
-    let group_expr = match by {
-        UsageBreakdownBy::Model => "model",
-        UsageBreakdownBy::ApiKey => "CAST(api_key_id AS TEXT)",
-        UsageBreakdownBy::Provider => "CAST(provider_id AS TEXT)",
-        UsageBreakdownBy::Endpoint => "CAST(endpoint_id AS TEXT)",
-        UsageBreakdownBy::UpstreamKey => "CAST(upstream_key_id AS TEXT)",
-    };
-
-    let sql = format!(
-        r#"
-SELECT
-  {group_expr} AS item_key,
-  SUM(request_success + request_failed) AS requests,
-  SUM(request_failed) AS failed,
-  SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens) AS tokens,
-  SUM(input_tokens) AS input_tokens,
-  SUM(output_tokens) AS output_tokens,
-  SUM(cache_read_input_tokens) AS cache_read_input_tokens,
-  SUM(cache_creation_input_tokens) AS cache_creation_input_tokens,
-  SUM(reasoning_output_tokens) AS reasoning_output_tokens,
-  COALESCE(SUM(CAST(cost_total_usd AS REAL)), 0) AS cost_total
-FROM stats_hourly
-WHERE bucket_ms >= ? AND bucket_ms <= ?
-GROUP BY {group_expr}
-ORDER BY cost_total DESC, requests DESC
-LIMIT ?
-"#
-    );
-
-    let rows = sqlx::query(&sql)
-        .bind(time_from_ms)
-        .bind(time_to_ms)
-        .bind(safe_limit)
-        .fetch_all(pool)
-        .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| UsageBreakdownRow {
-            key: row.get::<String, _>("item_key"),
-            requests: row.get::<i64, _>("requests"),
-            failed: row.get::<Option<i64>, _>("failed").unwrap_or(0),
-            tokens: row.get::<Option<i64>, _>("tokens").unwrap_or(0),
-            input_tokens: row.get::<Option<i64>, _>("input_tokens").unwrap_or(0),
-            output_tokens: row.get::<Option<i64>, _>("output_tokens").unwrap_or(0),
-            cache_read_input_tokens: row
-                .get::<Option<i64>, _>("cache_read_input_tokens")
-                .unwrap_or(0),
-            cache_creation_input_tokens: row
-                .get::<Option<i64>, _>("cache_creation_input_tokens")
-                .unwrap_or(0),
-            reasoning_output_tokens: row
-                .get::<Option<i64>, _>("reasoning_output_tokens")
-                .unwrap_or(0),
-            cost_total_usd: format!(
-                "{:.15}",
-                row.get::<Option<f64>, _>("cost_total").unwrap_or(0.0)
-            ),
-        })
-        .collect())
-}
-
-async fn list_usage_breakdown_postgres(
-    pool: &PgPool,
-    by: UsageBreakdownBy,
-    time_from_ms: i64,
-    time_to_ms: i64,
-    limit: i64,
-) -> Result<Vec<UsageBreakdownRow>, DbError> {
-    let safe_limit = limit.clamp(1, 100);
-    let group_expr = match by {
-        UsageBreakdownBy::Model => "model",
-        UsageBreakdownBy::ApiKey => "CAST(api_key_id AS TEXT)",
-        UsageBreakdownBy::Provider => "CAST(provider_id AS TEXT)",
-        UsageBreakdownBy::Endpoint => "CAST(endpoint_id AS TEXT)",
-        UsageBreakdownBy::UpstreamKey => "CAST(upstream_key_id AS TEXT)",
-    };
-
-    let sql = format!(
-        r#"
-SELECT
-  {group_expr} AS item_key,
-  SUM(request_success + request_failed)::BIGINT AS requests,
-  SUM(request_failed)::BIGINT AS failed,
-  SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens)::BIGINT AS tokens,
-  SUM(input_tokens)::BIGINT AS input_tokens,
-  SUM(output_tokens)::BIGINT AS output_tokens,
-  SUM(cache_read_input_tokens)::BIGINT AS cache_read_input_tokens,
-  SUM(cache_creation_input_tokens)::BIGINT AS cache_creation_input_tokens,
-  SUM(reasoning_output_tokens)::BIGINT AS reasoning_output_tokens,
-  COALESCE(SUM(CAST(cost_total_usd AS DOUBLE PRECISION)), 0)::DOUBLE PRECISION AS cost_total
-FROM stats_hourly
-WHERE bucket_ms >= $1 AND bucket_ms <= $2
-GROUP BY {group_expr}
-ORDER BY cost_total DESC, requests DESC
-LIMIT $3
-"#
-    );
-
-    let rows = sqlx::query(&sql)
-        .bind(time_from_ms)
-        .bind(time_to_ms)
-        .bind(safe_limit)
-        .fetch_all(pool)
-        .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| UsageBreakdownRow {
-            key: row.get::<String, _>("item_key"),
-            requests: row.get::<i64, _>("requests"),
-            failed: row.get::<Option<i64>, _>("failed").unwrap_or(0),
-            tokens: row.get::<Option<i64>, _>("tokens").unwrap_or(0),
-            input_tokens: row.get::<Option<i64>, _>("input_tokens").unwrap_or(0),
-            output_tokens: row.get::<Option<i64>, _>("output_tokens").unwrap_or(0),
-            cache_read_input_tokens: row
-                .get::<Option<i64>, _>("cache_read_input_tokens")
-                .unwrap_or(0),
-            cache_creation_input_tokens: row
-                .get::<Option<i64>, _>("cache_creation_input_tokens")
-                .unwrap_or(0),
-            reasoning_output_tokens: row
-                .get::<Option<i64>, _>("reasoning_output_tokens")
-                .unwrap_or(0),
-            cost_total_usd: format!(
-                "{:.15}",
-                row.get::<Option<f64>, _>("cost_total").unwrap_or(0.0)
-            ),
-        })
-        .collect())
-}
-
 fn row_to_model_alias_sqlite(row: sqlx::sqlite::SqliteRow) -> ModelAlias {
     ModelAlias {
         id: row.get::<i64, _>("id"),
@@ -5005,58 +4822,6 @@ INSERT INTO stats_daily (
         .expect("select stats defaults");
         assert_eq!(stats_row.get::<i64, _>("reasoning_output_tokens"), 0);
         assert_eq!(stats_row.get::<i64, _>("usage_observed_requests"), 0);
-    }
-
-    #[tokio::test]
-    async fn list_usage_breakdown_sqlite_should_return_token_details() {
-        let db = sqlite_memory_db().await;
-        let now_ms = 1_000_i64;
-        db.upsert_stats_hourly(&[StatsHourlyRow {
-            bucket_ms: 0,
-            api_key_id: 7,
-            provider_id: 0,
-            endpoint_id: 0,
-            upstream_key_id: 0,
-            api_format: "responses".to_string(),
-            model: "model-a".to_string(),
-            request_success: 1,
-            request_failed: 0,
-            input_tokens: 10,
-            output_tokens: 8,
-            cache_read_input_tokens: 3,
-            cache_creation_input_tokens: 4,
-            reasoning_output_tokens: 5,
-            usage_observed_requests: 1,
-            cost_in_usd: "0.010000000000000".to_string(),
-            cost_out_usd: "0.020000000000000".to_string(),
-            cost_total_usd: "0.030000000000000".to_string(),
-            wait_time_ms: 50,
-            latency_lt_500ms: 1,
-            latency_lt_1000ms: 0,
-            latency_lt_2000ms: 0,
-            latency_lt_5000ms: 0,
-            latency_lt_15000ms: 0,
-            latency_gte_15000ms: 0,
-            updated_at_ms: now_ms,
-        }])
-        .await
-        .expect("insert hourly stats");
-
-        let rows = db
-            .list_usage_breakdown(UsageBreakdownBy::Model, 0, now_ms, 10)
-            .await
-            .expect("list usage breakdown");
-        let row = rows.first().expect("breakdown row");
-
-        assert_eq!(row.key, "model-a");
-        assert_eq!(row.requests, 1);
-        assert_eq!(row.failed, 0);
-        assert_eq!(row.tokens, 25);
-        assert_eq!(row.input_tokens, 10);
-        assert_eq!(row.output_tokens, 8);
-        assert_eq!(row.cache_read_input_tokens, 3);
-        assert_eq!(row.cache_creation_input_tokens, 4);
-        assert_eq!(row.reasoning_output_tokens, 5);
     }
 }
 

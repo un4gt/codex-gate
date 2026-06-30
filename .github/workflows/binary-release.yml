@@ -1,0 +1,144 @@
+name: Publish Binary Releases
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            exe_suffix: ''
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: windows-x86_64
+            exe_suffix: .exe
+            archive_ext: zip
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v6
+
+      - name: Set Up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            backend/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Set Up Rust
+        run: rustup default stable
+
+      - name: Build Frontend
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
+      - name: Test Backend
+        run: cargo test --locked --manifest-path backend/Cargo.toml
+
+      - name: Build Backend
+        run: cargo build --release --locked --manifest-path backend/Cargo.toml
+
+      - name: Prepare Package Name
+        id: package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME:-manual}"
+          package_name="little-gate-${version}-${{ matrix.target }}"
+          echo "name=${package_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Assemble Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="dist/${{ steps.package.outputs.name }}"
+          mkdir -p "${package}/static"
+          cp "backend/target/release/backend${{ matrix.exe_suffix }}" "${package}/little-gate${{ matrix.exe_suffix }}"
+          cp -R frontend/dist/* "${package}/static/"
+          cp deploy/binary.env.example "${package}/.env.example"
+          cp docs/binary-deployment.md "${package}/README.binary.md"
+          cp LICENSE "${package}/LICENSE"
+
+          if [[ "${{ matrix.target }}" == linux-* ]]; then
+            cp deploy/linux/run-little-gate.sh "${package}/run-little-gate.sh"
+            cp deploy/systemd/little-gate.service "${package}/little-gate.service"
+            chmod +x "${package}/little-gate" "${package}/run-little-gate.sh"
+          else
+            cp deploy/windows/run-little-gate.ps1 "${package}/run-little-gate.ps1"
+          fi
+
+      - name: Archive Linux Package
+        if: startsWith(matrix.target, 'linux-')
+        shell: bash
+        run: tar -C dist -czf "dist/${{ steps.package.outputs.name }}.tar.gz" "${{ steps.package.outputs.name }}"
+
+      - name: Archive Windows Package
+        if: startsWith(matrix.target, 'windows-')
+        shell: pwsh
+        run: Compress-Archive -Path "dist/${{ steps.package.outputs.name }}" -DestinationPath "dist/${{ steps.package.outputs.name }}.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/${{ steps.package.outputs.name }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish Release Assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/*/*)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Linux and Windows binary packages for ${GITHUB_REF_NAME}."
+          fi

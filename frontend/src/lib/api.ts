@@ -22,7 +22,6 @@ import type {
   StatsPeriod,
   StatsDailyRow,
   StatsOverviewResponse,
-  UsageBreakdownResponse,
   SystemConfigResponse,
   UpdateApiKeyInput,
   UpdateEndpointInput,
@@ -228,19 +227,6 @@ export async function loadStatsOverview(
 ): Promise<StatsOverviewResponse> {
   const { apiBase, adminToken } = requireConnection(settings);
   return fetchJson<StatsOverviewResponse>(apiBase, `/api/v1/stats/overview?period=${encodeURIComponent(period)}`, adminToken);
-}
-
-export async function loadUsageBreakdown(
-  settings: ConnectionSettings,
-  params: { by?: 'model' | 'api_key'; period?: StatsPeriod; limit?: number } = {},
-): Promise<UsageBreakdownResponse> {
-  const { apiBase, adminToken } = requireConnection(settings);
-  const search = new URLSearchParams();
-  if (params.by) search.set('by', params.by);
-  if (params.period) search.set('period', params.period);
-  if (typeof params.limit === 'number') search.set('limit', String(params.limit));
-  const suffix = search.toString();
-  return fetchJson<UsageBreakdownResponse>(apiBase, `/api/v1/stats/usage-breakdown${suffix ? `?${suffix}` : ''}`, adminToken);
 }
 
 export async function loadProviderWorkspace(settings: ConnectionSettings): Promise<ProviderWorkspace[]> {

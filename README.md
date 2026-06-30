@@ -114,57 +114,111 @@ docker compose up -d --build
 
 ---
 
-### 3) 裸二进制部署（Linux）
+### 3) 二进制发布包部署（Linux / Windows）
 
-#### 构建
+这条路径适合不能使用 Docker 的服务器。每个 tag 发布后，GitHub Actions 会生成：
 
-后端：
+- `little-gate-vX.Y.Z-linux-x86_64.tar.gz`
+- `little-gate-vX.Y.Z-windows-x86_64.zip`
 
-```bash
-cargo build --release --manifest-path backend/Cargo.toml
-```
+发布包内包含后端二进制、管理后台静态资源、二进制部署专用 `.env.example` 和启动脚本。应用本身不会自动读取 `.env` 文件；包内启动脚本会读取同目录 `.env` 并注入当前进程。
 
-前端静态资源（可选，启用管理界面时需要）：
-
-```bash
-npm --prefix frontend ci
-npm --prefix frontend run build
-```
-
-#### 运行
-
-最小环境变量：
-
-- `ADMIN_TOKEN`（必填）
-- `MASTER_KEY`（建议）
-
-常用可配置项：
-
-- `LISTEN_ADDR`（默认 `0.0.0.0:8080`）
-- `DB_DSN`（默认 `sqlite://./data/little_gate.sqlite`）
-- `STATIC_DIR`（默认 `./static`）
-- `RUST_LOG`（默认 `info`）
-
-示例：
+#### Linux
 
 ```bash
-export ADMIN_TOKEN='replace-with-strong-token'
-export MASTER_KEY='replace-with-strong-master-key'
-export LISTEN_ADDR='0.0.0.0:8080'
-export DB_DSN='sqlite://./data/little_gate.sqlite'
-export STATIC_DIR='./frontend/dist'
-
-./backend/target/release/backend
+tar -xzf little-gate-vX.Y.Z-linux-x86_64.tar.gz
+cd little-gate-vX.Y.Z-linux-x86_64
+cp .env.example .env
 ```
 
-验证：
+编辑 `.env`，至少设置：
+
+```bash
+ADMIN_TOKEN=replace-with-strong-admin-token
+MASTER_KEY=replace-with-strong-master-key
+LISTEN_ADDR=0.0.0.0:8080
+STATIC_DIR=./static
+DB_DSN=sqlite://./data/little_gate.sqlite
+```
+
+启动：
+
+```bash
+chmod +x ./little-gate ./run-little-gate.sh
+./run-little-gate.sh
+```
+
+#### Windows
+
+```powershell
+Expand-Archive .\little-gate-vX.Y.Z-windows-x86_64.zip -DestinationPath .
+Set-Location .\little-gate-vX.Y.Z-windows-x86_64
+Copy-Item .env.example .env
+```
+
+编辑 `.env`，至少设置：
+
+```powershell
+ADMIN_TOKEN=replace-with-strong-admin-token
+MASTER_KEY=replace-with-strong-master-key
+LISTEN_ADDR=0.0.0.0:8080
+STATIC_DIR=./static
+DB_DSN=sqlite://./data/little_gate.sqlite
+```
+
+启动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run-little-gate.ps1
+```
+
+#### 验证
+
+Linux：
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-> 生产环境建议使用 `systemd`/容器编排托管进程，并配合日志轮转与数据备份策略。
+Windows：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8080/healthz
+Invoke-WebRequest http://127.0.0.1:8080/readyz
+```
+
+Linux 生产环境可参考发布包中的 `little-gate.service` 配置 systemd；Windows 如需服务化运行，建议用 NSSM 或 WinSW 包装 `little-gate.exe`。更完整说明见 [docs/binary-deployment.md](docs/binary-deployment.md)。
+
+### 4) 从源码构建二进制（开发/自托管）
+
+Linux/macOS：
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run build
+cargo build --release --locked --manifest-path backend/Cargo.toml
+mkdir -p dist/little-gate-local/static
+cp backend/target/release/backend dist/little-gate-local/little-gate
+cp -R frontend/dist/* dist/little-gate-local/static/
+cp deploy/binary.env.example dist/little-gate-local/.env.example
+cp deploy/linux/run-little-gate.sh dist/little-gate-local/
+```
+
+Windows：
+
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend run build
+cargo build --release --locked --manifest-path backend/Cargo.toml
+New-Item -ItemType Directory -Force -Path dist\little-gate-local\static | Out-Null
+Copy-Item backend\target\release\backend.exe dist\little-gate-local\little-gate.exe
+Copy-Item frontend\dist\* dist\little-gate-local\static -Recurse
+Copy-Item deploy\binary.env.example dist\little-gate-local\.env.example
+Copy-Item deploy\windows\run-little-gate.ps1 dist\little-gate-local\
+```
+
+复制 `.env.example` 为 `.env`，设置 `ADMIN_TOKEN` 和 `MASTER_KEY` 后，按上面的 Linux/Windows 启动方式运行。
 
 ## 环境变量说明
 

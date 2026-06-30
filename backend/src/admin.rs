@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::str::FromStr;
 
-use crate::db::{RequestLogFilter, UsageBreakdownBy};
+use crate::db::RequestLogFilter;
 use crate::health::{
     EndpointHealthView, ProviderHealthView, UpstreamKeyHealthView, summarize_provider_health,
 };
@@ -92,9 +92,6 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         (Method::GET, "/api/v1/stats/daily") => return stats_daily(req, state).await,
         (Method::GET, "/api/v1/stats/overview") => return stats_overview(req, state).await,
         (Method::GET, "/api/v1/stats/live") => return stats_live(req, state).await,
-        (Method::GET, "/api/v1/stats/usage-breakdown") => {
-            return stats_usage_breakdown(req, state).await;
-        }
         (Method::GET, "/api/v1/logs") => return list_logs(req, state).await,
         _ => {}
     }
@@ -2257,75 +2254,6 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         }
     }
 
-    let anomalies = match state
-        .db
-        .list_request_logs(
-            1,
-            5,
-            &RequestLogFilter {
-                time_from_ms: Some(from_ms),
-                time_to_ms: Some(to_ms),
-                status_class: Some(4),
-                ..RequestLogFilter::default()
-            },
-        )
-        .await
-    {
-        Ok(mut rows) => {
-            let mut rows_5xx = state
-                .db
-                .list_request_logs(
-                    1,
-                    5,
-                    &RequestLogFilter {
-                        time_from_ms: Some(from_ms),
-                        time_to_ms: Some(to_ms),
-                        status_class: Some(5),
-                        ..RequestLogFilter::default()
-                    },
-                )
-                .await
-                .unwrap_or_default();
-            // Also treat non-HTTP failures recorded via `error_type` as anomalies (e.g. upstream body errors).
-            let mut rows_error_type = state
-                .db
-                .list_request_logs(
-                    1,
-                    5,
-                    &RequestLogFilter {
-                        time_from_ms: Some(from_ms),
-                        time_to_ms: Some(to_ms),
-                        error_type: Some("%".to_string()),
-                        ..RequestLogFilter::default()
-                    },
-                )
-                .await
-                .unwrap_or_default();
-            rows.append(&mut rows_5xx);
-            rows.append(&mut rows_error_type);
-            rows.sort_by(|a, b| b.time_ms.cmp(&a.time_ms));
-            rows.into_iter().take(5).collect::<Vec<_>>()
-        }
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
-    let top_models = match state
-        .db
-        .list_usage_breakdown(UsageBreakdownBy::Model, from_ms, to_ms, 5)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-    let top_keys = match state
-        .db
-        .list_usage_breakdown(UsageBreakdownBy::ApiKey, from_ms, to_ms, 5)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
     let payload = serde_json::json!({
         "period": period,
         "window": { "from_ms": from_ms, "to_ms": to_ms },
@@ -2354,56 +2282,10 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             "cache_creation_input_tokens": cache_creation_input_tokens,
             "reasoning_output_tokens": reasoning_output_tokens,
             "usage_observed_requests": usage_observed_requests
-        },
-        "recent_anomalies": anomalies,
-        "top_models": top_models,
-        "top_keys": top_keys
+        }
     });
 
     http::json(StatusCode::OK, &payload)
-}
-
-async fn stats_usage_breakdown(req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let by = match query_string(req.uri().query(), "by").as_deref() {
-        Some("api_key") => UsageBreakdownBy::ApiKey,
-        Some("provider") => UsageBreakdownBy::Provider,
-        Some("endpoint") => UsageBreakdownBy::Endpoint,
-        Some("upstream_key") => UsageBreakdownBy::UpstreamKey,
-        Some("model") | None => UsageBreakdownBy::Model,
-        _ => return http::json_error(StatusCode::BAD_REQUEST, "invalid by"),
-    };
-    let period = query_string(req.uri().query(), "period").unwrap_or_else(|| "today".to_string());
-    let now_ms = util::now_ms();
-    let (from_ms, to_ms) = match stats_window(period.as_str(), now_ms) {
-        Some(window) => window,
-        None => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
-    };
-    let limit = query_i64(req.uri().query(), "limit")
-        .unwrap_or(20)
-        .clamp(1, 100);
-
-    match state
-        .db
-        .list_usage_breakdown(by, from_ms, to_ms, limit)
-        .await
-    {
-        Ok(rows) => http::json(
-            StatusCode::OK,
-            &serde_json::json!({
-                "by": match by {
-                    UsageBreakdownBy::Model => "model",
-                    UsageBreakdownBy::ApiKey => "api_key",
-                    UsageBreakdownBy::Provider => "provider",
-                    UsageBreakdownBy::Endpoint => "endpoint",
-                    UsageBreakdownBy::UpstreamKey => "upstream_key",
-                },
-                "period": period,
-                "window": { "from_ms": from_ms, "to_ms": to_ms },
-                "rows": rows
-            }),
-        ),
-        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
 }
 
 async fn stats_live(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
