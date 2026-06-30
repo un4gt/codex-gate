@@ -1421,6 +1421,11 @@ fn build_upstream_headers(
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-organization");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-project");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "idempotency-key");
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "x-client-request-id");
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "session-id");
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "thread-id");
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "originator");
+    copy_allowed_upstream_headers_by_prefix(request_headers, &mut headers, "x-codex-");
     copy_allowed_upstream_header(request_headers, &mut headers, USER_AGENT);
 
     if let Ok(value) = hyper::header::HeaderValue::from_str(&body_len.to_string()) {
@@ -1445,6 +1450,14 @@ fn copy_allowed_upstream_header(
 fn copy_allowed_upstream_header_by_name(from: &HeaderMap, to: &mut HeaderMap, name: &'static str) {
     if let Some(value) = from.get(name) {
         to.insert(hyper::header::HeaderName::from_static(name), value.clone());
+    }
+}
+
+fn copy_allowed_upstream_headers_by_prefix(from: &HeaderMap, to: &mut HeaderMap, prefix: &str) {
+    for (name, value) in from {
+        if name.as_str().starts_with(prefix) {
+            to.insert(name.clone(), value.clone());
+        }
     }
 }
 
@@ -2367,6 +2380,58 @@ mod tests {
         );
         assert_eq!(headers.get("openai-project"), input.get("openai-project"));
         assert_eq!(headers.get("idempotency-key"), input.get("idempotency-key"));
+    }
+
+    #[test]
+    fn build_upstream_headers_should_preserve_codex_client_headers() {
+        let mut input = HeaderMap::new();
+        input.insert(
+            "x-codex-beta-features",
+            HeaderValue::from_static("remote_compaction_v2"),
+        );
+        input.insert(
+            "x-codex-window-id",
+            HeaderValue::from_static("019f1a41-81de-7591-8fff-a83093fb98b7:0"),
+        );
+        input.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static("{\"request_kind\":\"turn\"}"),
+        );
+        input.insert(
+            "x-client-request-id",
+            HeaderValue::from_static("019f1a41-81de-7591-8fff-a83093fb98b7"),
+        );
+        input.insert(
+            "session-id",
+            HeaderValue::from_static("019f1a41-81de-7591-8fff-a83093fb98b7"),
+        );
+        input.insert(
+            "thread-id",
+            HeaderValue::from_static("019f1a41-81de-7591-8fff-a83093fb98b7"),
+        );
+        input.insert("originator", HeaderValue::from_static("codex-tui"));
+
+        let headers = build_upstream_headers(&input, 37, "sk-upstream");
+
+        assert_eq!(
+            headers.get("x-codex-beta-features"),
+            input.get("x-codex-beta-features")
+        );
+        assert_eq!(
+            headers.get("x-codex-window-id"),
+            input.get("x-codex-window-id")
+        );
+        assert_eq!(
+            headers.get("x-codex-turn-metadata"),
+            input.get("x-codex-turn-metadata")
+        );
+        assert_eq!(
+            headers.get("x-client-request-id"),
+            input.get("x-client-request-id")
+        );
+        assert_eq!(headers.get("session-id"), input.get("session-id"));
+        assert_eq!(headers.get("thread-id"), input.get("thread-id"));
+        assert_eq!(headers.get("originator"), input.get("originator"));
     }
 
     #[test]
