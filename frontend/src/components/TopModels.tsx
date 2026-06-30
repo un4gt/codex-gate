@@ -21,7 +21,7 @@ export function TopModels(props: TopModelsProps) {
           </div>
           <Badge variant="outline">前 5</Badge>
         </div>
-        <CardDescription>先按请求数排序，再按成本打破并列；进度条仅表示相对热度。</CardDescription>
+        <CardDescription>{t('按请求量排序。')}</CardDescription>
       </CardHeader>
       <CardContent>
         <Show when={props.items.length > 0} fallback={<div class="empty-state">{t('还没有模型分布数据，等日志写入后这里会显示最热模型。')}</div>}>

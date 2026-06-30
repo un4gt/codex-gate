@@ -55,7 +55,7 @@ export function TrendChart(props: TrendChartProps) {
           <div>
             <p class="panel__eyebrow">{t('趋势')}</p>
             <CardTitle>最近 14 天请求波形</CardTitle>
-            <CardDescription>用单条轨迹快速看出峰值、回落和最近一天的节奏。</CardDescription>
+            <CardDescription>{t('查看最近请求变化。')}</CardDescription>
           </div>
           <div class="grid gap-3 sm:grid-cols-2">
             <div class="surface-tile px-4 py-3">

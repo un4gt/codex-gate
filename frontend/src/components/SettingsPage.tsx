@@ -11,7 +11,7 @@ import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
 import { createPrice, updateRuntimeSetting } from '../lib/api';
-import { formatDateTime, formatMs, formatRoutingStrategy } from '../lib/format';
+import { formatBytes, formatDateTime, formatMs, formatRoutingStrategy } from '../lib/format';
 import type {
   ConnectionSettings,
   CreatePriceInput,
@@ -132,7 +132,7 @@ export function SettingsPage(props: SettingsPageProps) {
 
   return (
     <div class="section-stack">
-      <PageHeader title="设置" description="维护连接信息与高级设置。" />
+      <PageHeader title="设置" description="维护连接与系统设置。" />
 
       <Card>
         <CardHeader>
@@ -174,17 +174,12 @@ export function SettingsPage(props: SettingsPageProps) {
 
       <SettingsSection
         title="基础设置"
-        description="连接信息、健康检查和基础运行参数。"
+        description="查看当前服务配置。"
         open={openSection() === 'basic'}
         onToggle={() => toggleSection('basic')}
       >
         <div class="grid gap-4 md:grid-cols-2">
-          <InfoTile label="健康检查" value={`${props.systemConfig?.connection.healthz_path ?? '/healthz'} · ${props.systemConfig?.connection.readyz_path ?? '/readyz'}`} />
-          <InfoTile label="监控地址" value={props.systemConfig?.connection.metrics_path ?? '/metrics'} />
-          <InfoTile label="静态目录" value={props.systemConfig?.basic.static_dir ?? '—'} />
-          <InfoTile label="数据库" value={props.systemConfig?.basic.db_dsn ?? '—'} />
-          <InfoTile label="请求大小" value={props.systemConfig ? String(props.systemConfig.basic.max_request_bytes) : '—'} />
-          <InfoTile label="用量采样" value={props.systemConfig ? `${props.systemConfig.basic.usage_capture_bytes} / ${props.systemConfig.basic.usage_capture_tail_bytes}` : '—'} />
+          <InfoTile label="请求大小限制" value={props.systemConfig ? formatBytes(props.systemConfig.basic.max_request_bytes) : '—'} />
           <InfoTile label="统计刷新" value={props.systemConfig ? `${props.systemConfig.basic.stats_flush_interval_ms}ms` : '—'} />
         </div>
       </SettingsSection>
@@ -252,18 +247,16 @@ export function SettingsPage(props: SettingsPageProps) {
       </SettingsSection>
 
       <SettingsSection
-        title="请求路由"
-        description="查看分配与缓存设置。"
+        title="分配设置"
+        description="查看请求分配策略。"
         open={openSection() === 'routing'}
         onToggle={() => toggleSection('routing')}
       >
         <div class="grid gap-4 md:grid-cols-2">
           <InfoTile label="分配策略" value={formatRoutingStrategy(props.systemConfig?.routing.endpoint_selector_strategy)} />
           <InfoTile label="返回用量" value={props.systemConfig?.routing.inject_include_usage ? '开启' : '已关闭'} />
-          <InfoTile label="上游缓存" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_ttl_ms) : '—'} />
-          <InfoTile label="缓存宽限期" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_stale_grace_ms) : '—'} />
-          <InfoTile label="密钥缓存" value={props.systemConfig ? formatMs(props.systemConfig.routing.api_key_cache_ttl_ms) : '—'} />
-          <InfoTile label="缓存容量" value={props.systemConfig ? String(props.systemConfig.routing.api_key_cache_max_entries) : '—'} />
+          <InfoTile label="上游刷新" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_ttl_ms) : '—'} />
+          <InfoTile label="密钥刷新" value={props.systemConfig ? formatMs(props.systemConfig.routing.api_key_cache_ttl_ms) : '—'} />
         </div>
       </SettingsSection>
 
@@ -298,7 +291,7 @@ export function SettingsPage(props: SettingsPageProps) {
 
       <SettingsSection
         title="价格与成本"
-        description="低频维护项，留在设置页，不再单独占一级导航。"
+        description="管理模型单价与成本统计。"
         open={openSection() === 'pricing'}
         onToggle={() => toggleSection('pricing')}
       >
@@ -329,20 +322,20 @@ export function SettingsPage(props: SettingsPageProps) {
                 </FieldGroup>
                 <FieldGroup class="grid gap-4 md:grid-cols-2">
                   <Field>
-                    <FieldLabel>输入 / token</FieldLabel>
-                    <Input name="input_cost_per_token" type="number" step="0.000000001" />
+                    <FieldLabel>输入 / MToken</FieldLabel>
+                    <Input name="input_cost_per_token" type="number" min="0" step="0.000001" placeholder="1.20" />
                   </Field>
                   <Field>
-                    <FieldLabel>输出 / token</FieldLabel>
-                    <Input name="output_cost_per_token" type="number" step="0.000000001" />
+                    <FieldLabel>输出 / MToken</FieldLabel>
+                    <Input name="output_cost_per_token" type="number" min="0" step="0.000001" placeholder="4.80" />
                   </Field>
                   <Field>
-                    <FieldLabel>缓存读取</FieldLabel>
-                    <Input name="cache_read_input_token_cost" type="number" step="0.000000001" />
+                    <FieldLabel>缓存读取 / MToken</FieldLabel>
+                    <Input name="cache_read_input_token_cost" type="number" min="0" step="0.000001" placeholder="0.20" />
                   </Field>
                   <Field>
-                    <FieldLabel>缓存写入</FieldLabel>
-                    <Input name="cache_creation_input_token_cost" type="number" step="0.000000001" />
+                    <FieldLabel>缓存写入 / MToken</FieldLabel>
+                    <Input name="cache_creation_input_token_cost" type="number" min="0" step="0.000001" placeholder="0.90" />
                   </Field>
                 </FieldGroup>
                 <Button type="submit" disabled={busy()}>

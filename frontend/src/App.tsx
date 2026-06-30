@@ -66,9 +66,9 @@ interface AppDataContext {
   onMessage: (message: string) => void;
 }
 
-const API_BASE_KEY = 'codex_gate_api_base';
-const ADMIN_TOKEN_KEY = 'codex_gate_admin_token';
-const NAV_ORDER_KEY = 'codex_gate_nav_order';
+const API_BASE_KEY = 'little_gate_api_base';
+const ADMIN_TOKEN_KEY = 'little_gate_admin_token';
+const NAV_ORDER_KEY = 'little_gate_nav_order';
 
 const NAV_ITEMS_BY_KEY = {
   overview: { to: '/overview', label: '总览', icon: Activity },
@@ -203,7 +203,7 @@ function TopShell(props: { data: AppDataContext; children: any }) {
               <SquareTerminal class="size-4" />
             </div>
             <div class="min-w-0">
-              <p class="text-[0.95rem] font-bold tracking-[0.08em] text-foreground uppercase">CODEX GATE</p>
+              <p class="text-[0.95rem] font-bold tracking-[0.08em] text-foreground uppercase">LITTLE GATE</p>
             </div>
           </div>
           <nav class="flex flex-col gap-1" aria-label="Primary">
@@ -322,7 +322,7 @@ function ConnectionGate(props: {
             <SquareTerminal class="size-6" />
           </div>
           <div>
-            <h1 class="text-4xl font-medium tracking-tight text-foreground mt-6">CODEX GATE</h1>
+            <h1 class="text-4xl font-medium tracking-tight text-foreground mt-6">LITTLE GATE</h1>
             <p class="mt-2 text-sm font-medium text-muted-foreground tracking-[0.08em] uppercase">{t('ADMIN CONSOLE INITIALIZATION')}</p>
           </div>
         </div>
@@ -442,7 +442,7 @@ function OverviewPage(props: { data: AppDataContext }) {
     if (current) {
       return [
         {
-          label: 'API 密钥数量',
+          label: '访问密钥',
           value: formatCompactInteger(apiKeyCount()),
           hint: t('启用 {{count}}', { count: formatCompactInteger(enabledApiKeyCount()) }),
         },
@@ -458,7 +458,7 @@ function OverviewPage(props: { data: AppDataContext }) {
           hint: t('当前窗口：{{window}}', { window: t(periodLabel()) }),
         },
         {
-          label: 'Token',
+          label: '用量',
           value: formatCompactInteger(current.token_usage.total_tokens),
           hint: t('输入 {{input}} · 输出 {{output}}', {
             input: formatCompactInteger(current.token_usage.input_tokens),
@@ -483,10 +483,10 @@ function OverviewPage(props: { data: AppDataContext }) {
     }
 
     return [
-      { label: 'API 密钥数量', value: '—', hint: '等待数据' },
+      { label: '访问密钥', value: '—', hint: '等待数据' },
       { label: '请求次数', value: '—', hint: '等待数据' },
       { label: '消费', value: '—', hint: '等待数据' },
-      { label: 'Token', value: '—', hint: '输入 — · 输出 —' },
+      { label: '用量', value: '—', hint: '输入 — · 输出 —' },
       { label: '缓存率', value: '—', hint: '读 — · 写 —' },
       { label: '平均响应', value: '—', hint: '等待数据' },
     ];
@@ -498,7 +498,7 @@ function OverviewPage(props: { data: AppDataContext }) {
     <div class="flex flex-col gap-6">
       <PageHeader
         title="总览"
-        description="查看请求、Token 与响应表现。"
+        description="查看请求、用量与响应表现。"
         actions={
           <div class="flex w-full flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div class="flex w-fit flex-wrap rounded-none border border-border bg-background p-1">
@@ -537,7 +537,7 @@ function OverviewPage(props: { data: AppDataContext }) {
             <div class="flex items-center justify-between gap-3">
               <div>
                 <CardTitle>服务状态</CardTitle>
-                <CardDescription>{t('先看整体，再决定是否进入日志或上游。')}</CardDescription>
+                <CardDescription>{t('健康状态与近期异常。')}</CardDescription>
               </div>
               <StatusBadge
                 tone={
@@ -572,14 +572,14 @@ function OverviewPage(props: { data: AppDataContext }) {
             <div class="border-l-2 border-primary/20 pl-4 py-1">
               <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('最近 24h 错误')}</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">{formatCompactInteger(anomalies().length)}</div>
-              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('点击右侧列表可直接进入日志详情。')}</p>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('最近异常请求数。')}</p>
             </div>
             <div class="border-l-2 border-primary/20 pl-4 py-1">
               <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('活跃密钥')}</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
                 {overview() ? formatCompactInteger(overview()?.service_health.upstream_keys_enabled ?? 0) : '—'}
               </div>
-              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('当前可用的上游密钥。')}</p>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('当前可用密钥。')}</p>
             </div>
             <div class="md:col-span-3 pt-2">
               <A href="/upstreams">
@@ -599,7 +599,7 @@ function OverviewPage(props: { data: AppDataContext }) {
           <CardContent class="flex flex-col gap-0">
             <Show
               when={topModels().length > 0}
-              fallback={<EmptyState title="NO DATA" description="Awaiting telemetry." />}
+              fallback={<EmptyState title="NO DATA" description="等待数据" />}
             >
               <For each={topModels()}>
                 {(item) => (

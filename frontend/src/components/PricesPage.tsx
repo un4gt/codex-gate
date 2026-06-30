@@ -37,7 +37,7 @@ function parseOptionalNumber(formData: FormData, key: string): number | null {
 function formatUnitCost(value: unknown): string {
   const numeric = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return '—';
-  return `$${numeric.toFixed(9)}`;
+  return `$${numeric.toFixed(6)} / MToken`;
 }
 
 function SummaryTile(props: { label: string; value: string; hint?: string }) {
@@ -144,7 +144,7 @@ export function PricesPage(props: PricesPageProps) {
             </div>
             <Badge variant="success">已生效</Badge>
           </div>
-          <CardDescription>优先使用上游专属价格，缺失时回退到全局默认价格。</CardDescription>
+          <CardDescription>{t('按上游维护模型单价。')}</CardDescription>
         </CardHeader>
         <CardContent class="flex flex-col gap-4">
           <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
@@ -172,25 +172,25 @@ export function PricesPage(props: PricesPageProps) {
             </FieldGroup>
             <FieldGroup class="grid gap-4 md:grid-cols-2">
               <Field>
-                <FieldLabel>输入单价 / token</FieldLabel>
-                <Input name="input_cost_per_token" type="number" min="0" step="0.000000001" placeholder="0.000001200" />
+                <FieldLabel>输入单价 / MToken</FieldLabel>
+                <Input name="input_cost_per_token" type="number" min="0" step="0.000001" placeholder="1.20" />
               </Field>
               <Field>
-                <FieldLabel>输出单价 / token</FieldLabel>
-                <Input name="output_cost_per_token" type="number" min="0" step="0.000000001" placeholder="0.000004800" />
+                <FieldLabel>输出单价 / MToken</FieldLabel>
+                <Input name="output_cost_per_token" type="number" min="0" step="0.000001" placeholder="4.80" />
               </Field>
               <Field>
-                <FieldLabel>缓存读取 / token</FieldLabel>
-                <Input name="cache_read_input_token_cost" type="number" min="0" step="0.000000001" placeholder="0.000000200" />
+                <FieldLabel>缓存读取 / MToken</FieldLabel>
+                <Input name="cache_read_input_token_cost" type="number" min="0" step="0.000001" placeholder="0.20" />
               </Field>
               <Field>
-                <FieldLabel>缓存写入 / token</FieldLabel>
-                <Input name="cache_creation_input_token_cost" type="number" min="0" step="0.000000001" placeholder="0.000000900" />
+                <FieldLabel>缓存写入 / MToken</FieldLabel>
+                <Input name="cache_creation_input_token_cost" type="number" min="0" step="0.000001" placeholder="0.90" />
               </Field>
             </FieldGroup>
             <Field>
-              <FieldLabel>缓存写入 &gt; 1h</FieldLabel>
-              <Input name="cache_creation_input_token_cost_above_1hr" type="number" min="0" step="0.000000001" placeholder="0.000000400" />
+              <FieldLabel>缓存写入 &gt; 1h / MToken</FieldLabel>
+              <Input name="cache_creation_input_token_cost_above_1hr" type="number" min="0" step="0.000001" placeholder="0.40" />
               <FieldDescription>用于长时间缓存场景。</FieldDescription>
             </Field>
             <Button type="submit" disabled={busy()}>
@@ -207,9 +207,9 @@ export function PricesPage(props: PricesPageProps) {
               <p class="panel__eyebrow">{t('价格结果')}</p>
               <CardTitle>当前可用价格项</CardTitle>
             </div>
-            <Badge variant="outline">上游优先，全局兜底</Badge>
+            <Badge variant="outline">{t('价格列表')}</Badge>
           </div>
-          <CardDescription>同一上游和模型只展示最新版本，全局默认价格用于兜底。</CardDescription>
+          <CardDescription>{t('显示当前生效的模型价格。')}</CardDescription>
         </CardHeader>
         <CardContent>
           <Show when={sortedItems().length > 0} fallback={<div class="empty-state">{t('当前还没有价格项。')}</div>}>

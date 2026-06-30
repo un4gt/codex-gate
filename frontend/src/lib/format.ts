@@ -57,6 +57,19 @@ export function formatMs(value: number): string {
   return `${integer.format(value)}ms`;
 }
 
+export function formatBytes(value: number): string {
+  const { decimal, integer } = getFormatters();
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let current = value;
+  let unitIndex = 0;
+  while (Math.abs(current) >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex += 1;
+  }
+  const formatter = unitIndex === 0 ? integer : decimal;
+  return `${formatter.format(current)} ${units[unitIndex]}`;
+}
+
 export function formatDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
