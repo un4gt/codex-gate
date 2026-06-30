@@ -726,6 +726,25 @@ WHERE id = $7
         }
     }
 
+    pub async fn delete_upstream_endpoint(&self, id: i64) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query("DELETE FROM upstream_endpoints WHERE id = ?")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                sqlx::query("DELETE FROM upstream_endpoints WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "insert path mirrors upstream_keys table columns and encrypt context"
@@ -1305,6 +1324,25 @@ ORDER BY provider_id ASC, priority ASC, id ASC
         match self {
             Database::Sqlite(pool) => list_model_routes_sqlite(pool).await,
             Database::Postgres(pool) => list_model_routes_postgres(pool).await,
+        }
+    }
+
+    pub async fn delete_upstream_key(&self, id: i64) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query("DELETE FROM upstream_keys WHERE id = ?")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
+            Database::Postgres(pool) => {
+                sqlx::query("DELETE FROM upstream_keys WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(())
+            }
         }
     }
 

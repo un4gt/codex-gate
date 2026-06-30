@@ -1,19 +1,19 @@
 services:
-  codex-gate:
+  little-gate:
     build:
       context: .
       dockerfile: Dockerfile
-    image: codex-gate:local
-    container_name: codex-gate
+    image: little-gate:local
+    container_name: little-gate
     restart: unless-stopped
     ports:
-      - "${CODEX_GATE_PORT:-8080}:8080"
+      - "${LITTLE_GATE_PORT:-8080}:8080"
     environment:
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
       MASTER_KEY: ${MASTER_KEY:-}
       LISTEN_ADDR: ${LISTEN_ADDR:-0.0.0.0:8080}
       STATIC_DIR: ${STATIC_DIR:-/app/static}
-      DB_DSN: ${DB_DSN:-sqlite:///app/data/codex_gate.sqlite}
+      DB_DSN: ${DB_DSN:-sqlite:///app/data/little_gate.sqlite}
       DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-2}
       RUST_LOG: ${RUST_LOG:-info}
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-1}
@@ -40,7 +40,7 @@ services:
       REQUEST_LOG_ARCHIVE_DIR: ${REQUEST_LOG_ARCHIVE_DIR:-/app/data/archive/request_logs}
       REQUEST_LOG_ARCHIVE_COMPRESS: ${REQUEST_LOG_ARCHIVE_COMPRESS:-true}
     volumes:
-      - codex-gate-data:/app/data
+      - little-gate-data:/app/data
 
 volumes:
-  codex-gate-data:
+  little-gate-data:

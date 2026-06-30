@@ -43,7 +43,7 @@ impl Config {
 
         let db_dsn = getenv_string("DB_DSN")
             .or_else(|| getenv_string("DATABASE_URL"))
-            .unwrap_or_else(|| "sqlite://./data/codex_gate.sqlite".to_string());
+            .unwrap_or_else(|| "sqlite://./data/little_gate.sqlite".to_string());
 
         let db_max_connections = getenv_usize("DB_MAX_CONNECTIONS").unwrap_or(2) as u32;
 

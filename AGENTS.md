@@ -38,7 +38,6 @@ These decisions are confirmed and should be treated as implementation constraint
 - Keep upstream type as a fixed dropdown (`provider_type`) with exactly:
   - `openai` (OpenAI)
   - `openai_compatible` (OpenAI Compatible)
-  - `openai_codex_oauth` (OpenAI Codex OAuth)
   - `openai_compatible_responses` (OpenAI Compatible (Responses))
 - Enforce strict backend validation for `provider_type` (reject unknown values).
 - Add/configure these core fields in the new-upstream flow: API key, Base URL, websocket transport toggle.
@@ -48,9 +47,7 @@ These decisions are confirmed and should be treated as implementation constraint
 - New-upstream UX:
   - Keep creation form minimal.
   - After creation, continue model operations in provider detail (not in the creation drawer).
-- Codex OAuth:
-  - Priority channel remains Codex.
-  - First-phase target is to align with Codex `/login` browser-callback style flow (local callback path), while keeping behavior operable in current architecture.
+- OAuth upstream type has been removed from the current iteration.
 - `openai_compatible_responses` behavior:
   - Keep responses-only routing semantics.
   - Also isolate model-list/sync behavior accordingly (do not treat it as a generic chat-completions upstream).

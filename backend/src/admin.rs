@@ -3,7 +3,6 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::Uri;
 use hyper::body::Bytes;
 use hyper::body::Incoming;
-use hyper::header::HOST;
 use hyper::{Method, Request, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
@@ -22,12 +21,8 @@ use crate::util;
 use rust_decimal::Decimal;
 use tokio::time as tokio_time;
 
-const ALLOWED_PROVIDER_TYPES: [&str; 4] = [
-    "openai",
-    "openai_compatible",
-    "openai_codex_oauth",
-    "openai_compatible_responses",
-];
+const ALLOWED_PROVIDER_TYPES: [&str; 3] =
+    ["openai", "openai_compatible", "openai_compatible_responses"];
 
 // Admin endpoints sometimes probe upstreams that can return arbitrary HTML/JSON.
 // Keep these payloads bounded to avoid untrusted memory spikes.
@@ -135,22 +130,24 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         if req.method() == Method::POST && path.ends_with("/models/sync") {
             return sync_provider_models(req, state).await;
         }
-        if req.method() == Method::POST && path.ends_with("/codex-oauth/start") {
-            return start_codex_oauth(req, state).await;
+    }
+    if path.starts_with("/api/v1/endpoints/") {
+        if req.method() == Method::PATCH {
+            return update_endpoint(req, state).await;
         }
-    }
-    if path.starts_with("/api/v1/endpoints/") && req.method() == Method::PATCH {
-        return update_endpoint(req, state).await;
-    }
-    if path.starts_with("/api/v1/endpoints/")
-        && req.method() == Method::POST
-        && path.ends_with("/test")
-    {
-        return test_endpoint(req, state).await;
+        if req.method() == Method::DELETE {
+            return delete_endpoint(req, state).await;
+        }
+        if req.method() == Method::POST && path.ends_with("/test") {
+            return test_endpoint(req, state).await;
+        }
     }
     if path.starts_with("/api/v1/keys/") {
         if req.method() == Method::PATCH {
             return update_key(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return delete_key(req, state).await;
         }
         if req.method() == Method::GET && path.ends_with("/models") {
             return list_key_models(req, state).await;
@@ -199,9 +196,6 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         if req.method() == Method::DELETE {
             return delete_key_model(req, state).await;
         }
-    }
-    if path.starts_with("/api/v1/codex-oauth/") && req.method() == Method::GET {
-        return get_codex_oauth_request(req, state).await;
     }
     if path.starts_with("/api/v1/routes/") && req.method() == Method::PUT {
         return upsert_route(req, state).await;
@@ -1116,50 +1110,6 @@ async fn patch_gateway_model(req: Request<Incoming>, state: SharedState) -> Http
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
 }
 
-async fn start_codex_oauth(req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let path = req.uri().path();
-    let Some(provider_id) = parse_provider_id_with_suffix(path, "/codex-oauth/start") else {
-        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
-    };
-    let redirect_uri = format!("{}/api/v1/codex-oauth/callback", request_origin(&req));
-
-    let snap = match state
-        .caches
-        .upstream
-        .get(&state.db, &state.config.master_key)
-        .await
-    {
-        Ok(items) => items,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    };
-    let Some(provider) = snap.providers.iter().find(|p| p.id == provider_id) else {
-        return http::json_error(StatusCode::NOT_FOUND, "provider not found");
-    };
-    if provider.provider_type != "openai_codex_oauth" {
-        return http::json_error(
-            StatusCode::CONFLICT,
-            "provider type is not openai_codex_oauth",
-        );
-    }
-
-    match state.codex_oauth.start(provider_id, redirect_uri).await {
-        Ok(resp) => http::json(StatusCode::OK, &resp),
-        Err(message) => http::json_error(StatusCode::BAD_GATEWAY, message),
-    }
-}
-
-async fn get_codex_oauth_request(req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let path = req.uri().path();
-    let Some(request_id) = parse_string_suffix(path, "/api/v1/codex-oauth/") else {
-        return http::json_error(StatusCode::BAD_REQUEST, "invalid request id");
-    };
-
-    match state.codex_oauth.get_view(&request_id, util::now_ms()) {
-        Some(view) => http::json(StatusCode::OK, &view),
-        None => http::json_error(StatusCode::NOT_FOUND, "request not found"),
-    }
-}
-
 fn build_upstream_uri(base_url: &str, path: &str) -> Result<Uri, String> {
     let trimmed_base = base_url.trim_end_matches('/');
     let base = if path.starts_with("/v1/") {
@@ -1683,6 +1633,21 @@ async fn update_endpoint(req: Request<Incoming>, state: SharedState) -> HttpResp
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
 }
 
+async fn delete_endpoint(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(endpoint_id) = parse_id_suffix(path, "/api/v1/endpoints/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid endpoint id");
+    };
+
+    match state.db.delete_upstream_endpoint(endpoint_id).await {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::empty(StatusCode::NO_CONTENT)
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 async fn test_endpoint(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     let Some(endpoint_id) = parse_id_suffix(path, "/api/v1/endpoints/") else {
@@ -1907,6 +1872,21 @@ async fn update_key(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     }
     state.caches.upstream.invalidate();
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+}
+
+async fn delete_key(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(key_id) = parse_id_suffix(path, "/api/v1/keys/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid key id");
+    };
+
+    match state.db.delete_upstream_key(key_id).await {
+        Ok(()) => {
+            state.caches.upstream.invalidate();
+            http::empty(StatusCode::NO_CONTENT)
+        }
+        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 async fn list_routes(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -2687,15 +2667,6 @@ fn parse_id_suffix(path: &str, prefix: &str) -> Option<i64> {
     id_str.parse::<i64>().ok()
 }
 
-fn parse_string_suffix(path: &str, prefix: &str) -> Option<String> {
-    let rest = path.strip_prefix(prefix)?;
-    let rest = rest.trim_matches('/');
-    if rest.is_empty() {
-        return None;
-    }
-    Some(rest.to_string())
-}
-
 fn parse_provider_id_with_suffix(path: &str, suffix: &str) -> Option<i64> {
     // /api/v1/providers/{id}{suffix}
     let rest = path.strip_prefix("/api/v1/providers/")?;
@@ -2793,33 +2764,6 @@ fn query_f64(q: Option<&str>, key: &str) -> Option<f64> {
 
 fn normalize_base_url(input: &str) -> String {
     input.trim_end_matches('/').to_string()
-}
-
-fn request_origin(req: &Request<Incoming>) -> String {
-    let scheme = req
-        .headers()
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .map(|raw| raw.trim())
-        .filter(|raw| !raw.is_empty())
-        .unwrap_or("http");
-
-    let host = req
-        .headers()
-        .get("x-forwarded-host")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .map(|raw| raw.trim())
-        .filter(|raw| !raw.is_empty())
-        .or_else(|| {
-            req.headers()
-                .get(HOST)
-                .and_then(|value| value.to_str().ok())
-        })
-        .unwrap_or("localhost");
-
-    format!("{scheme}://{host}")
 }
 
 fn generate_api_key_plaintext() -> String {

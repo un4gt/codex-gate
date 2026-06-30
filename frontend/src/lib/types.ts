@@ -296,26 +296,6 @@ export interface UpdateProviderKeyInput {
   weight?: number;
 }
 
-export interface CodexOauthStartResponse {
-  request_id: string;
-  login_url: string;
-  expires_at_ms: number;
-}
-
-export type CodexOauthStatusView =
-  | { state: 'pending' }
-  | { state: 'completed'; key_id: number }
-  | { state: 'failed'; message: string };
-
-export interface CodexOauthRequestView {
-  request_id: string;
-  provider_id: number;
-  created_at_ms: number;
-  expires_at_ms: number;
-  login_url: string;
-  status: CodexOauthStatusView;
-}
-
 export interface ModelRoute {
   id: number;
   model_name: string;

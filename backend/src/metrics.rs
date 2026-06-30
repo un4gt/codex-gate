@@ -353,81 +353,81 @@ pub async fn render_prometheus(state: &SharedState) -> String {
 
     let mut out = String::with_capacity(4096);
     out.push_str(
-        "# HELP codex_gate_started_at_seconds Gateway process start time in Unix seconds.\n",
+        "# HELP little_gate_started_at_seconds Gateway process start time in Unix seconds.\n",
     );
-    out.push_str("# TYPE codex_gate_started_at_seconds gauge\n");
+    out.push_str("# TYPE little_gate_started_at_seconds gauge\n");
     out.push_str(&format!(
-        "codex_gate_started_at_seconds {}\n",
+        "little_gate_started_at_seconds {}\n",
         state.metrics.started_at_ms as f64 / 1000.0
     ));
 
-    out.push_str("# HELP codex_gate_db_ready Database readiness probe result.\n");
-    out.push_str("# TYPE codex_gate_db_ready gauge\n");
+    out.push_str("# HELP little_gate_db_ready Database readiness probe result.\n");
+    out.push_str("# TYPE little_gate_db_ready gauge\n");
     out.push_str(&format!(
-        "codex_gate_db_ready {}\n",
+        "little_gate_db_ready {}\n",
         if db_ready { 1 } else { 0 }
     ));
 
-    out.push_str("# HELP codex_gate_upstream_snapshot_loaded Upstream config snapshot loaded successfully on scrape.\n");
-    out.push_str("# TYPE codex_gate_upstream_snapshot_loaded gauge\n");
+    out.push_str("# HELP little_gate_upstream_snapshot_loaded Upstream config snapshot loaded successfully on scrape.\n");
+    out.push_str("# TYPE little_gate_upstream_snapshot_loaded gauge\n");
     out.push_str(&format!(
-        "codex_gate_upstream_snapshot_loaded {}\n",
+        "little_gate_upstream_snapshot_loaded {}\n",
         if upstream_config_loaded { 1 } else { 0 }
     ));
 
-    out.push_str("# HELP codex_gate_inflight_requests Current in-flight proxy requests.\n");
-    out.push_str("# TYPE codex_gate_inflight_requests gauge\n");
+    out.push_str("# HELP little_gate_inflight_requests Current in-flight proxy requests.\n");
+    out.push_str("# TYPE little_gate_inflight_requests gauge\n");
     out.push_str(&format!(
-        "codex_gate_inflight_requests {}\n",
+        "little_gate_inflight_requests {}\n",
         state.metrics.inflight_requests.load(Ordering::Relaxed)
     ));
 
     if let Some(rss_bytes) = util::process_resident_memory_bytes() {
-        out.push_str("# HELP codex_gate_process_resident_memory_bytes Resident memory used by the gateway process in bytes.\n");
-        out.push_str("# TYPE codex_gate_process_resident_memory_bytes gauge\n");
+        out.push_str("# HELP little_gate_process_resident_memory_bytes Resident memory used by the gateway process in bytes.\n");
+        out.push_str("# TYPE little_gate_process_resident_memory_bytes gauge\n");
         out.push_str(&format!(
-            "codex_gate_process_resident_memory_bytes {}\n",
+            "little_gate_process_resident_memory_bytes {}\n",
             rss_bytes
         ));
     }
 
     out.push_str(
-        "# HELP codex_gate_upstream_attempts_total Total upstream attempts issued by the proxy.\n",
+        "# HELP little_gate_upstream_attempts_total Total upstream attempts issued by the proxy.\n",
     );
-    out.push_str("# TYPE codex_gate_upstream_attempts_total counter\n");
+    out.push_str("# TYPE little_gate_upstream_attempts_total counter\n");
     out.push_str(&format!(
-        "codex_gate_upstream_attempts_total {}\n",
+        "little_gate_upstream_attempts_total {}\n",
         state
             .metrics
             .upstream_attempts_total
             .load(Ordering::Relaxed)
     ));
 
-    out.push_str("# HELP codex_gate_telemetry_dropped_total Total telemetry events dropped without blocking proxy requests.\n");
-    out.push_str("# TYPE codex_gate_telemetry_dropped_total counter\n");
+    out.push_str("# HELP little_gate_telemetry_dropped_total Total telemetry events dropped without blocking proxy requests.\n");
+    out.push_str("# TYPE little_gate_telemetry_dropped_total counter\n");
     out.push_str(&format!(
-        "codex_gate_telemetry_dropped_total {}\n",
+        "little_gate_telemetry_dropped_total {}\n",
         state
             .metrics
             .telemetry_dropped_total
             .load(Ordering::Relaxed)
     ));
 
-    out.push_str("# HELP codex_gate_failovers_total Total same-request failover continuations before response streaming starts.\n");
-    out.push_str("# TYPE codex_gate_failovers_total counter\n");
+    out.push_str("# HELP little_gate_failovers_total Total same-request failover continuations before response streaming starts.\n");
+    out.push_str("# TYPE little_gate_failovers_total counter\n");
     out.push_str(&format!(
-        "codex_gate_failovers_total{{scope=\"endpoint\"}} {}\n",
+        "little_gate_failovers_total{{scope=\"endpoint\"}} {}\n",
         state
             .metrics
             .failover_endpoint_total
             .load(Ordering::Relaxed)
     ));
     out.push_str(&format!(
-        "codex_gate_failovers_total{{scope=\"key\"}} {}\n",
+        "little_gate_failovers_total{{scope=\"key\"}} {}\n",
         state.metrics.failover_key_total.load(Ordering::Relaxed)
     ));
     out.push_str(&format!(
-        "codex_gate_failovers_total{{scope=\"generic\"}} {}\n",
+        "little_gate_failovers_total{{scope=\"generic\"}} {}\n",
         state.metrics.failover_generic_total.load(Ordering::Relaxed)
     ));
 
@@ -436,17 +436,17 @@ pub async fn render_prometheus(state: &SharedState) -> String {
 
     write_state_metrics(
         &mut out,
-        "codex_gate_provider_health_total",
+        "little_gate_provider_health_total",
         &provider_counts,
     );
     write_state_metrics(
         &mut out,
-        "codex_gate_upstream_key_health_total",
+        "little_gate_upstream_key_health_total",
         &key_counts,
     );
     write_state_metrics(
         &mut out,
-        "codex_gate_endpoint_health_total",
+        "little_gate_endpoint_health_total",
         &endpoint_counts,
     );
 
@@ -465,72 +465,72 @@ fn add_state_count(counts: &mut EntityStateCounts, state: CircuitState, availabl
 }
 
 fn write_api_metrics(out: &mut String, api_format: &str, snapshot: ApiCountersSnapshot) {
-    out.push_str("# HELP codex_gate_requests_total Total completed proxy requests by API format and result.\n");
-    out.push_str("# TYPE codex_gate_requests_total counter\n");
+    out.push_str("# HELP little_gate_requests_total Total completed proxy requests by API format and result.\n");
+    out.push_str("# TYPE little_gate_requests_total counter\n");
     out.push_str(&format!(
-        "codex_gate_requests_total{{api_format=\"{}\",result=\"ok\"}} {}\n",
+        "little_gate_requests_total{{api_format=\"{}\",result=\"ok\"}} {}\n",
         api_format, snapshot.ok_total
     ));
     out.push_str(&format!(
-        "codex_gate_requests_total{{api_format=\"{}\",result=\"error\"}} {}\n",
+        "little_gate_requests_total{{api_format=\"{}\",result=\"error\"}} {}\n",
         api_format, snapshot.error_total
     ));
 
-    out.push_str("# HELP codex_gate_request_duration_ms_sum Sum of completed proxy request durations in milliseconds.\n");
-    out.push_str("# TYPE codex_gate_request_duration_ms_sum counter\n");
+    out.push_str("# HELP little_gate_request_duration_ms_sum Sum of completed proxy request durations in milliseconds.\n");
+    out.push_str("# TYPE little_gate_request_duration_ms_sum counter\n");
     out.push_str(&format!(
-        "codex_gate_request_duration_ms_sum{{api_format=\"{}\"}} {}\n",
+        "little_gate_request_duration_ms_sum{{api_format=\"{}\"}} {}\n",
         api_format, snapshot.duration_ms_sum
     ));
 
     out.push_str(
-        "# HELP codex_gate_request_duration_ms_count Count of completed proxy request durations.\n",
+        "# HELP little_gate_request_duration_ms_count Count of completed proxy request durations.\n",
     );
-    out.push_str("# TYPE codex_gate_request_duration_ms_count counter\n");
+    out.push_str("# TYPE little_gate_request_duration_ms_count counter\n");
     out.push_str(&format!(
-        "codex_gate_request_duration_ms_count{{api_format=\"{}\"}} {}\n",
+        "little_gate_request_duration_ms_count{{api_format=\"{}\"}} {}\n",
         api_format, snapshot.duration_ms_count
     ));
 
     out.push_str(
-        "# HELP codex_gate_tokens_total Aggregated token counters by API format and token kind.\n",
+        "# HELP little_gate_tokens_total Aggregated token counters by API format and token kind.\n",
     );
-    out.push_str("# TYPE codex_gate_tokens_total counter\n");
+    out.push_str("# TYPE little_gate_tokens_total counter\n");
     out.push_str(&format!(
-        "codex_gate_tokens_total{{api_format=\"{}\",kind=\"input\"}} {}\n",
+        "little_gate_tokens_total{{api_format=\"{}\",kind=\"input\"}} {}\n",
         api_format, snapshot.input_tokens_total
     ));
     out.push_str(&format!(
-        "codex_gate_tokens_total{{api_format=\"{}\",kind=\"output\"}} {}\n",
+        "little_gate_tokens_total{{api_format=\"{}\",kind=\"output\"}} {}\n",
         api_format, snapshot.output_tokens_total
     ));
     out.push_str(&format!(
-        "codex_gate_tokens_total{{api_format=\"{}\",kind=\"cache_read\"}} {}\n",
+        "little_gate_tokens_total{{api_format=\"{}\",kind=\"cache_read\"}} {}\n",
         api_format, snapshot.cache_read_tokens_total
     ));
     out.push_str(&format!(
-        "codex_gate_tokens_total{{api_format=\"{}\",kind=\"cache_write\"}} {}\n",
+        "little_gate_tokens_total{{api_format=\"{}\",kind=\"cache_write\"}} {}\n",
         api_format, snapshot.cache_write_tokens_total
     ));
     out.push_str(&format!(
-        "codex_gate_tokens_total{{api_format=\"{}\",kind=\"reasoning\"}} {}\n",
+        "little_gate_tokens_total{{api_format=\"{}\",kind=\"reasoning\"}} {}\n",
         api_format, snapshot.reasoning_tokens_total
     ));
 
-    out.push_str("# HELP codex_gate_cost_usd_total Aggregated request cost in USD by API format and direction.\n");
-    out.push_str("# TYPE codex_gate_cost_usd_total counter\n");
+    out.push_str("# HELP little_gate_cost_usd_total Aggregated request cost in USD by API format and direction.\n");
+    out.push_str("# TYPE little_gate_cost_usd_total counter\n");
     out.push_str(&format!(
-        "codex_gate_cost_usd_total{{api_format=\"{}\",kind=\"in\"}} {:.6}\n",
+        "little_gate_cost_usd_total{{api_format=\"{}\",kind=\"in\"}} {:.6}\n",
         api_format,
         micro_units_to_usd(snapshot.cost_in_micro_usd_total)
     ));
     out.push_str(&format!(
-        "codex_gate_cost_usd_total{{api_format=\"{}\",kind=\"out\"}} {:.6}\n",
+        "little_gate_cost_usd_total{{api_format=\"{}\",kind=\"out\"}} {:.6}\n",
         api_format,
         micro_units_to_usd(snapshot.cost_out_micro_usd_total)
     ));
     out.push_str(&format!(
-        "codex_gate_cost_usd_total{{api_format=\"{}\",kind=\"total\"}} {:.6}\n",
+        "little_gate_cost_usd_total{{api_format=\"{}\",kind=\"total\"}} {:.6}\n",
         api_format,
         micro_units_to_usd(snapshot.cost_total_micro_usd_total)
     ));

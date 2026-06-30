@@ -8,7 +8,7 @@ export type Locale = 'zh' | 'en';
 type Dictionary = Record<string, string>;
 type TranslationParams = Record<string, string | number>;
 
-const LOCALE_KEY = 'codex_gate_locale';
+const LOCALE_KEY = 'little_gate_locale';
 const DEFAULT_LOCALE: Locale = 'zh';
 
 const DICTIONARIES: Record<Locale, Dictionary> = { zh, en };

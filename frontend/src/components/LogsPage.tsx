@@ -78,6 +78,14 @@ function rowStatus(row: RequestLogRow) {
   return { tone: 'normal' as const, label: String(row.http_status) };
 }
 
+function formatMaybeMs(value: number | null) {
+  return value === null ? '—' : formatMs(value);
+}
+
+function primaryLatency(row: RequestLogRow) {
+  return row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? null;
+}
+
 export function LogsPage(props: LogsPageProps) {
   const [filters, setFilters] = createSignal<LogFilters>(EMPTY_FILTERS);
   const [advancedOpen, setAdvancedOpen] = createSignal(false);
@@ -279,7 +287,7 @@ export function LogsPage(props: LogsPageProps) {
               fallback={<EmptyState title="暂无日志" description="有流量后会显示。" />}
             >
           <div class="logs-table">
-            <div class="hidden xl:grid gap-4 px-4 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20 py-3 mb-2" style={{ 'grid-template-columns': 'minmax(160px, 1.15fr) minmax(180px, 1.1fr) minmax(120px, 0.8fr) minmax(160px, 1fr) minmax(140px, 0.85fr) minmax(130px, 0.82fr)' }}>
+            <div class="hidden xl:grid gap-4 px-4 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20 py-3 mb-2" style={{ 'grid-template-columns': 'minmax(160px, 1.05fr) minmax(180px, 1fr) minmax(90px, 0.6fr) minmax(210px, 1.2fr) minmax(140px, 0.85fr) minmax(130px, 0.82fr)' }}>
               <div>{t('时间')}</div>
               <div>{t('模型')}</div>
               <div>{t('状态')}</div>
@@ -306,7 +314,7 @@ export function LogsPage(props: LogsPageProps) {
                   const status = rowStatus(row);
                   return (
                   <div
-                    class="cursor-pointer border-b border-border bg-transparent px-4 py-5 transition-colors duration-200 ease-out hover:bg-muted/50 grid gap-4 xl:grid-cols-[minmax(160px,1.15fr)_minmax(180px,1.1fr)_minmax(120px,0.8fr)_minmax(160px,1fr)_minmax(140px,0.85fr)_minmax(130px,0.82fr)]"
+                    class="cursor-pointer border-b border-border bg-transparent px-4 py-5 transition-colors duration-200 ease-out hover:bg-muted/50 grid gap-4 xl:grid-cols-[minmax(160px,1.05fr)_minmax(180px,1fr)_minmax(90px,0.6fr)_minmax(210px,1.2fr)_minmax(140px,0.85fr)_minmax(130px,0.82fr)]"
                     onClick={() => setSelected(row)}
                   >
                     <div class="font-mono text-xs truncate">{formatDateTime(row.time_ms)}</div>
@@ -314,7 +322,7 @@ export function LogsPage(props: LogsPageProps) {
                     <div>
                       <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                     </div>
-                    <div class="font-mono text-xs">{formatMs(row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? 0)}</div>
+                    <LatencySummary row={row} />
                     <TokenSummary row={row} />
                     <div class="font-mono text-xs text-muted-foreground">{apiKeyNameMap().get(row.api_key_id) ?? `#${row.api_key_id}`}</div>
                   </div>
@@ -343,7 +351,9 @@ export function LogsPage(props: LogsPageProps) {
               <div class="grid gap-6">
                 <div class="flex flex-col gap-6 md:flex-row border-t border-border/40 pt-8 mt-2 pb-6">
                   <MetricCard label="状态" value={status.label} badge={<StatusBadge tone={status.tone}>{status.label}</StatusBadge>} />
-                  <MetricCard label="延迟" value={formatMs(row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? 0)} />
+                  <MetricCard label="首字节" value={formatMaybeMs(row.t_first_byte_ms)} />
+                  <MetricCard label="TTFT" value={formatMaybeMs(row.t_first_token_ms)} />
+                  <MetricCard label="总耗时" value={formatMaybeMs(primaryLatency(row))} />
                   <MetricCard label="成本" value={formatCost(parseDecimal(row.cost_total_usd))} />
                 </div>
 
@@ -433,6 +443,20 @@ function TokenSummary(props: { row: RequestLogRow }) {
         </Show>
       </div>
     </Show>
+  );
+}
+
+function LatencySummary(props: { row: RequestLogRow }) {
+  return (
+    <div class="min-w-0 font-mono text-xs leading-5">
+      <div class="text-foreground">{formatMaybeMs(primaryLatency(props.row))}</div>
+      <div class="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+        {t('首字节 {{value}}', { value: formatMaybeMs(props.row.t_first_byte_ms) })}
+      </div>
+      <div class="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+        {t('TTFT {{value}}', { value: formatMaybeMs(props.row.t_first_token_ms) })}
+      </div>
+    </div>
   );
 }
 

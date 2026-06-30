@@ -2,8 +2,6 @@ import type {
   ApiKeySummary,
   ApiKeyWorkspace,
   ConnectionSettings,
-  CodexOauthRequestView,
-  CodexOauthStartResponse,
   CreateApiKeyInput,
   CreateEndpointInput,
   CreatePriceInput,
@@ -354,6 +352,11 @@ export async function updateEndpoint(settings: ConnectionSettings, endpointId: n
   return patchJson<{ ok: boolean }>(apiBase, `/api/v1/endpoints/${endpointId}`, adminToken, payload);
 }
 
+export async function deleteEndpoint(settings: ConnectionSettings, endpointId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/endpoints/${endpointId}`, adminToken);
+}
+
 export async function createProviderKey(settings: ConnectionSettings, providerId: number, payload: CreateProviderKeyInput) {
   const { apiBase, adminToken } = requireConnection(settings);
   return postJson<{ id: number }>(apiBase, `/api/v1/providers/${providerId}/keys`, adminToken, payload);
@@ -362,6 +365,11 @@ export async function createProviderKey(settings: ConnectionSettings, providerId
 export async function updateProviderKey(settings: ConnectionSettings, keyId: number, payload: UpdateProviderKeyInput) {
   const { apiBase, adminToken } = requireConnection(settings);
   return patchJson<{ ok: boolean }>(apiBase, `/api/v1/keys/${keyId}`, adminToken, payload);
+}
+
+export async function deleteProviderKey(settings: ConnectionSettings, keyId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/keys/${keyId}`, adminToken);
 }
 
 export async function createPrice(settings: ConnectionSettings, payload: CreatePriceInput) {
@@ -392,17 +400,6 @@ export async function testEndpointConnection(settings: ConnectionSettings, endpo
     adminToken,
     {},
   );
-}
-
-export async function startCodexOauth(settings: ConnectionSettings, providerId: number) {
-  const { apiBase, adminToken } = requireConnection(settings);
-  return postJson<CodexOauthStartResponse>(apiBase, `/api/v1/providers/${providerId}/codex-oauth/start`, adminToken, {});
-}
-
-export async function getCodexOauthRequest(settings: ConnectionSettings, requestId: string) {
-  const { apiBase, adminToken } = requireConnection(settings);
-  const encoded = encodeURIComponent(requestId.trim());
-  return fetchJson<CodexOauthRequestView>(apiBase, `/api/v1/codex-oauth/${encoded}`, adminToken);
 }
 
 export async function loadUpstreamKeyModels(settings: ConnectionSettings, upstreamKeyId: number) {

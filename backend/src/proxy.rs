@@ -7,9 +7,10 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::Full;
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::header::{
-    AUTHORIZATION, CONNECTION, CONTENT_LENGTH, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE,
-    TRAILER, TRANSFER_ENCODING, UPGRADE,
+    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, PROXY_AUTHENTICATE,
+    PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE, USER_AGENT,
 };
+use hyper::http::HeaderMap;
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use memchr::memchr;
 use pin_project_lite::pin_project;
@@ -216,7 +217,7 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
                 "id": id,
                 "object": "model",
                 "created": 0,
-                "owned_by": "codex-gate"
+                "owned_by": "little-gate"
             })
         })
         .collect::<Vec<_>>();
@@ -510,18 +511,8 @@ async fn proxy_openai(
             }
         };
 
-        let mut headers = request_headers.clone();
-        sanitize_hop_headers(&mut headers);
-        headers.remove(AUTHORIZATION);
-        headers.remove(CONTENT_LENGTH);
-        if let Ok(value) = hyper::header::HeaderValue::from_str(&out_body.len().to_string()) {
-            headers.insert(CONTENT_LENGTH, value);
-        }
-        if let Ok(value) =
-            hyper::header::HeaderValue::from_str(&format!("Bearer {}", resolved.key.secret))
-        {
-            headers.insert(AUTHORIZATION, value);
-        }
+        let headers =
+            build_upstream_headers(&request_headers, out_body.len(), &resolved.key.secret);
 
         let websocket_attempt = resolved.provider.websocket_enabled
             && info.stream
@@ -1418,6 +1409,48 @@ fn sanitize_hop_headers(headers: &mut hyper::HeaderMap) {
     headers.remove(HOST);
 }
 
+fn build_upstream_headers(
+    request_headers: &HeaderMap,
+    body_len: usize,
+    upstream_secret: &str,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    copy_allowed_upstream_header(request_headers, &mut headers, CONTENT_TYPE);
+    copy_allowed_upstream_header(request_headers, &mut headers, ACCEPT);
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-beta");
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-organization");
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-project");
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "idempotency-key");
+
+    if let Ok(value) = hyper::header::HeaderValue::from_str(&body_len.to_string()) {
+        headers.insert(CONTENT_LENGTH, value);
+    }
+    if let Ok(value) = hyper::header::HeaderValue::from_str(&format!("Bearer {upstream_secret}")) {
+        headers.insert(AUTHORIZATION, value);
+    }
+    headers.insert(
+        USER_AGENT,
+        hyper::header::HeaderValue::from_static("little-gate"),
+    );
+    headers
+}
+
+fn copy_allowed_upstream_header(
+    from: &HeaderMap,
+    to: &mut HeaderMap,
+    name: hyper::header::HeaderName,
+) {
+    if let Some(value) = from.get(&name) {
+        to.insert(name, value.clone());
+    }
+}
+
+fn copy_allowed_upstream_header_by_name(from: &HeaderMap, to: &mut HeaderMap, name: &'static str) {
+    if let Some(value) = from.get(name) {
+        to.insert(hyper::header::HeaderName::from_static(name), value.clone());
+    }
+}
+
 #[derive(Clone)]
 struct TapConfig {
     api_key_id: i64,
@@ -2175,6 +2208,7 @@ fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Deci
         return (Decimal::ZERO, Decimal::ZERO);
     };
 
+    let mtoken = Decimal::from(1_000_000);
     let input_tokens = Decimal::from(usage.input_tokens);
     let output_tokens = Decimal::from(usage.output_tokens);
     let cache_read_tokens = Decimal::from(usage.cache_read_input_tokens);
@@ -2184,19 +2218,19 @@ fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Deci
     let mut cost_out = Decimal::ZERO;
 
     if let Some(v) = price.input_cost_per_token {
-        cost_in += input_tokens * v;
+        cost_in += input_tokens * v / mtoken;
     }
     if let Some(v) = price.output_cost_per_token {
-        cost_out += output_tokens * v;
+        cost_out += output_tokens * v / mtoken;
     }
     if let Some(v) = price.cache_read_input_token_cost {
-        cost_in += cache_read_tokens * v;
+        cost_in += cache_read_tokens * v / mtoken;
     }
     if let Some(v) = price
         .cache_creation_input_token_cost
         .or(price.cache_creation_input_token_cost_above_1hr)
     {
-        cost_in += cache_create_tokens * v;
+        cost_in += cache_create_tokens * v / mtoken;
     }
 
     (cost_in, cost_out)
@@ -2205,11 +2239,16 @@ fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Deci
 #[cfg(test)]
 mod tests {
     use super::{
-        UsageCaptureBuffer, compute_cost, extract_usage_from_capture, parse_chat_usage,
-        parse_responses_usage,
+        UsageCaptureBuffer, build_upstream_headers, compute_cost, extract_usage_from_capture,
+        parse_chat_usage, parse_responses_usage,
     };
     use crate::types::ModelPriceData;
     use bytes::Bytes;
+    use hyper::header::{
+        ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderName,
+        HeaderValue, USER_AGENT,
+    };
+    use hyper::http::HeaderMap;
     use rust_decimal::Decimal;
     use serde_json::json;
 
@@ -2288,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_cost_should_include_cache_creation_pricing() {
+    fn compute_cost_should_use_price_per_mtoken() {
         let usage = crate::types::Usage {
             input_tokens: 10,
             output_tokens: 4,
@@ -2306,8 +2345,98 @@ mod tests {
 
         let (cost_in, cost_out) = compute_cost(&usage, Some(&price));
 
-        assert_eq!(cost_in, Decimal::new(72, 0));
-        assert_eq!(cost_out, Decimal::new(12, 0));
+        assert_eq!(cost_in, Decimal::new(72, 6));
+        assert_eq!(cost_out, Decimal::new(12, 6));
+    }
+
+    #[test]
+    fn build_upstream_headers_should_preserve_allowed_api_headers() {
+        let mut input = HeaderMap::new();
+        input.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        input.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        input.insert("openai-beta", HeaderValue::from_static("responses=v1"));
+        input.insert("openai-organization", HeaderValue::from_static("org_123"));
+        input.insert("openai-project", HeaderValue::from_static("proj_123"));
+        input.insert("idempotency-key", HeaderValue::from_static("request-123"));
+
+        let headers = build_upstream_headers(&input, 37, "sk-upstream");
+
+        assert_eq!(headers.get(CONTENT_TYPE), input.get(CONTENT_TYPE));
+        assert_eq!(headers.get(ACCEPT), input.get(ACCEPT));
+        assert_eq!(headers.get("openai-beta"), input.get("openai-beta"));
+        assert_eq!(
+            headers.get("openai-organization"),
+            input.get("openai-organization")
+        );
+        assert_eq!(headers.get("openai-project"), input.get("openai-project"));
+        assert_eq!(headers.get("idempotency-key"), input.get("idempotency-key"));
+    }
+
+    #[test]
+    fn build_upstream_headers_should_replace_auth_length_and_user_agent() {
+        let mut input = HeaderMap::new();
+        input.insert(AUTHORIZATION, HeaderValue::from_static("Bearer client-key"));
+        input.insert(CONTENT_LENGTH, HeaderValue::from_static("999"));
+        input.insert(USER_AGENT, HeaderValue::from_static("api-client/1.0"));
+
+        let headers = build_upstream_headers(&input, 42, "sk-upstream");
+
+        assert_eq!(
+            headers.get(AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer sk-upstream"))
+        );
+        assert_eq!(
+            headers.get(CONTENT_LENGTH),
+            Some(&HeaderValue::from_static("42"))
+        );
+        assert_eq!(
+            headers.get(USER_AGENT),
+            Some(&HeaderValue::from_static("little-gate"))
+        );
+    }
+
+    #[test]
+    fn build_upstream_headers_should_drop_proxy_and_cdn_headers() {
+        let mut input = HeaderMap::new();
+        for name in [
+            "x-real-ip",
+            "x-forwarded-for",
+            "x-forwarded-proto",
+            "forwarded",
+            "via",
+            "cf-ray",
+            "cf-connecting-ip",
+            "cdn-loop",
+            "true-client-ip",
+        ] {
+            input.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static("ingress-value"),
+            );
+        }
+        input.insert(COOKIE, HeaderValue::from_static("session=secret"));
+        input.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
+
+        let headers = build_upstream_headers(&input, 5, "sk-upstream");
+
+        for name in [
+            "x-real-ip",
+            "x-forwarded-for",
+            "x-forwarded-proto",
+            "forwarded",
+            "via",
+            "cf-ray",
+            "cf-connecting-ip",
+            "cdn-loop",
+            "true-client-ip",
+            "cookie",
+            "accept-encoding",
+        ] {
+            assert!(
+                !headers.contains_key(name),
+                "header {name} should not be forwarded"
+            );
+        }
     }
 
     #[test]

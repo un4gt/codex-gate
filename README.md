@@ -1,6 +1,6 @@
-# codex-gate
+# little-gate
 
-轻量级 OpenAI/Codex 网关代理，提供多上游路由、用户密钥管理、统计与基础可观测能力。
+轻量级 OpenAI 兼容网关代理，提供多上游路由、用户密钥管理、统计与基础可观测能力。
 
 ## 部署方式
 
@@ -11,9 +11,9 @@
 #### 第一步：下载 `docker-compose.yml`
 
 ```bash
-mkdir -p codex-gate && cd codex-gate
-curl -fsSLO https://raw.githubusercontent.com/un4gt/codex-gate/main/docker-compose.yml
-curl -fsSLo .env https://raw.githubusercontent.com/un4gt/codex-gate/main/.env.example
+mkdir -p little-gate && cd little-gate
+curl -fsSLO https://raw.githubusercontent.com/un4gt/little-gate/main/docker-compose.yml
+curl -fsSLo .env https://raw.githubusercontent.com/un4gt/little-gate/main/.env.example
 ```
 
 如果服务器没有 `curl`，也可以改用 `wget`。
@@ -28,13 +28,13 @@ curl -fsSLo .env https://raw.githubusercontent.com/un4gt/codex-gate/main/.env.ex
 build:
   context: .
   dockerfile: Dockerfile
-image: codex-gate:local
+image: little-gate:local
 ```
 
 改成：
 
 ```yaml
-image: ghcr.io/un4gt/codex-gate:v1.0.0
+image: ghcr.io/un4gt/little-gate:v1.0.0
 ```
 
 说明：
@@ -49,7 +49,7 @@ image: ghcr.io/un4gt/codex-gate:v1.0.0
 ```bash
 ADMIN_TOKEN=replace-with-strong-admin-token
 MASTER_KEY=replace-with-strong-master-key
-CODEX_GATE_PORT=8080
+LITTLE_GATE_PORT=8080
 RUST_LOG=info
 ```
 
@@ -57,7 +57,7 @@ RUST_LOG=info
 
 - `ADMIN_TOKEN`：后台管理鉴权口令，必填
 - `MASTER_KEY`：用于密钥加密，强烈建议单独设置
-- `CODEX_GATE_PORT`：宿主机映射端口，默认 `8080`
+- `LITTLE_GATE_PORT`：宿主机映射端口，默认 `8080`
 
 #### 第四步：拉取镜像并启动
 
@@ -70,7 +70,7 @@ docker compose up -d
 
 ```bash
 docker compose ps
-docker compose logs -f codex-gate
+docker compose logs -f little-gate
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
@@ -99,7 +99,7 @@ docker compose down
 docker compose down -v
 ```
 
-数据默认存储在 Docker 卷 `codex-gate-data`。如果开启归档，路径为容器内 `/app/data/archive/request_logs`。
+数据默认存储在 Docker 卷 `little-gate-data`。如果开启归档，路径为容器内 `/app/data/archive/request_logs`。
 
 ### 2) Docker Compose 从源码构建（开发/自托管）
 
@@ -141,7 +141,7 @@ npm --prefix frontend run build
 常用可配置项：
 
 - `LISTEN_ADDR`（默认 `0.0.0.0:8080`）
-- `DB_DSN`（默认 `sqlite://./data/codex_gate.sqlite`）
+- `DB_DSN`（默认 `sqlite://./data/little_gate.sqlite`）
 - `STATIC_DIR`（默认 `./static`）
 - `RUST_LOG`（默认 `info`）
 
@@ -151,7 +151,7 @@ npm --prefix frontend run build
 export ADMIN_TOKEN='replace-with-strong-token'
 export MASTER_KEY='replace-with-strong-master-key'
 export LISTEN_ADDR='0.0.0.0:8080'
-export DB_DSN='sqlite://./data/codex_gate.sqlite'
+export DB_DSN='sqlite://./data/little_gate.sqlite'
 export STATIC_DIR='./frontend/dist'
 
 ./backend/target/release/backend
@@ -183,10 +183,10 @@ curl -fsS http://127.0.0.1:8080/readyz
 | --- | --- | --- |
 | `ADMIN_TOKEN` | 无（必填） | 管理后台 API 鉴权令牌。 |
 | `MASTER_KEY` | 空时回退 `ADMIN_TOKEN` | 加密上游密钥、哈希用户 API Key。 |
-| `CODEX_GATE_PORT` | `8080` | Docker 对外映射端口。 |
+| `LITTLE_GATE_PORT` | `8080` | Docker 对外映射端口。 |
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 网关监听地址。 |
 | `STATIC_DIR` | `/app/static`（容器） | 前端静态文件目录。 |
-| `DB_DSN` | `sqlite:///app/data/codex_gate.sqlite` | 数据库连接串（SQLite/Postgres）。 |
+| `DB_DSN` | `sqlite:///app/data/little_gate.sqlite` | 数据库连接串（SQLite/Postgres）。 |
 | `DB_MAX_CONNECTIONS` | `10` | 数据库连接池上限。 |
 | `RUST_LOG` | `info` | Rust 日志级别。 |
 

@@ -8,7 +8,7 @@ import urllib.request
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Failover baseline runner for codex-gate.')
+    parser = argparse.ArgumentParser(description='Failover baseline runner for little-gate.')
     parser.add_argument('--base-url', required=True)
     parser.add_argument('--admin-token', required=True)
     parser.add_argument('--scenario', choices=['endpoint', 'key'], required=True)
@@ -95,10 +95,10 @@ def create_price(base_url, admin_token, provider_id, model, timeout):
         'providerId': provider_id,
         'modelName': model,
         'priceData': {
-            'input_cost_per_token': '0.000001',
-            'output_cost_per_token': '0.000002',
-            'cache_creation_input_token_cost': '0.0000005',
-            'cache_read_input_token_cost': '0.00000025',
+            'input_cost_per_token': '1',
+            'output_cost_per_token': '2',
+            'cache_creation_input_token_cost': '0.5',
+            'cache_read_input_token_cost': '0.25',
         },
     }, timeout)['id']
 
@@ -201,11 +201,11 @@ def main():
         'client_api_key_id': client_key['id'],
         'proxy_response': response,
         'metrics_delta': {
-            'upstream_attempts_total': metrics_delta(metrics_before, metrics_after, 'codex_gate_upstream_attempts_total'),
-            'failovers_endpoint_total': metrics_delta(metrics_before, metrics_after, 'codex_gate_failovers_total{scope="endpoint"}'),
-            'failovers_key_total': metrics_delta(metrics_before, metrics_after, 'codex_gate_failovers_total{scope="key"}'),
-            'chat_ok_total': metrics_delta(metrics_before, metrics_after, 'codex_gate_requests_total{api_format="chat_completions",result="ok"}'),
-            'chat_error_total': metrics_delta(metrics_before, metrics_after, 'codex_gate_requests_total{api_format="chat_completions",result="error"}'),
+            'upstream_attempts_total': metrics_delta(metrics_before, metrics_after, 'little_gate_upstream_attempts_total'),
+            'failovers_endpoint_total': metrics_delta(metrics_before, metrics_after, 'little_gate_failovers_total{scope="endpoint"}'),
+            'failovers_key_total': metrics_delta(metrics_before, metrics_after, 'little_gate_failovers_total{scope="key"}'),
+            'chat_ok_total': metrics_delta(metrics_before, metrics_after, 'little_gate_requests_total{api_format="chat_completions",result="ok"}'),
+            'chat_error_total': metrics_delta(metrics_before, metrics_after, 'little_gate_requests_total{api_format="chat_completions",result="error"}'),
         },
         'provider_health': provider.get('health'),
         'endpoints': endpoints,

@@ -117,6 +117,7 @@ pub struct ModelAliasTarget {
 
 /// Matches `claude-code-hub`'s `ModelPriceData` *fields* for the ones we need in v1.
 /// We store the raw JSON in DB, but extract these numeric fields for fast cost computation.
+/// Values are interpreted as USD per 1,000,000 tokens.
 #[derive(Clone, Debug, Default)]
 pub struct ModelPriceData {
     pub input_cost_per_token: Option<Decimal>,

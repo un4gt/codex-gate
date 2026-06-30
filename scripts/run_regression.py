@@ -21,7 +21,7 @@ MOCK_URL = 'http://127.0.0.1:19092'
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Run codex-gate local regression pipeline.')
+    parser = argparse.ArgumentParser(description='Run little-gate local regression pipeline.')
     parser.add_argument('--archive-compress', action='store_true')
     parser.add_argument('--duration-seconds', type=float, default=5.0)
     parser.add_argument('--concurrency', type=int, default=4)
@@ -139,10 +139,10 @@ def bootstrap_main_provider(admin_token):
         'providerId': provider_id,
         'modelName': 'gpt-4o-mini',
         'priceData': {
-            'input_cost_per_token': '0.000001',
-            'output_cost_per_token': '0.000002',
-            'cache_creation_input_token_cost': '0.0000005',
-            'cache_read_input_token_cost': '0.00000025',
+            'input_cost_per_token': '1',
+            'output_cost_per_token': '2',
+            'cache_creation_input_token_cost': '0.5',
+            'cache_read_input_token_cost': '0.25',
         },
     })
     request_json('PUT', f'{BASE_URL}/api/v1/routes/gpt-4o-mini', admin_token, {

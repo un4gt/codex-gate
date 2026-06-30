@@ -1,5 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
-import { AlertCircle, Copy, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from 'lucide-solid';
+import { AlertCircle, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from 'lucide-solid';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,15 +21,15 @@ import {
   createModelAliasTarget,
   createProvider,
   createProviderKey,
+  deleteEndpoint,
   deleteModelAlias,
   deleteModelAliasTarget,
+  deleteProviderKey,
   deleteUpstreamKeyModel,
   deleteProviderModel,
-  getCodexOauthRequest,
   loadGatewayModelPolicies,
   loadProviderModels,
   loadUpstreamKeyModels,
-  startCodexOauth,
   syncUpstreamKeyModels,
   syncProviderModels,
   testEndpointConnection,
@@ -44,8 +44,6 @@ import {
 } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
 import type {
-  CodexOauthRequestView,
-  CodexOauthStartResponse,
   ConnectionSettings,
   CreateEndpointInput,
   CreateProviderInput,
@@ -54,6 +52,8 @@ import type {
   ModelAlias,
   ProviderModel,
   ProviderWorkspace,
+  UpstreamEndpointSummary,
+  UpstreamKeyMeta,
   UpstreamKeyModel,
   UpdateEndpointInput,
   UpdateProviderInput,
@@ -66,6 +66,18 @@ interface ProvidersPageProps {
   aliases: ModelAlias[];
   onRefresh: (successMessage?: string) => Promise<void>;
   onMessage: (message: string) => void;
+}
+
+interface DraftInputRow {
+  id: string;
+  value: string;
+}
+
+let draftInputSeq = 0;
+
+function createDraftInputRow(prefix: string): DraftInputRow {
+  draftInputSeq += 1;
+  return { id: `${prefix}-${draftInputSeq}`, value: '' };
 }
 
 function readString(formData: FormData, key: string): string {
@@ -99,10 +111,13 @@ function healthStatus(state?: string, available?: boolean) {
   return { label: '正常', tone: 'normal' as const };
 }
 
+function priorityForIndex(index: number) {
+  return 100 + index * 10;
+}
+
 const PROVIDER_TYPE_OPTIONS = [
   { value: 'openai', label: 'OpenAI', description: '官方 OpenAI 服务' },
   { value: 'openai_compatible', label: 'OpenAI Compatible', description: '兼容 OpenAI 协议的第三方或自建服务' },
-  { value: 'openai_codex_oauth', label: 'OpenAI Codex OAuth', description: '通过 Codex 登录获取授权' },
   { value: 'openai_compatible_responses', label: 'OpenAI Compatible (Responses)', description: '仅用于响应式接口的兼容服务' },
 ] as const;
 
@@ -110,11 +125,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const [busy, setBusy] = createSignal<string | null>(null);
   const [createOpen, setCreateOpen] = createSignal(false);
   const [createName, setCreateName] = createSignal('');
-  const [createBaseUrl, setCreateBaseUrl] = createSignal('');
-  const [createApiKey, setCreateApiKey] = createSignal('');
+  const [createBaseUrls, setCreateBaseUrls] = createSignal<DraftInputRow[]>([createDraftInputRow('url')]);
+  const [createApiKeys, setCreateApiKeys] = createSignal<DraftInputRow[]>([createDraftInputRow('key')]);
   const [createSubmitError, setCreateSubmitError] = createSignal<string | null>(null);
   const [selectedProviderId, setSelectedProviderId] = createSignal<number | null>(null);
   const [providerTypeDraft, setProviderTypeDraft] = createSignal('');
+  const [draggingEndpointId, setDraggingEndpointId] = createSignal<number | null>(null);
+  const [draggingKeyId, setDraggingKeyId] = createSignal<number | null>(null);
   const [testResult, setTestResult] = createSignal<{ ok: boolean; status: number | null; url: string; message: string | null } | null>(null);
 
   const selected = createMemo(() => props.items.find((item) => item.provider.id === selectedProviderId()) ?? null);
@@ -129,13 +146,37 @@ export function ProvidersPage(props: ProvidersPageProps) {
   };
 
   const isLive = () => Boolean(props.settings.adminToken.trim());
-  const isCodexOAuthCreate = createMemo(() => createProviderType() === 'openai_codex_oauth');
-
   const resetCreateForm = () => {
     setCreateProviderType('openai');
     setCreateName('');
-    setCreateBaseUrl('');
-    setCreateApiKey('');
+    setCreateBaseUrls([createDraftInputRow('url')]);
+    setCreateApiKeys([createDraftInputRow('key')]);
+    setCreateSubmitError(null);
+  };
+
+  const createBaseUrlValues = createMemo(() => createBaseUrls().map((row) => row.value.trim()).filter(Boolean));
+  const createApiKeyValues = createMemo(() => createApiKeys().map((row) => row.value.trim()).filter(Boolean));
+
+  const updateCreateBaseUrl = (rowId: string, value: string) => {
+    setCreateBaseUrls((rows) => rows.map((row) => (row.id === rowId ? { ...row, value } : row)));
+    setCreateSubmitError(null);
+  };
+
+  const updateCreateApiKey = (rowId: string, value: string) => {
+    setCreateApiKeys((rows) => rows.map((row) => (row.id === rowId ? { ...row, value } : row)));
+    setCreateSubmitError(null);
+  };
+
+  const addCreateBaseUrl = () => setCreateBaseUrls((rows) => [...rows, createDraftInputRow('url')]);
+  const addCreateApiKey = () => setCreateApiKeys((rows) => [...rows, createDraftInputRow('key')]);
+
+  const removeCreateBaseUrl = (rowId: string) => {
+    setCreateBaseUrls((rows) => (rows.length > 1 ? rows.filter((row) => row.id !== rowId) : rows.map((row) => ({ ...row, value: '' }))));
+    setCreateSubmitError(null);
+  };
+
+  const removeCreateApiKey = (rowId: string) => {
+    setCreateApiKeys((rows) => (rows.length > 1 ? rows.filter((row) => row.id !== rowId) : rows.map((row) => ({ ...row, value: '' }))));
     setCreateSubmitError(null);
   };
 
@@ -148,10 +189,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
     if (!createName().trim()) {
       missing.push('名称');
     }
-    if (!createBaseUrl().trim()) {
+    if (createBaseUrlValues().length === 0) {
       missing.push('服务地址');
     }
-    if (!isCodexOAuthCreate() && !createApiKey().trim()) {
+    if (createApiKeyValues().length === 0) {
       missing.push('API 密钥');
     }
     return missing;
@@ -162,7 +203,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return t('请先连接后台。');
     }
     if (createMissingFields().length === 0) {
-      return t('名称、服务地址和首个密钥会一起创建。');
+      return t('将按当前顺序创建服务地址和访问密钥。');
     }
     return t('请先填写：{{fields}}。', { fields: createMissingFields().map((field) => t(field)).join(', ') });
   });
@@ -182,9 +223,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
     const policies = gatewayModelPolicies() ?? [];
     return new Set(policies.filter((policy) => !policy.enabled).map((policy) => policy.model_name));
   });
-
-  const [codexOauthStart, setCodexOauthStart] = createSignal<CodexOauthStartResponse | null>(null);
-  const [codexOauthView, setCodexOauthView] = createSignal<CodexOauthRequestView | null>(null);
 
   const providerTypeDescription = (value: string) =>
     PROVIDER_TYPE_OPTIONS.find((option) => option.value === value)?.description ?? '—';
@@ -209,13 +247,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
     const formData = new FormData(event.currentTarget as HTMLFormElement);
     const payload: CreateProviderInput = {
       name: createName().trim(),
-      provider_type: readString(formData, 'provider_type') || 'openai',
+      provider_type: createProviderType() || readString(formData, 'provider_type') || 'openai',
       enabled: readBool(formData, 'enabled'),
-      priority: readInt(formData, 'priority', 100),
-      weight: readInt(formData, 'weight', 1),
+      priority: 100,
+      weight: 1,
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'websocket_enabled'),
-      key_selection_strategy: (readString(formData, 'key_selection_strategy') || 'round_robin') as 'round_robin' | 'weighted',
+      key_selection_strategy: 'round_robin',
     };
     setCreateSubmitError(null);
     if (!payload.name) {
@@ -225,17 +263,16 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return;
     }
 
-    const baseUrl = createBaseUrl().trim();
-    if (!baseUrl) {
+    const baseUrls = createBaseUrlValues();
+    if (baseUrls.length === 0) {
       const message = '服务地址不能为空。';
       setCreateSubmitError(message);
       props.onMessage(message);
       return;
     }
 
-    const isCodexOAuth = payload.provider_type === 'openai_codex_oauth';
-    const apiKey = createApiKey().trim();
-    if (!isCodexOAuth && !apiKey) {
+    const apiKeys = createApiKeyValues();
+    if (apiKeys.length === 0) {
       const message = 'API 密钥不能为空。';
       setCreateSubmitError(message);
       props.onMessage(message);
@@ -247,25 +284,27 @@ export function ProvidersPage(props: ProvidersPageProps) {
       const created = await createProvider(props.settings, payload);
       const providerId = created.id;
 
-      const endpointPayload: CreateEndpointInput = {
-        name: `${payload.name}-primary`,
-        base_url: baseUrl,
-        enabled: true,
-        priority: 100,
-        weight: 1,
-      };
-
-      const work: Promise<unknown>[] = [createEndpoint(props.settings, providerId, endpointPayload)];
-      if (!isCodexOAuth) {
+      const work: Promise<unknown>[] = [];
+      baseUrls.forEach((baseUrl, index) => {
+        const endpointPayload: CreateEndpointInput = {
+          name: `地址 ${index + 1}`,
+          enabled: true,
+          base_url: baseUrl,
+          priority: priorityForIndex(index),
+          weight: 1,
+        };
+        work.push(createEndpoint(props.settings, providerId, endpointPayload));
+      });
+      apiKeys.forEach((apiKey, index) => {
         const keyPayload: CreateProviderKeyInput = {
-          name: `${payload.name}-key`,
+          name: `密钥 ${index + 1}`,
           secret: apiKey,
           enabled: true,
-          priority: 100,
+          priority: priorityForIndex(index),
           weight: 1,
         };
         work.push(createProviderKey(props.settings, providerId, keyPayload));
-      }
+      });
 
       await Promise.all(work);
       setCreateOpen(false);
@@ -291,11 +330,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
       name: readString(formData, 'provider_name'),
       provider_type: readString(formData, 'provider_type') || item.provider.provider_type,
       enabled: readBool(formData, 'provider_enabled'),
-      priority: readInt(formData, 'provider_priority', item.provider.priority),
-      weight: readInt(formData, 'provider_weight', item.provider.weight),
+      priority: item.provider.priority,
+      weight: item.provider.weight,
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'provider_websocket_enabled'),
-      key_selection_strategy: (readString(formData, 'key_selection_strategy') || item.provider.key_selection_strategy || 'round_robin') as 'round_robin' | 'weighted',
+      key_selection_strategy: item.provider.key_selection_strategy || 'round_robin',
     };
 
     setBusy(`provider-${item.provider.id}`);
@@ -313,15 +352,16 @@ export function ProvidersPage(props: ProvidersPageProps) {
     event.preventDefault();
     if (!ensureLive()) return;
     const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const nextIndex = item.endpoints.length;
     const payload: CreateEndpointInput = {
-      name: readString(formData, 'endpoint_name'),
+      name: readString(formData, 'endpoint_name') || `地址 ${nextIndex + 1}`,
       base_url: readString(formData, 'endpoint_base_url'),
       enabled: readBool(formData, 'endpoint_enabled'),
-      priority: readInt(formData, 'endpoint_priority', 100),
-      weight: readInt(formData, 'endpoint_weight', 1),
+      priority: priorityForIndex(nextIndex),
+      weight: 1,
     };
-    if (!payload.name || !payload.base_url) {
-      props.onMessage('目标名称和服务地址不能为空。');
+    if (!payload.base_url) {
+      props.onMessage('服务地址不能为空。');
       return;
     }
     setBusy(`endpoint-create-${item.provider.id}`);
@@ -339,12 +379,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
     event.preventDefault();
     if (!ensureLive()) return;
     const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const current = selected()?.endpoints.find((endpoint) => endpoint.id === endpointId);
     const payload: UpdateEndpointInput = {
-      name: readString(formData, `endpoint_name_${endpointId}`),
+      name: readString(formData, `endpoint_name_${endpointId}`) || current?.name || '地址',
       base_url: readString(formData, `endpoint_base_url_${endpointId}`),
       enabled: readBool(formData, `endpoint_enabled_${endpointId}`),
-      priority: readInt(formData, `endpoint_priority_${endpointId}`, 100),
-      weight: readInt(formData, `endpoint_weight_${endpointId}`, 1),
+      priority: current?.priority ?? 100,
+      weight: current?.weight ?? 1,
     };
     setBusy(`endpoint-${endpointId}`);
     try {
@@ -361,15 +402,16 @@ export function ProvidersPage(props: ProvidersPageProps) {
     event.preventDefault();
     if (!ensureLive()) return;
     const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const nextIndex = item.keys.length;
     const payload: CreateProviderKeyInput = {
-      name: readString(formData, 'upstream_key_name'),
+      name: readString(formData, 'upstream_key_name') || `密钥 ${nextIndex + 1}`,
       secret: readString(formData, 'upstream_key_secret'),
       enabled: readBool(formData, 'upstream_key_enabled'),
-      priority: readInt(formData, 'upstream_key_priority', 100),
-      weight: readInt(formData, 'upstream_key_weight', 1),
+      priority: priorityForIndex(nextIndex),
+      weight: 1,
     };
-    if (!payload.name || !payload.secret) {
-      props.onMessage('密钥名称和密钥不能为空。');
+    if (!payload.secret) {
+      props.onMessage('API 密钥不能为空。');
       return;
     }
     setBusy(`key-create-${item.provider.id}`);
@@ -387,12 +429,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
     event.preventDefault();
     if (!ensureLive()) return;
     const formData = new FormData(event.currentTarget as HTMLFormElement);
+    const current = selected()?.keys.find((key) => key.id === keyId);
     const payload: UpdateProviderKeyInput = {
-      name: readString(formData, `upstream_key_name_${keyId}`),
+      name: readString(formData, `upstream_key_name_${keyId}`) || current?.name || '密钥',
       secret: readString(formData, `upstream_key_secret_${keyId}`) || undefined,
       enabled: readBool(formData, `upstream_key_enabled_${keyId}`),
-      priority: readInt(formData, `upstream_key_priority_${keyId}`, 100),
-      weight: readInt(formData, `upstream_key_weight_${keyId}`, 1),
+      priority: current?.priority ?? 100,
+      weight: current?.weight ?? 1,
     };
     setBusy(`key-${keyId}`);
     try {
@@ -400,6 +443,103 @@ export function ProvidersPage(props: ProvidersPageProps) {
       await props.onRefresh(t('上游密钥 {{name}} 已更新。', { name: payload.name ?? '' }));
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新上游密钥失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reorderEndpoints = async (item: ProviderWorkspace, targetId: number) => {
+    const sourceId = draggingEndpointId();
+    setDraggingEndpointId(null);
+    if (sourceId === null || sourceId === targetId || !ensureLive()) return;
+
+    const sourceIndex = item.endpoints.findIndex((endpoint) => endpoint.id === sourceId);
+    const targetIndex = item.endpoints.findIndex((endpoint) => endpoint.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+
+    const next = [...item.endpoints];
+    const [source] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, source);
+
+    setBusy(`endpoint-reorder-${item.provider.id}`);
+    try {
+      await Promise.all(
+        next.map((endpoint, index) =>
+          updateEndpoint(props.settings, endpoint.id, {
+            name: endpoint.name,
+            base_url: endpoint.base_url,
+            enabled: endpoint.enabled,
+            priority: priorityForIndex(index),
+            weight: endpoint.weight,
+          }),
+        ),
+      );
+      await props.onRefresh('服务地址顺序已更新。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '更新服务地址顺序失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reorderKeys = async (item: ProviderWorkspace, targetId: number) => {
+    const sourceId = draggingKeyId();
+    setDraggingKeyId(null);
+    if (sourceId === null || sourceId === targetId || !ensureLive()) return;
+
+    const sourceIndex = item.keys.findIndex((key) => key.id === sourceId);
+    const targetIndex = item.keys.findIndex((key) => key.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+
+    const next = [...item.keys];
+    const [source] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, source);
+
+    setBusy(`key-reorder-${item.provider.id}`);
+    try {
+      await Promise.all(
+        next.map((key, index) =>
+          updateProviderKey(props.settings, key.id, {
+            name: key.name,
+            enabled: key.enabled,
+            priority: priorityForIndex(index),
+            weight: key.weight,
+          }),
+        ),
+      );
+      await props.onRefresh('API 密钥顺序已更新。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '更新 API 密钥顺序失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeEndpoint = async (endpoint: UpstreamEndpointSummary) => {
+    if (!ensureLive()) return;
+    if (!window.confirm(t('确认删除服务地址 {{name}}？', { name: endpoint.name }))) return;
+
+    setBusy(`endpoint-delete-${endpoint.id}`);
+    try {
+      await deleteEndpoint(props.settings, endpoint.id);
+      await props.onRefresh('服务地址已删除。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '删除服务地址失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeProviderKey = async (key: UpstreamKeyMeta) => {
+    if (!ensureLive()) return;
+    if (!window.confirm(t('确认删除 API 密钥 {{name}}？', { name: key.name }))) return;
+
+    setBusy(`key-delete-${key.id}`);
+    try {
+      await deleteProviderKey(props.settings, key.id);
+      await props.onRefresh('API 密钥已删除。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '删除 API 密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -437,8 +577,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setUpstreamKeyModels(null);
     setUpstreamKeyModelsError(null);
     setUpstreamKeyModelsDraft('');
-    setCodexOauthStart(null);
-    setCodexOauthView(null);
     setProviderTypeDraft('');
   });
 
@@ -542,67 +680,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
 
     onCleanup(() => {
       cancelled = true;
-    });
-  });
-
-  const startLogin = async (item: ProviderWorkspace) => {
-    if (!ensureLive()) return;
-    setBusy(`codex-oauth-start-${item.provider.id}`);
-    try {
-      const started = await startCodexOauth(props.settings, item.provider.id);
-      setCodexOauthStart(started);
-      setCodexOauthView(null);
-      props.onMessage('已生成登录链接。请在浏览器完成授权。');
-
-      try {
-        const view = await getCodexOauthRequest(props.settings, started.request_id);
-        setCodexOauthView(view);
-      } catch {
-        // Polling will handle subsequent fetches.
-      }
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '启动 Codex OAuth 失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  createEffect(() => {
-    const item = selected();
-    const requestId = codexOauthStart()?.request_id?.trim();
-    if (!item || !requestId || !isLive()) return;
-    if (item.provider.provider_type !== 'openai_codex_oauth') return;
-
-    let cancelled = false;
-    let timeoutId: number | undefined;
-
-    const poll = async () => {
-      if (cancelled) return;
-      try {
-        const view = await getCodexOauthRequest(props.settings, requestId);
-        if (cancelled) return;
-        setCodexOauthView(view);
-
-        if (view.status.state === 'pending') {
-          timeoutId = window.setTimeout(poll, 2000);
-          return;
-        }
-
-        if (view.status.state === 'completed') {
-          await props.onRefresh(t('Codex OAuth 已完成，已创建密钥 #{{id}}。', { id: view.status.key_id ?? '' }));
-        } else if (view.status.state === 'failed') {
-          props.onMessage(t('Codex OAuth 失败：{{message}}', { message: view.status.message ?? '' }));
-        }
-      } catch (error) {
-        if (cancelled) return;
-        props.onMessage(error instanceof Error ? error.message : '轮询 Codex OAuth 状态失败。');
-      }
-    };
-
-    timeoutId = window.setTimeout(poll, 2000);
-    onCleanup(() => {
-      cancelled = true;
-      if (timeoutId) window.clearTimeout(timeoutId);
     });
   });
 
@@ -1179,56 +1256,64 @@ export function ProvidersPage(props: ProvidersPageProps) {
           </FieldGroup>
           <FieldGroup class="grid gap-6">
             <Field>
-              <FieldLabel>服务地址</FieldLabel>
-              <Input
-                name="base_url"
-                type="url"
-                value={createBaseUrl()}
-                onInput={(event) => {
-                  setCreateBaseUrl(event.currentTarget.value);
-                  setCreateSubmitError(null);
-                }}
-                placeholder="https://api.openai.com"
-                class="bg-background"
-              />
-              <FieldDescription class="mt-2">用于创建首个节点，后续可继续添加。</FieldDescription>
+              <div class="flex items-center justify-between gap-3">
+                <FieldLabel>服务地址</FieldLabel>
+                <Button type="button" size="icon" variant="ghost" aria-label={t('添加服务地址')} onClick={addCreateBaseUrl}>
+                  <Plus class="size-4" />
+                </Button>
+              </div>
+              <div class="grid gap-3">
+                <For each={createBaseUrls()}>
+                  {(row, index) => (
+                    <div class="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
+                      <div class="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index() + 1}</div>
+                      <Input
+                        type="url"
+                        value={row.value}
+                        autocomplete="off"
+                        autocapitalize="none"
+                        spellcheck={false}
+                        onInput={(event) => updateCreateBaseUrl(row.id, event.currentTarget.value)}
+                        placeholder="https://api.example.com"
+                        class="bg-background"
+                      />
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除服务地址')} onClick={() => removeCreateBaseUrl(row.id)}>
+                        <Trash2 class="size-4" />
+                      </Button>
+                    </div>
+                  )}
+                </For>
+              </div>
             </Field>
             <Field>
-              <FieldLabel>API 密钥</FieldLabel>
-              <Input
-                name="api_key"
-                type="password"
-                value={createApiKey()}
-                onInput={(event) => {
-                  setCreateApiKey(event.currentTarget.value);
-                  setCreateSubmitError(null);
-                }}
-                placeholder={createProviderType() === 'openai_codex_oauth' ? 'Codex OAuth 将通过登录获取' : 'sk-...'}
-                disabled={createProviderType() === 'openai_codex_oauth'}
-                class="bg-background"
-              />
-              <FieldDescription class="mt-2">
-                {createProviderType() === 'openai_codex_oauth'
-                  ? '创建后通过登录获取。'
-                  : '用于创建首个上游密钥，后续可继续添加。'}
-              </FieldDescription>
-            </Field>
-          </FieldGroup>
-          <FieldGroup class="grid gap-6 md:grid-cols-2">
-            <Field>
-              <FieldLabel>优先级</FieldLabel>
-              <Input name="priority" type="number" value="100" class="bg-background" />
-            </Field>
-            <Field>
-              <FieldLabel>权重</FieldLabel>
-              <Input name="weight" type="number" value="1" class="bg-background" />
-            </Field>
-            <Field>
-              <FieldLabel>密钥分配</FieldLabel>
-              <Select name="key_selection_strategy" value="round_robin">
-                <option value="round_robin">轮询</option>
-                <option value="weighted">按权重</option>
-              </Select>
+              <div class="flex items-center justify-between gap-3">
+                <FieldLabel>API 密钥</FieldLabel>
+                <Button type="button" size="icon" variant="ghost" aria-label={t('添加 API 密钥')} onClick={addCreateApiKey}>
+                  <Plus class="size-4" />
+                </Button>
+              </div>
+              <div class="grid gap-3">
+                <For each={createApiKeys()}>
+                  {(row, index) => (
+                    <div class="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
+                      <div class="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index() + 1}</div>
+                      <Input
+                        type="password"
+                        value={row.value}
+                        autocomplete="new-password"
+                        autocapitalize="none"
+                        spellcheck={false}
+                        onInput={(event) => updateCreateApiKey(row.id, event.currentTarget.value)}
+                        placeholder="sk-..."
+                        class="bg-background"
+                      />
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除 API 密钥')} onClick={() => removeCreateApiKey(row.id)}>
+                        <Trash2 class="size-4" />
+                      </Button>
+                    </div>
+                  )}
+                </For>
+              </div>
             </Field>
           </FieldGroup>
           <div class="grid gap-4 md:grid-cols-3">
@@ -1241,7 +1326,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <span>{t('补充用量')}</span>
             </label>
             <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
-              <Checkbox name="websocket_enabled" checked={createProviderType() === 'openai_codex_oauth'} />
+              <Checkbox name="websocket_enabled" />
               <span>{t('WebSocket')}</span>
             </label>
           </div>
@@ -1329,23 +1414,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <FieldDescription>{providerTypeDescription(providerTypeDraft() || item.provider.provider_type)}</FieldDescription>
                     </Field>
                   </FieldGroup>
-                  <FieldGroup class="grid gap-6 md:grid-cols-2">
-                    <Field>
-                      <FieldLabel>优先级</FieldLabel>
-                      <Input name="provider_priority" type="number" value={String(item.provider.priority)} class="bg-background" />
-                    </Field>
-                    <Field>
-                      <FieldLabel>权重</FieldLabel>
-                      <Input name="provider_weight" type="number" value={String(item.provider.weight)} class="bg-background" />
-                    </Field>
-                    <Field>
-                      <FieldLabel>密钥分配</FieldLabel>
-                      <Select name="key_selection_strategy" value={item.provider.key_selection_strategy ?? 'round_robin'}>
-                        <option value="round_robin">轮询</option>
-                        <option value="weighted">按权重</option>
-                      </Select>
-                    </Field>
-                  </FieldGroup>
                   <div class="grid gap-4 md:grid-cols-3">
                     <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
                       <Checkbox name="provider_enabled" checked={item.provider.enabled} />
@@ -1367,259 +1435,156 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </div>
                 </form>
 
-                <Show when={item.provider.provider_type === 'openai_codex_oauth'}>
-                  <Card class="rounded-none border border-border bg-background shadow-none mt-8">
-                    <CardHeader class="pb-6">
-                      <CardTitle class="text-xl font-medium tracking-tight">Codex OAuth</CardTitle>
-                      <CardDescription class="font-mono text-xs uppercase tracking-wider mt-1">{t('完成登录后会自动写入一个上游密钥。')}</CardDescription>
-                    </CardHeader>
-                    <CardContent class="grid gap-6 border-t border-border/40 pt-6">
-                      <div class="flex flex-wrap items-center gap-4">
-                        <Button type="button" size="sm" class="rounded-none font-mono tracking-widest text-[0.65rem] px-4" onClick={() => void startLogin(item)} disabled={busy() === `codex-oauth-start-${item.provider.id}`}>
-                          <ShieldCheck class="size-3 mr-2" />
-                          {t('START LOGIN')}
-                        </Button>
-                        <Show when={codexOauthView()?.status.state === 'pending'}>
-                          <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">{t('WAITING FOR AUTHORIZATION...')}</span>
-                        </Show>
-                      </div>
-
-                      <Show
-                        when={codexOauthView() || codexOauthStart()}
-                        fallback={<p class="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-widest border-l-2 border-primary/20 pl-4 py-2 mt-4">{t('Click START LOGIN to open authorization in browser.')}</p>}
-                      >
-                        <div class="grid gap-6 border border-border/40 bg-muted/5 p-6 text-sm">
-                          <div class="flex flex-col gap-2">
-                            <div class="flex items-center justify-between">
-                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('登录地址')}</span>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                class="h-6 font-mono text-[0.65rem] tracking-widest px-2 opacity-80 hover:bg-transparent hover:text-primary"
-                                onClick={() => void copyValue('登录地址', (codexOauthView()?.login_url ?? codexOauthStart()?.login_url ?? '').trim())}
-                                disabled={!((codexOauthView()?.login_url ?? codexOauthStart()?.login_url ?? '').trim())}
-                              >
-                                {t('[ COPY ]')}
-                              </Button>
-                            </div>
-                            <div class="break-all font-mono text-[0.7rem] bg-background border border-border/40 p-3 opacity-90 mt-1">
-                              <a
-                                class="text-primary hover:text-primary/80 transition-colors"
-                                href={(codexOauthView()?.login_url ?? codexOauthStart()?.login_url ?? '').trim()}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                {(codexOauthView()?.login_url ?? codexOauthStart()?.login_url ?? '').trim()}
-                              </a>
-                            </div>
-                          </div>
-
-                          <div class="grid grid-cols-2 gap-6 pt-4 border-t border-border/40">
-                            <div class="flex flex-col gap-2">
-                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('状态')}</span>
-                              <span class="font-mono text-sm tracking-tight text-foreground opacity-90">
-                                {(() => {
-                                  const view = codexOauthView();
-                                  if (!view) return '—';
-                                  if (view.status.state === 'completed') return t('COMPLETED (KEY #{{id}})', { id: view.status.key_id ?? '' });
-                                  if (view.status.state === 'failed') return t('FAILED: {{message}}', { message: view.status.message ?? '' });
-                                  if (view.status.state === 'pending') return t('PENDING');
-                                  return '—';
-                                })()}
-                              </span>
-                            </div>
-
-                            <div class="flex flex-col gap-2">
-                              <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('过期时间')}</span>
-                              <span class="font-mono text-sm tracking-tight text-foreground opacity-90">
-                                {(() => {
-                                  const expiresAt = codexOauthView()?.expires_at_ms ?? codexOauthStart()?.expires_at_ms;
-                                  return expiresAt ? formatDateTime(expiresAt) : '—';
-                                })()}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      </Show>
-                    </CardContent>
-                  </Card>
-                </Show>
-
-                <section class="grid gap-6 mt-8">
+                <section class="grid gap-4 mt-8">
                   <div class="flex items-center justify-between border-b border-border/40 pb-4">
                     <div class="flex items-center gap-3">
                       <Stethoscope class="size-4 opacity-70" />
-                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('目标')}</h3>
+                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('服务地址')}</h3>
                     </div>
+                    <StatusBadge tone="normal">{String(item.endpoints.length)}</StatusBadge>
                   </div>
-                  <For each={item.endpoints}>
-                    {(endpoint) => {
-                      const endpointHealth = healthStatus(endpoint.health?.state, endpoint.health?.available);
-                      return (
-                        <form class="flex flex-col gap-6 border border-border/40 bg-muted/5 p-6" onSubmit={(event) => void submitEndpointUpdate(event, endpoint.id)}>
-                          <div class="flex flex-wrap items-center justify-between gap-4 border-b border-border/40 pb-6">
-                            <div class="flex items-center gap-4">
-                              <strong class="text-lg font-medium text-foreground tracking-tight">{endpoint.name}</strong>
+                  <div class="grid gap-3">
+                    <For each={item.endpoints}>
+                      {(endpoint, index) => {
+                        const endpointHealth = healthStatus(endpoint.health?.state, endpoint.health?.available);
+                        return (
+                          <form
+                            class="grid gap-3 border border-border/40 bg-muted/5 p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_12rem]"
+                            onSubmit={(event) => void submitEndpointUpdate(event, endpoint.id)}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={() => void reorderEndpoints(item, endpoint.id)}
+                          >
+                            <button
+                              type="button"
+                              class="flex size-10 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing"
+                              aria-label={t('调整服务地址顺序')}
+                              title={t('调整服务地址顺序')}
+                              draggable
+                              onDragStart={() => setDraggingEndpointId(endpoint.id)}
+                              onDragEnd={() => setDraggingEndpointId(null)}
+                            >
+                              <GripVertical class="size-4" />
+                            </button>
+                            <Input name={`endpoint_name_${endpoint.id}`} value={endpoint.name || `地址 ${index() + 1}`} autocomplete="off" class="bg-background" />
+                            <Input
+                              name={`endpoint_base_url_${endpoint.id}`}
+                              value={endpoint.base_url}
+                              autocomplete="off"
+                              autocapitalize="none"
+                              spellcheck={false}
+                              class="bg-background font-mono text-xs"
+                            />
+                            <label class="check-row h-10 px-3 py-0">
+                              <Checkbox name={`endpoint_enabled_${endpoint.id}`} checked={endpoint.enabled} />
+                              <span>{t('启用')}</span>
+                            </label>
+                            <div class="flex items-center justify-end gap-2">
                               <StatusBadge tone={endpointHealth.tone}>{endpointHealth.label}</StatusBadge>
-                            </div>
-                            <div class="flex items-center gap-2">
-                              <Button type="button" size="sm" variant="ghost" class="font-mono text-xs hover:bg-transparent hover:text-primary px-3 shrink-0" disabled={busy() === `test-${endpoint.id}`} onClick={() => void handleTestEndpoint(endpoint.id)}>
-                                {t('[ TEST CONNECTION ]')}
+                              <Button type="button" size="icon" variant="ghost" aria-label={t('测试连接')} disabled={busy() === `test-${endpoint.id}`} onClick={() => void handleTestEndpoint(endpoint.id)}>
+                                <Stethoscope class="size-4" />
                               </Button>
-                              <Button type="submit" size="sm" class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-4 ml-2" disabled={busy() === `endpoint-${endpoint.id}`}>
-                                {busy() === `endpoint-${endpoint.id}` ? '保存中…' : '保存'}
+                              <Button type="submit" size="icon" variant="ghost" aria-label={t('保存服务地址')} disabled={busy() === `endpoint-${endpoint.id}`}>
+                                <Save class="size-4" />
+                              </Button>
+                              <Button type="button" size="icon" variant="ghost" aria-label={t('删除服务地址')} disabled={busy() === `endpoint-delete-${endpoint.id}`} onClick={() => void removeEndpoint(endpoint)}>
+                                <Trash2 class="size-4" />
                               </Button>
                             </div>
-                          </div>
-                          <FieldGroup class="grid gap-6 md:grid-cols-2 pt-2">
-                            <Field>
-                              <FieldLabel>名称</FieldLabel>
-                              <Input name={`endpoint_name_${endpoint.id}`} value={endpoint.name} class="bg-background" />
-                            </Field>
-                            <Field>
-                              <FieldLabel>服务地址</FieldLabel>
-                              <Input name={`endpoint_base_url_${endpoint.id}`} value={endpoint.base_url} class="bg-background" />
-                            </Field>
-                          </FieldGroup>
-                          <FieldGroup class="grid gap-6 md:grid-cols-2">
-                            <Field>
-                              <FieldLabel>优先级</FieldLabel>
-                              <Input name={`endpoint_priority_${endpoint.id}`} type="number" value={String(endpoint.priority)} class="bg-background" />
-                            </Field>
-                            <Field>
-                              <FieldLabel>权重</FieldLabel>
-                              <Input name={`endpoint_weight_${endpoint.id}`} type="number" value={String(endpoint.weight)} class="bg-background" />
-                              <FieldDescription class="mt-2 opacity-60">
-                                 {t('最近延迟 {{value}}', { value: endpoint.health?.latency_ewma_ms ? formatMs(endpoint.health.latency_ewma_ms) : '—' })}
-                              </FieldDescription>
-                            </Field>
-                          </FieldGroup>
-                          <label class="flex items-center gap-3 border border-border/40 bg-background px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors mt-2">
-                            <Checkbox name={`endpoint_enabled_${endpoint.id}`} checked={endpoint.enabled} />
-                            <span>{t('启用目标')}</span>
-                          </label>
-                        </form>
-                      );
-                    }}
-                  </For>
-
-                  <form class="flex flex-col gap-6 border border-dashed border-border/60 bg-transparent p-6 mt-4" onSubmit={(event) => void submitEndpointCreate(event, item)}>
-                    <h4 class="text-sm font-medium tracking-widest uppercase font-mono text-foreground mb-2">{t('添加目标')}</h4>
-                    <FieldGroup class="grid gap-6 md:grid-cols-2">
-                      <Field>
-                        <FieldLabel>名称</FieldLabel>
-                        <Input name="endpoint_name" placeholder="us-east-primary" />
-                      </Field>
-                      <Field>
-                        <FieldLabel>服务地址</FieldLabel>
-                        <Input name="endpoint_base_url" placeholder="https://api.openai.com" />
-                      </Field>
-                    </FieldGroup>
-                    <FieldGroup class="grid gap-6 md:grid-cols-2">
-                      <Field>
-                        <FieldLabel>优先级</FieldLabel>
-                        <Input name="endpoint_priority" type="number" value="100" />
-                      </Field>
-                      <Field>
-                        <FieldLabel>权重</FieldLabel>
-                        <Input name="endpoint_weight" type="number" value="1" />
-                      </Field>
-                    </FieldGroup>
-                    <div class="flex items-center justify-between border-t border-border/40 pt-6 mt-2">
-                      <label class="flex items-center gap-3 cursor-pointer">
+                          </form>
+                        );
+                      }}
+                    </For>
+                    <form
+                      class="grid gap-3 border border-dashed border-border/60 bg-transparent p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]"
+                      onSubmit={(event) => void submitEndpointCreate(event, item)}
+                    >
+                      <div class="flex size-10 items-center justify-center font-mono text-xs text-muted-foreground">{item.endpoints.length + 1}</div>
+                      <Input name="endpoint_name" placeholder={`地址 ${item.endpoints.length + 1}`} autocomplete="off" />
+                      <Input name="endpoint_base_url" placeholder="https://api.example.com" autocomplete="off" autocapitalize="none" spellcheck={false} class="font-mono text-xs" />
+                      <label class="check-row h-10 px-3 py-0">
                         <Checkbox name="endpoint_enabled" checked />
-                        <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">{t('创建后启用')}</span>
+                        <span>{t('启用')}</span>
                       </label>
-                      <Button type="submit" disabled={busy() === `endpoint-create-${item.provider.id}`} class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-6">
-                        {busy() === `endpoint-create-${item.provider.id}` ? '添加中…' : t('ADD ENDPOINT')}
+                      <Button type="submit" disabled={busy() === `endpoint-create-${item.provider.id}`}>
+                        <Plus class="size-4" />
+                        {t('添加')}
                       </Button>
-                    </div>
-                  </form>
+                    </form>
+                  </div>
                 </section>
 
-                <section class="grid gap-6 mt-8">
+                <section class="grid gap-4 mt-8">
                   <div class="flex items-center justify-between border-b border-border/40 pb-4">
                     <div class="flex items-center gap-3">
                       <AlertCircle class="size-4 opacity-70" />
-                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('上游密钥')}</h3>
+                      <h3 class="text-base font-medium tracking-tight text-foreground uppercase">{t('API 密钥')}</h3>
                     </div>
+                    <StatusBadge tone="normal">{String(item.keys.length)}</StatusBadge>
                   </div>
-                  <For each={item.keys}>
-                    {(key) => {
-                      const keyHealth = healthStatus(key.health?.state, key.health?.available);
-                      return (
-                        <form class="flex flex-col gap-6 border border-border/40 bg-muted/5 p-6" onSubmit={(event) => void submitKeyUpdate(event, key.id)}>
-                          <div class="flex flex-wrap items-center justify-between gap-4 border-b border-border/40 pb-6">
-                            <div class="flex items-center gap-4">
-                              <strong class="text-lg font-medium text-foreground tracking-tight">{key.name}</strong>
+                  <div class="grid gap-3">
+                    <For each={item.keys}>
+                      {(key, index) => {
+                        const keyHealth = healthStatus(key.health?.state, key.health?.available);
+                        return (
+                          <form
+                            class="grid gap-3 border border-border/40 bg-muted/5 p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_10rem]"
+                            onSubmit={(event) => void submitKeyUpdate(event, key.id)}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={() => void reorderKeys(item, key.id)}
+                          >
+                            <button
+                              type="button"
+                              class="flex size-10 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing"
+                              aria-label={t('调整 API 密钥顺序')}
+                              title={t('调整 API 密钥顺序')}
+                              draggable
+                              onDragStart={() => setDraggingKeyId(key.id)}
+                              onDragEnd={() => setDraggingKeyId(null)}
+                            >
+                              <GripVertical class="size-4" />
+                            </button>
+                            <Input name={`upstream_key_name_${key.id}`} value={key.name || `密钥 ${index() + 1}`} autocomplete="off" class="bg-background" />
+                            <Input
+                              name={`upstream_key_secret_${key.id}`}
+                              type="password"
+                              autocomplete="new-password"
+                              placeholder="留空表示不修改"
+                              class="bg-background font-mono text-xs"
+                            />
+                            <label class="check-row h-10 px-3 py-0">
+                              <Checkbox name={`upstream_key_enabled_${key.id}`} checked={key.enabled} />
+                              <span>{t('启用')}</span>
+                            </label>
+                            <div class="flex items-center justify-end gap-2">
                               <StatusBadge tone={keyHealth.tone}>{keyHealth.label}</StatusBadge>
+                              <Button type="submit" size="icon" variant="ghost" aria-label={t('保存 API 密钥')} disabled={busy() === `key-${key.id}`}>
+                                <Save class="size-4" />
+                              </Button>
+                              <Button type="button" size="icon" variant="ghost" aria-label={t('删除 API 密钥')} disabled={busy() === `key-delete-${key.id}`} onClick={() => void removeProviderKey(key)}>
+                                <Trash2 class="size-4" />
+                              </Button>
                             </div>
-                            <Button type="submit" size="sm" class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-4 ml-2" disabled={busy() === `key-${key.id}`}>
-                              {busy() === `key-${key.id}` ? '保存中…' : '保存'}
-                            </Button>
-                          </div>
-                          <FieldGroup class="grid gap-6 md:grid-cols-2 pt-2">
-                            <Field>
-                              <FieldLabel>名称</FieldLabel>
-                              <Input name={`upstream_key_name_${key.id}`} value={key.name} class="bg-background" />
-                            </Field>
-                            <Field>
-                              <FieldLabel>替换密钥</FieldLabel>
-                              <Input name={`upstream_key_secret_${key.id}`} type="password" placeholder="留空表示不修改" class="bg-background" />
-                            </Field>
-                          </FieldGroup>
-                          <FieldGroup class="grid gap-6 md:grid-cols-2">
-                            <Field>
-                              <FieldLabel>优先级</FieldLabel>
-                              <Input name={`upstream_key_priority_${key.id}`} type="number" value={String(key.priority)} class="bg-background" />
-                            </Field>
-                            <Field>
-                              <FieldLabel>权重</FieldLabel>
-                              <Input name={`upstream_key_weight_${key.id}`} type="number" value={String(key.weight)} class="bg-background" />
-                            </Field>
-                          </FieldGroup>
-                          <label class="check-row mt-2 cursor-pointer font-mono uppercase tracking-widest opacity-80 hover:bg-muted/10">
-                            <Checkbox name={`upstream_key_enabled_${key.id}`} checked={key.enabled} />
-                            <span>{t('启用密钥')}</span>
-                          </label>
-                        </form>
-                      );
-                    }}
-                  </For>
-
-                  <form class="flex flex-col gap-6 border border-dashed border-border/60 bg-transparent p-6 mt-4" onSubmit={(event) => void submitKeyCreate(event, item)}>
-                    <h4 class="text-sm font-medium tracking-widest uppercase font-mono text-foreground mb-2">{t('添加上游密钥')}</h4>
-                    <FieldGroup class="grid gap-6 md:grid-cols-2">
-                      <Field>
-                        <FieldLabel>名称</FieldLabel>
-                        <Input name="upstream_key_name" placeholder="prod-key-a" />
-                      </Field>
-                      <Field>
-                        <FieldLabel>密钥</FieldLabel>
-                        <Input name="upstream_key_secret" type="password" placeholder="sk-..." />
-                      </Field>
-                    </FieldGroup>
-                    <FieldGroup class="grid gap-6 md:grid-cols-2">
-                      <Field>
-                        <FieldLabel>优先级</FieldLabel>
-                        <Input name="upstream_key_priority" type="number" value="100" />
-                      </Field>
-                      <Field>
-                        <FieldLabel>权重</FieldLabel>
-                        <Input name="upstream_key_weight" type="number" value="1" />
-                      </Field>
-                    </FieldGroup>
-                    <div class="flex items-center justify-between border-t border-border/40 pt-6 mt-2">
-                      <label class="flex items-center gap-3 cursor-pointer">
+                          </form>
+                        );
+                      }}
+                    </For>
+                    <form
+                      class="grid gap-3 border border-dashed border-border/60 bg-transparent p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]"
+                      onSubmit={(event) => void submitKeyCreate(event, item)}
+                    >
+                      <div class="flex size-10 items-center justify-center font-mono text-xs text-muted-foreground">{item.keys.length + 1}</div>
+                      <Input name="upstream_key_name" placeholder={`密钥 ${item.keys.length + 1}`} autocomplete="off" />
+                      <Input name="upstream_key_secret" type="password" placeholder="sk-..." autocomplete="new-password" class="font-mono text-xs" />
+                      <label class="check-row h-10 px-3 py-0">
                         <Checkbox name="upstream_key_enabled" checked />
-                        <span class="font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-80">{t('创建后启用')}</span>
+                        <span>{t('启用')}</span>
                       </label>
-                      <Button type="submit" disabled={busy() === `key-create-${item.provider.id}`} class="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-6">
-                        {busy() === `key-create-${item.provider.id}` ? '添加中…' : t('ADD KEY')}
+                      <Button type="submit" disabled={busy() === `key-create-${item.provider.id}`}>
+                        <Plus class="size-4" />
+                        {t('添加')}
                       </Button>
-                    </div>
-                  </form>
+                    </form>
+                  </div>
                 </section>
 
                 <section class="grid gap-6 mt-8">

@@ -7,7 +7,6 @@
 - 上游类型已收敛为固定枚举并由后端校验：
   - `openai`
   - `openai_compatible`
-  - `openai_codex_oauth`
   - `openai_compatible_responses`
 - 新建上游流程已包含最小关键字段：`API 密钥`、`Base URL`、`启用 websocket 传输`。
 - provider 级 websocket 策略已实现：在 responses 流式请求时优先 websocket，失败自动回退 HTTP。

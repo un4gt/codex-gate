@@ -18,16 +18,16 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates wget \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --home-dir /app codexgate
+    && useradd --system --create-home --home-dir /app littlegate
 WORKDIR /app
 COPY --from=backend-builder /work/backend/target/release/backend /app/backend
 COPY --from=frontend-builder /work/frontend/dist /app/static
 RUN mkdir -p /app/data \
-    && chown -R codexgate:codexgate /app
-USER codexgate
+    && chown -R littlegate:littlegate /app
+USER littlegate
 ENV LISTEN_ADDR=0.0.0.0:8080 \
     STATIC_DIR=/app/static \
-    DB_DSN=sqlite:///app/data/codex_gate.sqlite \
+    DB_DSN=sqlite:///app/data/little_gate.sqlite \
     RUST_LOG=info
 VOLUME ["/app/data"]
 EXPOSE 8080

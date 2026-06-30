@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 
-RSS_METRIC_NAME = 'codex_gate_process_resident_memory_bytes'
+RSS_METRIC_NAME = 'little_gate_process_resident_memory_bytes'
 
 
 def parse_args():

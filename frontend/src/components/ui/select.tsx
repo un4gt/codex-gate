@@ -8,7 +8,6 @@ export interface SelectProps extends JSX.SelectHTMLAttributes<HTMLSelectElement>
 
 export function Select(props: SelectProps) {
   const [local, rest] = splitProps(props, ['class', 'children', 'value']);
-  const value = local.value as string | number | string[] | undefined;
 
   return (
     <div class="relative">
@@ -17,7 +16,7 @@ export function Select(props: SelectProps) {
           'flex h-10 w-full appearance-none rounded-none border border-border bg-transparent px-3 py-2 pr-10 text-sm text-foreground shadow-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50',
           local.class,
         )}
-        value={value}
+        value={local.value as string | number | string[] | undefined}
         {...rest}
       >
         {local.children}

@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Local mock upstream for codex-gate validation.')
+    parser = argparse.ArgumentParser(description='Local mock upstream for little-gate validation.')
     parser.add_argument('--listen', default='127.0.0.1:19090')
     parser.add_argument('--default-format', choices=['chat', 'responses'], default='chat')
     parser.add_argument('--default-status', type=int, default=200)
@@ -82,7 +82,7 @@ def parse_route(raw, default_format):
 
 
 class MockHandler(BaseHTTPRequestHandler):
-    server_version = 'codex-gate-mock/0.1'
+    server_version = 'little-gate-mock/0.1'
 
     def do_GET(self):
         parsed = urlparse(self.path)

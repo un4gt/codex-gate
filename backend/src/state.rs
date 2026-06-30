@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::cache::Caches;
-use crate::codex_oauth::CodexOauthManager;
 use crate::config::Config;
 use crate::db::Database;
 use crate::health::{EndpointHealthBook, UpstreamKeyHealthBook};
@@ -21,7 +20,6 @@ pub struct AppState {
     pub upstream_key_health: Arc<UpstreamKeyHealthBook>,
     pub key_rotation: Arc<KeyRotationBook>,
     pub metrics: Arc<Metrics>,
-    pub codex_oauth: CodexOauthManager,
     pub runtime_settings: RuntimeSettings,
 }
 
