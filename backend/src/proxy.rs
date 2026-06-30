@@ -1421,6 +1421,7 @@ fn build_upstream_headers(
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-organization");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-project");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "idempotency-key");
+    copy_allowed_upstream_header(request_headers, &mut headers, USER_AGENT);
 
     if let Ok(value) = hyper::header::HeaderValue::from_str(&body_len.to_string()) {
         headers.insert(CONTENT_LENGTH, value);
@@ -1428,10 +1429,6 @@ fn build_upstream_headers(
     if let Ok(value) = hyper::header::HeaderValue::from_str(&format!("Bearer {upstream_secret}")) {
         headers.insert(AUTHORIZATION, value);
     }
-    headers.insert(
-        USER_AGENT,
-        hyper::header::HeaderValue::from_static("little-gate"),
-    );
     headers
 }
 
@@ -2373,7 +2370,7 @@ mod tests {
     }
 
     #[test]
-    fn build_upstream_headers_should_replace_auth_length_and_user_agent() {
+    fn build_upstream_headers_should_replace_auth_and_length_but_preserve_user_agent() {
         let mut input = HeaderMap::new();
         input.insert(AUTHORIZATION, HeaderValue::from_static("Bearer client-key"));
         input.insert(CONTENT_LENGTH, HeaderValue::from_static("999"));
@@ -2391,8 +2388,17 @@ mod tests {
         );
         assert_eq!(
             headers.get(USER_AGENT),
-            Some(&HeaderValue::from_static("little-gate"))
+            Some(&HeaderValue::from_static("api-client/1.0"))
         );
+    }
+
+    #[test]
+    fn build_upstream_headers_should_omit_user_agent_when_absent() {
+        let input = HeaderMap::new();
+
+        let headers = build_upstream_headers(&input, 42, "sk-upstream");
+
+        assert!(headers.get(USER_AGENT).is_none());
     }
 
     #[test]
