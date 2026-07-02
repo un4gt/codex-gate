@@ -7,6 +7,10 @@ RUN npm run build
 
 FROM rust:1.93-bookworm AS backend-builder
 WORKDIR /work
+ARG APP_VERSION=dev
+ARG APP_COMMIT=unknown
+ENV LITTLE_GATE_VERSION=${APP_VERSION} \
+    LITTLE_GATE_COMMIT=${APP_COMMIT}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends pkg-config build-essential ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -16,7 +20,7 @@ RUN cargo build --release --locked --manifest-path backend/Cargo.toml
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates wget \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tzdata wget \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --home-dir /app littlegate
 WORKDIR /app
@@ -28,7 +32,8 @@ USER littlegate
 ENV LISTEN_ADDR=0.0.0.0:8080 \
     STATIC_DIR=/app/static \
     DB_DSN=sqlite:///app/data/little_gate.sqlite \
-    RUST_LOG=info
+    RUST_LOG=info \
+    TZ=Asia/Shanghai
 VOLUME ["/app/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \

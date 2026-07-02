@@ -16,6 +16,7 @@ services:
       DB_DSN: ${DB_DSN:-sqlite:///app/data/little_gate.sqlite}
       DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-2}
       RUST_LOG: ${RUST_LOG:-info}
+      TZ: ${TZ:-Asia/Shanghai}
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-1}
       INJECT_INCLUDE_USAGE: ${INJECT_INCLUDE_USAGE:-true}
       API_KEY_CACHE_TTL_MS: ${API_KEY_CACHE_TTL_MS:-30000}

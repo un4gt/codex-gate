@@ -11,7 +11,7 @@ import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
 import { createPrice, updateRuntimeSetting } from '../lib/api';
-import { formatBytes, formatDateTime, formatMs, formatRoutingStrategy } from '../lib/format';
+import { formatBytes, formatCommitShort, formatDateTime, formatMs, formatRoutingStrategy, formatVersionLabel } from '../lib/format';
 import type {
   ConnectionSettings,
   CreatePriceInput,
@@ -179,6 +179,8 @@ export function SettingsPage(props: SettingsPageProps) {
         onToggle={() => toggleSection('basic')}
       >
         <div class="grid gap-4 md:grid-cols-2">
+          <InfoTile label="服务版本" value={formatVersionLabel(props.systemConfig?.build?.version)} />
+          <InfoTile label="构建提交" value={formatCommitShort(props.systemConfig?.build?.commit)} />
           <InfoTile label="请求大小限制" value={props.systemConfig ? formatBytes(props.systemConfig.basic.max_request_bytes) : '—'} />
           <InfoTile label="统计刷新" value={props.systemConfig ? `${props.systemConfig.basic.stats_flush_interval_ms}ms` : '—'} />
         </div>

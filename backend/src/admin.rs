@@ -30,11 +30,20 @@ const ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES: usize = 1024 * 1024;
 const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
 const MILLIS_PER_DAY: i64 = 86_400_000;
+const ASIA_SHANGHAI_OFFSET_MS: i64 = 8 * MILLIS_PER_HOUR;
+
+fn build_info() -> Value {
+    serde_json::json!({
+        "version": option_env!("LITTLE_GATE_VERSION").unwrap_or("dev"),
+        "commit": option_env!("LITTLE_GATE_COMMIT").unwrap_or("unknown"),
+    })
+}
 
 fn stats_window(period: &str, now_ms: i64) -> Option<(i64, i64)> {
     match period {
         "today" => {
-            let today = (now_ms / MILLIS_PER_DAY) * MILLIS_PER_DAY;
+            let today = ((now_ms + ASIA_SHANGHAI_OFFSET_MS) / MILLIS_PER_DAY) * MILLIS_PER_DAY
+                - ASIA_SHANGHAI_OFFSET_MS;
             Some((today, now_ms))
         }
         "7h" => Some((now_ms.saturating_sub(7 * MILLIS_PER_HOUR), now_ms)),
@@ -2075,6 +2084,7 @@ async fn get_price(req: Request<Incoming>, state: SharedState) -> HttpResponse {
 async fn system_config(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let config = &state.config;
     let payload = serde_json::json!({
+        "build": build_info(),
         "connection": {
             "api_base": format!("http://{}", config.listen_addr),
             "healthz_path": "/healthz",
@@ -2150,47 +2160,32 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         None => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
     };
 
-    let hourly_rows = match state.db.list_stats_hourly_range(from_ms, to_ms).await {
-        Ok(rows) => rows,
+    let agg = match state.db.aggregate_stats_events_range(from_ms, to_ms).await {
+        Ok(row) => row,
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    let mut requests_total: i64 = 0;
-    let mut failed_total: i64 = 0;
-    let mut input_tokens: i64 = 0;
-    let mut output_tokens: i64 = 0;
-    let mut cache_read_input_tokens: i64 = 0;
-    let mut cache_creation_input_tokens: i64 = 0;
-    let mut reasoning_output_tokens: i64 = 0;
-    let mut usage_observed_requests: i64 = 0;
-    let mut wait_time_ms: i64 = 0;
-    let mut cost_total = Decimal::ZERO;
-    let mut latency_buckets = [0_i64; 6];
-    for row in &hourly_rows {
-        requests_total += row.request_success + row.request_failed;
-        failed_total += row.request_failed;
-        input_tokens += row.input_tokens;
-        output_tokens += row.output_tokens;
-        cache_read_input_tokens += row.cache_read_input_tokens;
-        cache_creation_input_tokens += row.cache_creation_input_tokens;
-        reasoning_output_tokens += row.reasoning_output_tokens;
-        usage_observed_requests += row.usage_observed_requests;
-        wait_time_ms += row.wait_time_ms;
-        cost_total += Decimal::from_str(&row.cost_total_usd).unwrap_or(Decimal::ZERO);
-        latency_buckets[0] += row.latency_lt_500ms;
-        latency_buckets[1] += row.latency_lt_1000ms;
-        latency_buckets[2] += row.latency_lt_2000ms;
-        latency_buckets[3] += row.latency_lt_5000ms;
-        latency_buckets[4] += row.latency_lt_15000ms;
-        latency_buckets[5] += row.latency_gte_15000ms;
-    }
-    let total_tokens =
-        input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens;
-    let visible_output_tokens = output_tokens.saturating_sub(reasoning_output_tokens);
+    let requests_total = agg.request_success + agg.request_failed;
+    let failed_total = agg.request_failed;
+    let total_tokens = agg.input_tokens
+        + agg.output_tokens
+        + agg.cache_read_input_tokens
+        + agg.cache_creation_input_tokens;
+    let visible_output_tokens = agg
+        .output_tokens
+        .saturating_sub(agg.reasoning_output_tokens);
+    let cost_total = Decimal::from_str(&agg.cost_total_usd).unwrap_or(Decimal::ZERO);
 
-    let p95 = approximate_p95_latency_ms(&latency_buckets);
+    let p95 = approximate_p95_latency_ms(&[
+        agg.latency_lt_500ms,
+        agg.latency_lt_1000ms,
+        agg.latency_lt_2000ms,
+        agg.latency_lt_5000ms,
+        agg.latency_lt_15000ms,
+        agg.latency_gte_15000ms,
+    ]);
     let avg_latency_ms = if requests_total > 0 {
-        wait_time_ms / requests_total
+        agg.wait_time_ms / requests_total
     } else {
         0
     };
@@ -2275,13 +2270,13 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         },
         "token_usage": {
             "total_tokens": total_tokens,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
+            "input_tokens": agg.input_tokens,
+            "output_tokens": agg.output_tokens,
             "visible_output_tokens": visible_output_tokens,
-            "cache_read_input_tokens": cache_read_input_tokens,
-            "cache_creation_input_tokens": cache_creation_input_tokens,
-            "reasoning_output_tokens": reasoning_output_tokens,
-            "usage_observed_requests": usage_observed_requests
+            "cache_read_input_tokens": agg.cache_read_input_tokens,
+            "cache_creation_input_tokens": agg.cache_creation_input_tokens,
+            "reasoning_output_tokens": agg.reasoning_output_tokens,
+            "usage_observed_requests": agg.usage_observed_requests
         }
     });
 
@@ -2653,4 +2648,41 @@ fn generate_api_key_plaintext() -> String {
     fastrand::fill(&mut bytes);
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     format!("cg_{}", raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_window_today_should_start_at_asia_shanghai_midnight() {
+        let now_ms = 1_787_076_000_000; // 2026-08-19 02:00:00 +08:00
+        let expected_start_ms = 1_787_068_800_000; // 2026-08-19 00:00:00 +08:00
+
+        assert_eq!(
+            stats_window("today", now_ms),
+            Some((expected_start_ms, now_ms))
+        );
+    }
+
+    #[test]
+    fn stats_window_today_should_handle_asia_shanghai_date_before_utc_midnight() {
+        let now_ms = 1_787_072_400_000; // 2026-08-19 01:00:00 +08:00
+        let expected_start_ms = 1_787_068_800_000; // 2026-08-19 00:00:00 +08:00
+
+        assert_eq!(
+            stats_window("today", now_ms),
+            Some((expected_start_ms, now_ms))
+        );
+    }
+
+    #[test]
+    fn stats_window_7h_should_use_exact_rolling_window() {
+        let now_ms = 1_787_100_000_000;
+
+        assert_eq!(
+            stats_window("7h", now_ms),
+            Some((now_ms - 7 * MILLIS_PER_HOUR, now_ms))
+        );
+    }
 }

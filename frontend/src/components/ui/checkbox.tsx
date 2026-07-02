@@ -21,11 +21,13 @@ export function Checkbox(props: CheckboxProps) {
     'required',
     'value',
   ]);
+  const isControlled = () => local.checked !== undefined && local.onChange !== undefined;
+  const defaultChecked = () => local.defaultChecked ?? (isControlled() ? undefined : local.checked);
 
   return (
     <ArkCheckbox.Root
-      checked={local.checked}
-      defaultChecked={local.defaultChecked}
+      checked={isControlled() ? local.checked : undefined}
+      defaultChecked={defaultChecked()}
       disabled={local.disabled}
       form={local.form}
       id={local.id}

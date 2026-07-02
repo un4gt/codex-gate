@@ -60,6 +60,9 @@ jobs:
         run: cargo test --locked --manifest-path backend/Cargo.toml
 
       - name: Build Backend
+        env:
+          LITTLE_GATE_VERSION: ${{ github.ref_name }}
+          LITTLE_GATE_COMMIT: ${{ github.sha }}
         run: cargo build --release --locked --manifest-path backend/Cargo.toml
 
       - name: Prepare Package Name

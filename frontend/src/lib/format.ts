@@ -109,6 +109,20 @@ export function parseDecimal(value: string | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function formatVersionLabel(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === 'unknown') return '—';
+  if (trimmed.startsWith('v') || trimmed === 'dev' || trimmed === 'manual') return trimmed;
+  if (/^\d+\.\d+/.test(trimmed)) return `v${trimmed}`;
+  return trimmed;
+}
+
+export function formatCommitShort(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === 'unknown') return '—';
+  return trimmed.slice(0, 7);
+}
+
 export function formatModelName(value: string | null | undefined): string {
   const trimmed = value?.trim();
   return trimmed ? trimmed : t('未识别');

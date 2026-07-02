@@ -24,7 +24,7 @@ import {
   loadSystemConfig,
   previewRuntimeEnv,
 } from '@/lib/api';
-import { formatCompactInteger, formatCost, formatMs, parseDecimal } from '@/lib/format';
+import { formatCommitShort, formatCompactInteger, formatCost, formatMs, formatVersionLabel, parseDecimal } from '@/lib/format';
 import type {
   ApiKeyWorkspace,
   ConnectionSettings,
@@ -182,6 +182,12 @@ function TopShell(props: { data: AppDataContext; children: any }) {
   const [draggingKey, setDraggingKey] = createSignal<NavKey | null>(null);
   const navItems = createMemo(() => navOrder().map((key) => ({ key, ...NAV_ITEMS_BY_KEY[key] })));
   const currentItem = createMemo(() => navItems().find((item) => location.pathname.startsWith(item.to)) ?? NAV_ITEMS_BY_KEY.overview);
+  const serviceVersion = createMemo(() => formatVersionLabel(props.data.systemConfig()?.build?.version));
+  const serviceCommit = createMemo(() => formatCommitShort(props.data.systemConfig()?.build?.commit));
+  const serviceCommitTitle = createMemo(() => {
+    const commit = props.data.systemConfig()?.build?.commit?.trim();
+    return commit && commit !== 'unknown' ? commit : undefined;
+  });
 
   const reorderNav = (target: NavKey) => {
     const source = draggingKey();
@@ -250,6 +256,15 @@ function TopShell(props: { data: AppDataContext; children: any }) {
               <span class="size-2 rounded-full bg-primary" />
             </div>
             <p class="truncate text-xs leading-5 text-muted-foreground">{props.data.message()}</p>
+            <div class="flex items-center justify-between gap-3 border border-border/50 px-3 py-2">
+              <span class="text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('版本')}</span>
+              <span class="truncate font-mono text-xs text-foreground" title={serviceCommitTitle()}>
+                {serviceVersion()}
+                <Show when={serviceCommit() !== '—'}>
+                  <span class="ml-2 text-muted-foreground">{serviceCommit()}</span>
+                </Show>
+              </span>
+            </div>
             <Button
               type="button"
               variant="ghost"

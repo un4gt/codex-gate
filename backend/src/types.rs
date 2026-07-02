@@ -202,6 +202,49 @@ pub struct StatsHourlyRow {
     pub updated_at_ms: i64,
 }
 
+#[derive(Clone, Debug)]
+pub struct StatsEventRow {
+    pub id: String,
+    pub time_ms: i64,
+    pub api_key_id: i64,
+    pub provider_id: Option<i64>,
+    pub endpoint_id: Option<i64>,
+    pub upstream_key_id: Option<i64>,
+    pub api_format: String,
+    pub model: Option<String>,
+    pub http_status: Option<i32>,
+    pub error_type: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_creation_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub usage_observed: bool,
+    pub cost_total_usd: String,
+    pub duration_ms: Option<i64>,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StatsOverviewAggRow {
+    pub request_success: i64,
+    pub request_failed: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_creation_input_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub usage_observed_requests: i64,
+    pub cost_total_usd: String,
+    pub wait_time_ms: i64,
+    pub latency_lt_500ms: i64,
+    pub latency_lt_1000ms: i64,
+    pub latency_lt_2000ms: i64,
+    pub latency_lt_5000ms: i64,
+    pub latency_lt_15000ms: i64,
+    pub latency_gte_15000ms: i64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeSettingRow {
     pub key: String,

@@ -355,6 +355,10 @@ export interface RuntimeEnvPreviewResponse {
 }
 
 export interface SystemConfigResponse {
+  build?: {
+    version: string;
+    commit: string;
+  };
   connection: {
     api_base: string;
     healthz_path: string;

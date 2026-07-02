@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use crate::db::{Database, DbError};
-use crate::types::{RequestLogRow, StatsDailyRow, StatsHourlyRow, Usage};
+use crate::types::{RequestLogRow, StatsDailyRow, StatsEventRow, StatsHourlyRow, Usage};
 use crate::util;
 
 pub const COST_SCALE: u32 = 15;
@@ -206,6 +206,7 @@ struct TelemetryWorker {
     dirty: bool,
 
     log_buffer: Vec<RequestLogRow>,
+    stats_event_buffer: Vec<StatsEventRow>,
 }
 
 impl TelemetryWorker {
@@ -258,6 +259,7 @@ impl TelemetryWorker {
             hourly_stats: HashMap::new(),
             dirty: false,
             log_buffer: Vec::new(),
+            stats_event_buffer: Vec::new(),
         })
     }
 
@@ -370,6 +372,12 @@ impl TelemetryWorker {
             .or_default()
             .add(ok, &event, wait);
 
+        self.stats_event_buffer
+            .push(stats_event_from_event(&event, ok));
+        if self.stats_event_buffer.len() >= self.log_batch_max {
+            self.flush_stats_events().await;
+        }
+
         self.dirty = true;
 
         if event.log_enabled {
@@ -425,6 +433,9 @@ impl TelemetryWorker {
         }
         if !self.log_buffer.is_empty() {
             self.flush_logs().await;
+        }
+        if !self.stats_event_buffer.is_empty() {
+            self.flush_stats_events().await;
         }
     }
 
@@ -516,6 +527,21 @@ impl TelemetryWorker {
         }
     }
 
+    async fn flush_stats_events(&mut self) {
+        if self.stats_event_buffer.is_empty() {
+            return;
+        }
+
+        let batch = std::mem::take(&mut self.stats_event_buffer);
+        if let Err(e) = self.db.insert_stats_events(&batch).await {
+            error!(
+                "failed to insert stats_events (dropping {} events): {}",
+                batch.len(),
+                e
+            );
+        }
+    }
+
     async fn maybe_run_retention(&mut self) {
         if !self.retention.enabled() {
             return;
@@ -535,6 +561,7 @@ impl TelemetryWorker {
 
         let batch = self.retention.delete_batch as i64;
         let mut deleted_request_logs = 0_u64;
+        let mut deleted_stats_events = 0_u64;
         let mut archived_request_logs = 0_u64;
         let mut deleted_stats_daily = 0_u64;
 
@@ -542,6 +569,28 @@ impl TelemetryWorker {
             let cutoff_time_ms = now_ms.saturating_sub(
                 (self.retention.request_log_retention_days as i64).saturating_mul(MILLIS_PER_DAY),
             );
+            for _ in 0..RETENTION_MAX_BATCHES_PER_RUN {
+                match self
+                    .db
+                    .delete_stats_events_before(cutoff_time_ms, batch)
+                    .await
+                {
+                    Ok(removed) => {
+                        deleted_stats_events += removed;
+                        if removed < batch as u64 {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "failed to cleanup stats_events before {}: {}",
+                            cutoff_time_ms, e
+                        );
+                        break;
+                    }
+                }
+            }
+
             for _ in 0..RETENTION_MAX_BATCHES_PER_RUN {
                 let rows = match self
                     .db
@@ -637,12 +686,43 @@ impl TelemetryWorker {
             }
         }
 
-        if deleted_request_logs > 0 || deleted_stats_daily > 0 || archived_request_logs > 0 {
+        if deleted_request_logs > 0
+            || deleted_stats_events > 0
+            || deleted_stats_daily > 0
+            || archived_request_logs > 0
+        {
             info!(
-                "retention cleanup archived {} request_logs rows, removed {} request_logs rows and {} stats_daily rows",
-                archived_request_logs, deleted_request_logs, deleted_stats_daily
+                "retention cleanup archived {} request_logs rows, removed {} request_logs rows, {} stats_events rows and {} stats_daily rows",
+                archived_request_logs,
+                deleted_request_logs,
+                deleted_stats_events,
+                deleted_stats_daily
             );
         }
+    }
+}
+
+fn stats_event_from_event(event: &TelemetryEvent, ok: bool) -> StatsEventRow {
+    StatsEventRow {
+        id: util::new_ulid(),
+        time_ms: event.time_ms,
+        api_key_id: event.api_key_id,
+        provider_id: event.provider_id,
+        endpoint_id: event.endpoint_id,
+        upstream_key_id: event.upstream_key_id,
+        api_format: event.api_format.to_string(),
+        model: event.model.clone(),
+        http_status: event.http_status.or(if ok { Some(200) } else { Some(500) }),
+        error_type: event.error_type.clone(),
+        input_tokens: event.usage.input_tokens,
+        output_tokens: event.usage.output_tokens,
+        cache_read_input_tokens: event.usage.cache_read_input_tokens,
+        cache_creation_input_tokens: event.usage.cache_creation_input_tokens,
+        reasoning_output_tokens: event.usage.reasoning_output_tokens,
+        usage_observed: event.usage_observed,
+        cost_total_usd: to_cost_storage(event.cost_in_usd + event.cost_out_usd),
+        duration_ms: event.duration_ms,
+        created_at_ms: util::now_ms(),
     }
 }
 

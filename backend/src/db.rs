@@ -10,8 +10,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool, postgres::Pg
 use crate::crypto;
 use crate::types::{
     ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelPriceData,
-    ModelRoute, ProviderModel, RequestLogRow, RuntimeSettingRow, StatsDailyRow, StatsHourlyRow,
-    UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta, UpstreamKeyModel, UpstreamProvider,
+    ModelRoute, ProviderModel, RequestLogRow, RuntimeSettingRow, StatsDailyRow, StatsEventRow,
+    StatsHourlyRow, StatsOverviewAggRow, UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta,
+    UpstreamKeyModel, UpstreamProvider,
 };
 
 #[derive(Debug)]
@@ -1043,6 +1044,28 @@ RETURNING id
         }
     }
 
+    pub async fn insert_stats_events(&self, rows: &[StatsEventRow]) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => insert_stats_events_sqlite(pool, rows).await,
+            Database::Postgres(pool) => insert_stats_events_postgres(pool, rows).await,
+        }
+    }
+
+    pub async fn aggregate_stats_events_range(
+        &self,
+        time_from_ms: i64,
+        time_to_ms: i64,
+    ) -> Result<StatsOverviewAggRow, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                aggregate_stats_events_range_sqlite(pool, time_from_ms, time_to_ms).await
+            }
+            Database::Postgres(pool) => {
+                aggregate_stats_events_range_postgres(pool, time_from_ms, time_to_ms).await
+            }
+        }
+    }
+
     pub async fn delete_request_logs_before(
         &self,
         cutoff_time_ms: i64,
@@ -1054,6 +1077,21 @@ RETURNING id
             }
             Database::Postgres(pool) => {
                 delete_request_logs_before_postgres(pool, cutoff_time_ms, limit).await
+            }
+        }
+    }
+
+    pub async fn delete_stats_events_before(
+        &self,
+        cutoff_time_ms: i64,
+        limit: i64,
+    ) -> Result<u64, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                delete_stats_events_before_sqlite(pool, cutoff_time_ms, limit).await
+            }
+            Database::Postgres(pool) => {
+                delete_stats_events_before_postgres(pool, cutoff_time_ms, limit).await
             }
         }
     }
@@ -2138,21 +2176,6 @@ WHERE id = $7
         }
     }
 
-    pub async fn list_stats_hourly_range(
-        &self,
-        time_from_ms: i64,
-        time_to_ms: i64,
-    ) -> Result<Vec<StatsHourlyRow>, DbError> {
-        match self {
-            Database::Sqlite(pool) => {
-                list_stats_hourly_range_sqlite(pool, time_from_ms, time_to_ms).await
-            }
-            Database::Postgres(pool) => {
-                list_stats_hourly_range_postgres(pool, time_from_ms, time_to_ms).await
-            }
-        }
-    }
-
     pub async fn list_runtime_settings(&self) -> Result<Vec<RuntimeSettingRow>, DbError> {
         match self {
             Database::Sqlite(pool) => list_runtime_settings_sqlite(pool).await,
@@ -2728,6 +2751,218 @@ INSERT INTO request_logs (
     Ok(())
 }
 
+async fn insert_stats_events_sqlite(
+    pool: &SqlitePool,
+    rows: &[StatsEventRow],
+) -> Result<(), DbError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for r in rows {
+        sqlx::query(
+            r#"
+INSERT INTO stats_events (
+  id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
+  api_format, model, http_status, error_type,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed, cost_total_usd, duration_ms, created_at_ms
+) VALUES (
+  ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?,
+  ?, ?, ?, ?,
+  ?, ?, ?, ?, ?
+)
+"#,
+        )
+        .bind(&r.id)
+        .bind(r.time_ms)
+        .bind(r.api_key_id)
+        .bind(r.provider_id)
+        .bind(r.endpoint_id)
+        .bind(r.upstream_key_id)
+        .bind(&r.api_format)
+        .bind(&r.model)
+        .bind(r.http_status)
+        .bind(&r.error_type)
+        .bind(r.input_tokens)
+        .bind(r.output_tokens)
+        .bind(r.cache_read_input_tokens)
+        .bind(r.cache_creation_input_tokens)
+        .bind(r.reasoning_output_tokens)
+        .bind(if r.usage_observed { 1_i64 } else { 0_i64 })
+        .bind(&r.cost_total_usd)
+        .bind(r.duration_ms)
+        .bind(r.created_at_ms)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn insert_stats_events_postgres(
+    pool: &PgPool,
+    rows: &[StatsEventRow],
+) -> Result<(), DbError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for r in rows {
+        sqlx::query(
+            r#"
+INSERT INTO stats_events (
+  id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
+  api_format, model, http_status, error_type,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed, cost_total_usd, duration_ms, created_at_ms
+) VALUES (
+  $1, $2, $3, $4, $5, $6,
+  $7, $8, $9, $10,
+  $11, $12, $13, $14,
+  $15, $16, $17, $18, $19
+)
+"#,
+        )
+        .bind(&r.id)
+        .bind(r.time_ms)
+        .bind(r.api_key_id)
+        .bind(r.provider_id)
+        .bind(r.endpoint_id)
+        .bind(r.upstream_key_id)
+        .bind(&r.api_format)
+        .bind(&r.model)
+        .bind(r.http_status)
+        .bind(&r.error_type)
+        .bind(r.input_tokens)
+        .bind(r.output_tokens)
+        .bind(r.cache_read_input_tokens)
+        .bind(r.cache_creation_input_tokens)
+        .bind(r.reasoning_output_tokens)
+        .bind(r.usage_observed)
+        .bind(&r.cost_total_usd)
+        .bind(r.duration_ms)
+        .bind(r.created_at_ms)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+fn row_to_stats_overview_agg_sqlite(row: sqlx::sqlite::SqliteRow) -> StatsOverviewAggRow {
+    StatsOverviewAggRow {
+        request_success: row.get::<i64, _>("request_success"),
+        request_failed: row.get::<i64, _>("request_failed"),
+        input_tokens: row.get::<i64, _>("input_tokens"),
+        output_tokens: row.get::<i64, _>("output_tokens"),
+        cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
+        cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
+        reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
+        usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
+        cost_total_usd: row.get::<String, _>("cost_total_usd"),
+        wait_time_ms: row.get::<i64, _>("wait_time_ms"),
+        latency_lt_500ms: row.get::<i64, _>("latency_lt_500ms"),
+        latency_lt_1000ms: row.get::<i64, _>("latency_lt_1000ms"),
+        latency_lt_2000ms: row.get::<i64, _>("latency_lt_2000ms"),
+        latency_lt_5000ms: row.get::<i64, _>("latency_lt_5000ms"),
+        latency_lt_15000ms: row.get::<i64, _>("latency_lt_15000ms"),
+        latency_gte_15000ms: row.get::<i64, _>("latency_gte_15000ms"),
+    }
+}
+
+fn row_to_stats_overview_agg_postgres(row: sqlx::postgres::PgRow) -> StatsOverviewAggRow {
+    StatsOverviewAggRow {
+        request_success: row.get::<i64, _>("request_success"),
+        request_failed: row.get::<i64, _>("request_failed"),
+        input_tokens: row.get::<i64, _>("input_tokens"),
+        output_tokens: row.get::<i64, _>("output_tokens"),
+        cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
+        cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
+        reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
+        usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
+        cost_total_usd: row.get::<String, _>("cost_total_usd"),
+        wait_time_ms: row.get::<i64, _>("wait_time_ms"),
+        latency_lt_500ms: row.get::<i64, _>("latency_lt_500ms"),
+        latency_lt_1000ms: row.get::<i64, _>("latency_lt_1000ms"),
+        latency_lt_2000ms: row.get::<i64, _>("latency_lt_2000ms"),
+        latency_lt_5000ms: row.get::<i64, _>("latency_lt_5000ms"),
+        latency_lt_15000ms: row.get::<i64, _>("latency_lt_15000ms"),
+        latency_gte_15000ms: row.get::<i64, _>("latency_gte_15000ms"),
+    }
+}
+
+async fn aggregate_stats_events_range_sqlite(
+    pool: &SqlitePool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<StatsOverviewAggRow, DbError> {
+    let row = sqlx::query(
+        r#"
+SELECT
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) < 400 AND error_type IS NULL THEN 1 ELSE 0 END), 0) AS request_success,
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) >= 400 OR error_type IS NOT NULL THEN 1 ELSE 0 END), 0) AS request_failed,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+  COALESCE(SUM(reasoning_output_tokens), 0) AS reasoning_output_tokens,
+  COALESCE(SUM(CASE WHEN usage_observed != 0 THEN 1 ELSE 0 END), 0) AS usage_observed_requests,
+  CAST(COALESCE(SUM(CAST(cost_total_usd AS REAL)), 0) AS TEXT) AS cost_total_usd,
+  COALESCE(SUM(COALESCE(duration_ms, 0)), 0) AS wait_time_ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) < 500 THEN 1 ELSE 0 END), 0) AS latency_lt_500ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 500 AND COALESCE(duration_ms, 0) < 1000 THEN 1 ELSE 0 END), 0) AS latency_lt_1000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 1000 AND COALESCE(duration_ms, 0) < 2000 THEN 1 ELSE 0 END), 0) AS latency_lt_2000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 2000 AND COALESCE(duration_ms, 0) < 5000 THEN 1 ELSE 0 END), 0) AS latency_lt_5000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 5000 AND COALESCE(duration_ms, 0) < 15000 THEN 1 ELSE 0 END), 0) AS latency_lt_15000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 15000 THEN 1 ELSE 0 END), 0) AS latency_gte_15000ms
+FROM stats_events
+WHERE time_ms >= ? AND time_ms <= ?
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .fetch_one(pool)
+    .await?;
+    Ok(row_to_stats_overview_agg_sqlite(row))
+}
+
+async fn aggregate_stats_events_range_postgres(
+    pool: &PgPool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<StatsOverviewAggRow, DbError> {
+    let row = sqlx::query(
+        r#"
+SELECT
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) < 400 AND error_type IS NULL THEN 1 ELSE 0 END), 0)::BIGINT AS request_success,
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) >= 400 OR error_type IS NOT NULL THEN 1 ELSE 0 END), 0)::BIGINT AS request_failed,
+  COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0)::BIGINT AS cache_read_input_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens,
+  COALESCE(SUM(reasoning_output_tokens), 0)::BIGINT AS reasoning_output_tokens,
+  COALESCE(SUM(CASE WHEN usage_observed THEN 1 ELSE 0 END), 0)::BIGINT AS usage_observed_requests,
+  COALESCE(SUM(cost_total_usd::DOUBLE PRECISION), 0)::TEXT AS cost_total_usd,
+  COALESCE(SUM(COALESCE(duration_ms, 0)), 0)::BIGINT AS wait_time_ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) < 500 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_500ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 500 AND COALESCE(duration_ms, 0) < 1000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_1000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 1000 AND COALESCE(duration_ms, 0) < 2000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_2000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 2000 AND COALESCE(duration_ms, 0) < 5000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_5000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 5000 AND COALESCE(duration_ms, 0) < 15000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_15000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 15000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_gte_15000ms
+FROM stats_events
+WHERE time_ms >= $1 AND time_ms <= $2
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .fetch_one(pool)
+    .await?;
+    Ok(row_to_stats_overview_agg_postgres(row))
+}
+
 async fn list_request_logs_before_sqlite(
     pool: &SqlitePool,
     cutoff_time_ms: i64,
@@ -2779,6 +3014,29 @@ async fn delete_request_logs_before_sqlite(
     Ok(result.rows_affected())
 }
 
+async fn delete_stats_events_before_sqlite(
+    pool: &SqlitePool,
+    cutoff_time_ms: i64,
+    limit: i64,
+) -> Result<u64, DbError> {
+    let result = sqlx::query(
+        r#"
+DELETE FROM stats_events
+WHERE id IN (
+  SELECT id FROM stats_events
+  WHERE time_ms < ?
+  ORDER BY time_ms ASC, id ASC
+  LIMIT ?
+)
+"#,
+    )
+    .bind(cutoff_time_ms)
+    .bind(limit.max(1))
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 async fn list_request_logs_before_postgres(
     pool: &PgPool,
     cutoff_time_ms: i64,
@@ -2822,6 +3080,29 @@ async fn delete_request_logs_before_postgres(
 	  LIMIT $2
 	)
 	"#,
+    )
+    .bind(cutoff_time_ms)
+    .bind(limit.max(1))
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+async fn delete_stats_events_before_postgres(
+    pool: &PgPool,
+    cutoff_time_ms: i64,
+    limit: i64,
+) -> Result<u64, DbError> {
+    let result = sqlx::query(
+        r#"
+DELETE FROM stats_events
+WHERE id IN (
+  SELECT id FROM stats_events
+  WHERE time_ms < $1
+  ORDER BY time_ms ASC, id ASC
+  LIMIT $2
+)
+"#,
     )
     .bind(cutoff_time_ms)
     .bind(limit.max(1))
@@ -3533,120 +3814,6 @@ ORDER BY alias_id ASC, priority ASC, id ASC
         .collect())
 }
 
-fn row_to_stats_hourly_sqlite(row: sqlx::sqlite::SqliteRow) -> StatsHourlyRow {
-    StatsHourlyRow {
-        bucket_ms: row.get::<i64, _>("bucket_ms"),
-        api_key_id: row.get::<i64, _>("api_key_id"),
-        provider_id: row.get::<i64, _>("provider_id"),
-        endpoint_id: row.get::<i64, _>("endpoint_id"),
-        upstream_key_id: row.get::<i64, _>("upstream_key_id"),
-        api_format: row.get::<String, _>("api_format"),
-        model: row.get::<String, _>("model"),
-        request_success: row.get::<i64, _>("request_success"),
-        request_failed: row.get::<i64, _>("request_failed"),
-        input_tokens: row.get::<i64, _>("input_tokens"),
-        output_tokens: row.get::<i64, _>("output_tokens"),
-        cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
-        cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
-        reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
-        usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
-        cost_in_usd: row.get::<String, _>("cost_in_usd"),
-        cost_out_usd: row.get::<String, _>("cost_out_usd"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
-        wait_time_ms: row.get::<i64, _>("wait_time_ms"),
-        latency_lt_500ms: row.get::<i64, _>("latency_lt_500ms"),
-        latency_lt_1000ms: row.get::<i64, _>("latency_lt_1000ms"),
-        latency_lt_2000ms: row.get::<i64, _>("latency_lt_2000ms"),
-        latency_lt_5000ms: row.get::<i64, _>("latency_lt_5000ms"),
-        latency_lt_15000ms: row.get::<i64, _>("latency_lt_15000ms"),
-        latency_gte_15000ms: row.get::<i64, _>("latency_gte_15000ms"),
-        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
-    }
-}
-
-fn row_to_stats_hourly_postgres(row: sqlx::postgres::PgRow) -> StatsHourlyRow {
-    StatsHourlyRow {
-        bucket_ms: row.get::<i64, _>("bucket_ms"),
-        api_key_id: row.get::<i64, _>("api_key_id"),
-        provider_id: row.get::<i64, _>("provider_id"),
-        endpoint_id: row.get::<i64, _>("endpoint_id"),
-        upstream_key_id: row.get::<i64, _>("upstream_key_id"),
-        api_format: row.get::<String, _>("api_format"),
-        model: row.get::<String, _>("model"),
-        request_success: row.get::<i64, _>("request_success"),
-        request_failed: row.get::<i64, _>("request_failed"),
-        input_tokens: row.get::<i64, _>("input_tokens"),
-        output_tokens: row.get::<i64, _>("output_tokens"),
-        cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
-        cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
-        reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
-        usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
-        cost_in_usd: row.get::<String, _>("cost_in_usd"),
-        cost_out_usd: row.get::<String, _>("cost_out_usd"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
-        wait_time_ms: row.get::<i64, _>("wait_time_ms"),
-        latency_lt_500ms: row.get::<i64, _>("latency_lt_500ms"),
-        latency_lt_1000ms: row.get::<i64, _>("latency_lt_1000ms"),
-        latency_lt_2000ms: row.get::<i64, _>("latency_lt_2000ms"),
-        latency_lt_5000ms: row.get::<i64, _>("latency_lt_5000ms"),
-        latency_lt_15000ms: row.get::<i64, _>("latency_lt_15000ms"),
-        latency_gte_15000ms: row.get::<i64, _>("latency_gte_15000ms"),
-        updated_at_ms: row.get::<i64, _>("updated_at_ms"),
-    }
-}
-
-async fn list_stats_hourly_range_sqlite(
-    pool: &SqlitePool,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<Vec<StatsHourlyRow>, DbError> {
-    let rows = sqlx::query(STATS_HOURLY_SELECT_SQLITE)
-        .bind(time_from_ms)
-        .bind(time_to_ms)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().map(row_to_stats_hourly_sqlite).collect())
-}
-
-async fn list_stats_hourly_range_postgres(
-    pool: &PgPool,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<Vec<StatsHourlyRow>, DbError> {
-    let rows = sqlx::query(STATS_HOURLY_SELECT_POSTGRES)
-        .bind(time_from_ms)
-        .bind(time_to_ms)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().map(row_to_stats_hourly_postgres).collect())
-}
-
-const STATS_HOURLY_SELECT_SQLITE: &str = r#"
-SELECT bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model,
-       request_success, request_failed,
-       input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-       reasoning_output_tokens, usage_observed_requests,
-       cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms,
-       latency_lt_500ms, latency_lt_1000ms, latency_lt_2000ms, latency_lt_5000ms,
-       latency_lt_15000ms, latency_gte_15000ms, updated_at_ms
-FROM stats_hourly
-WHERE bucket_ms >= ? AND bucket_ms <= ?
-ORDER BY bucket_ms ASC
-"#;
-
-const STATS_HOURLY_SELECT_POSTGRES: &str = r#"
-SELECT bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model,
-       request_success, request_failed,
-       input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-       reasoning_output_tokens, usage_observed_requests,
-       cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms,
-       latency_lt_500ms, latency_lt_1000ms, latency_lt_2000ms, latency_lt_5000ms,
-       latency_lt_15000ms, latency_gte_15000ms, updated_at_ms
-FROM stats_hourly
-WHERE bucket_ms >= $1 AND bucket_ms <= $2
-ORDER BY bucket_ms ASC
-"#;
-
 async fn upsert_stats_hourly_sqlite(
     pool: &SqlitePool,
     rows: &[StatsHourlyRow],
@@ -4151,6 +4318,35 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS stats_events (
+  id TEXT PRIMARY KEY,
+  time_ms INTEGER NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  provider_id INTEGER,
+  endpoint_id INTEGER,
+  upstream_key_id INTEGER,
+  api_format TEXT NOT NULL,
+  model TEXT,
+  http_status INTEGER,
+  error_type TEXT,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL,
+  cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  usage_observed INTEGER NOT NULL DEFAULT 0,
+  cost_total_usd TEXT NOT NULL,
+  duration_ms INTEGER,
+  created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
     ensure_sqlite_token_usage_columns(pool).await?;
     ensure_sqlite_upstream_providers_websocket_enabled(pool).await?;
     ensure_sqlite_upstream_providers_key_selection_strategy(pool).await?;
@@ -4463,6 +4659,35 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS stats_events (
+  id TEXT PRIMARY KEY,
+  time_ms BIGINT NOT NULL,
+  api_key_id BIGINT NOT NULL,
+  provider_id BIGINT,
+  endpoint_id BIGINT,
+  upstream_key_id BIGINT,
+  api_format TEXT NOT NULL,
+  model TEXT,
+  http_status INTEGER,
+  error_type TEXT,
+  input_tokens BIGINT NOT NULL,
+  output_tokens BIGINT NOT NULL,
+  cache_read_input_tokens BIGINT NOT NULL,
+  cache_creation_input_tokens BIGINT NOT NULL,
+  reasoning_output_tokens BIGINT NOT NULL DEFAULT 0,
+  usage_observed BOOLEAN NOT NULL DEFAULT FALSE,
+  cost_total_usd TEXT NOT NULL,
+  duration_ms BIGINT,
+  created_at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
     ensure_postgres_token_usage_columns(pool).await?;
     ensure_postgres_upstream_providers_websocket_enabled(pool).await?;
     ensure_postgres_upstream_providers_key_selection_strategy(pool).await?;
@@ -4743,6 +4968,30 @@ mod tests {
         db
     }
 
+    fn stats_event(id: &str, time_ms: i64, http_status: Option<i32>) -> StatsEventRow {
+        StatsEventRow {
+            id: id.to_string(),
+            time_ms,
+            api_key_id: 1,
+            provider_id: Some(2),
+            endpoint_id: Some(3),
+            upstream_key_id: Some(4),
+            api_format: "chat_completions".to_string(),
+            model: Some("model-a".to_string()),
+            http_status,
+            error_type: None,
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 5,
+            reasoning_output_tokens: 1,
+            usage_observed: true,
+            cost_total_usd: "1.250000000000000".to_string(),
+            duration_ms: Some(750),
+            created_at_ms: time_ms,
+        }
+    }
+
     #[tokio::test]
     async fn migrate_sqlite_should_add_token_usage_columns_idempotently_with_defaults() {
         let db = sqlite_memory_db().await;
@@ -4822,6 +5071,35 @@ INSERT INTO stats_daily (
         .expect("select stats defaults");
         assert_eq!(stats_row.get::<i64, _>("reasoning_output_tokens"), 0);
         assert_eq!(stats_row.get::<i64, _>("usage_observed_requests"), 0);
+    }
+
+    #[tokio::test]
+    async fn aggregate_stats_events_range_should_include_only_exact_window_boundaries() {
+        let db = sqlite_memory_db().await;
+        db.insert_stats_events(&[
+            stats_event("before", 999, Some(200)),
+            stats_event("from", 1_000, Some(200)),
+            stats_event("to", 2_000, Some(500)),
+            stats_event("after", 2_001, Some(200)),
+        ])
+        .await
+        .expect("insert stats events");
+
+        let agg = db
+            .aggregate_stats_events_range(1_000, 2_000)
+            .await
+            .expect("aggregate stats events");
+
+        assert_eq!(agg.request_success, 1);
+        assert_eq!(agg.request_failed, 1);
+        assert_eq!(agg.input_tokens, 20);
+        assert_eq!(agg.output_tokens, 4);
+        assert_eq!(agg.cache_read_input_tokens, 6);
+        assert_eq!(agg.cache_creation_input_tokens, 10);
+        assert_eq!(agg.reasoning_output_tokens, 2);
+        assert_eq!(agg.usage_observed_requests, 2);
+        assert_eq!(agg.wait_time_ms, 1_500);
+        assert_eq!(agg.latency_lt_1000ms, 2);
     }
 }
 
