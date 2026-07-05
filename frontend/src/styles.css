@@ -138,11 +138,11 @@
 
 @layer components {
   .app-shell {
-    @apply flex min-h-dvh w-full flex-col bg-background lg:flex-row;
+    @apply flex min-h-dvh w-full flex-col bg-background lg:flex-row lg:items-start;
   }
 
   .app-sidebar {
-    @apply flex w-full shrink-0 flex-col border-r border-border bg-sidebar px-4 py-7 lg:min-h-dvh lg:w-[264px] xl:w-[272px];
+    @apply flex w-full shrink-0 flex-col border-r border-border bg-sidebar px-4 py-7 lg:sticky lg:top-0 lg:h-dvh lg:max-h-dvh lg:w-[264px] lg:overflow-hidden xl:w-[272px];
   }
 
   .app-main {

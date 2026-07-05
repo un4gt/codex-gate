@@ -13,6 +13,7 @@ mod proxy;
 mod runtime_settings;
 mod selector;
 mod state;
+mod system_status;
 mod telemetry;
 mod types;
 mod upstream;
@@ -253,6 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let key_rotation = Arc::new(key_rotation::KeyRotationBook::new());
 
     let metrics = Arc::new(metrics::Metrics::new());
+    let system_status = system_status::SystemStatusMonitor::new();
     let runtime_settings = runtime_settings::RuntimeSettings::load(&config, &db)
         .await
         .map_err(|e| format!("runtime settings: {e}"))?;
@@ -267,6 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         upstream_key_health,
         key_rotation,
         metrics,
+        system_status,
         runtime_settings,
     });
 

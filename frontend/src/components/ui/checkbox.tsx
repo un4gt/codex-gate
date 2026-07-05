@@ -23,6 +23,13 @@ export function Checkbox(props: CheckboxProps) {
   ]);
   const isControlled = () => local.checked !== undefined && local.onChange !== undefined;
   const defaultChecked = () => local.defaultChecked ?? (isControlled() ? undefined : local.checked);
+  const clickHiddenInput = (event: MouseEvent & { currentTarget: HTMLSpanElement }) => {
+    if (local.disabled || local.readOnly) return;
+    if (event.target instanceof HTMLInputElement) return;
+
+    event.preventDefault();
+    event.currentTarget.querySelector<HTMLInputElement>('input[type="checkbox"]')?.click();
+  };
 
   return (
     <ArkCheckbox.Root
@@ -36,7 +43,10 @@ export function Checkbox(props: CheckboxProps) {
       required={local.required}
       value={local.value === undefined ? undefined : String(local.value)}
       asChild={(arkProps) => (
-        <span class="inline-flex items-center align-middle" {...arkProps({})}>
+        <span
+          class="inline-flex cursor-pointer items-center align-middle data-[disabled]:cursor-not-allowed"
+          {...arkProps({ onClick: clickHiddenInput })}
+        >
           <ArkCheckbox.Control
             class={cn(
               'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-none border border-primary text-primary-foreground transition-colors data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 data-[focus-visible]:outline-none data-[focus-visible]:ring-1 data-[focus-visible]:ring-ring data-[state=checked]:bg-primary data-[state=checked]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:border-primary',

@@ -2248,6 +2248,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             crate::health::CircuitState::Open => error += 1,
         }
     }
+    let server_status = state.system_status.snapshot();
 
     let payload = serde_json::json!({
         "period": period,
@@ -2268,6 +2269,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             "warning": warning,
             "error": error
         },
+        "server_status": server_status,
         "token_usage": {
             "total_tokens": total_tokens,
             "input_tokens": agg.input_tokens,

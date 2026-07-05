@@ -1,61 +1,37 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`backend/` contains the Rust gateway service; core modules live in `backend/src/`. `frontend/` is a SolidJS dashboard built with Vite; page components are in `frontend/src/components/`, shared helpers are in `frontend/src/lib/`, and UI primitives live in `frontend/src/components/ui/`. SQLite files and archived logs live under `data/`. Validation helpers live in `scripts/`. Treat `backend/target/`, `frontend/dist/`, and `frontend/node_modules/` as generated output.
+
+`little-gate` is an OpenAI-compatible gateway with a Rust backend and Solid/Vite admin console. Backend source lives in `backend/src/`, with cache code in `backend/src/cache/` and colocated tests behind `#[cfg(test)]`. Frontend source lives in `frontend/src/`: UI primitives in `components/ui/`, console widgets in `components/console/`, helpers in `lib/`, and translations in `i18n/`. Operational material lives in `scripts/`, `deploy/`, `docs/`, `Dockerfile`, and `docker-compose.yml`. Treat `backend/target/`, `frontend/dist/`, `frontend/node_modules/`, and local `data/` as generated.
 
 ## Build, Test, and Development Commands
-`docker compose up -d --build` builds and starts the full stack with the root `.env`.
-`cargo build --manifest-path backend/Cargo.toml` builds the backend binary.
-`cargo run --manifest-path backend/Cargo.toml` runs the API; set `ADMIN_TOKEN` first.
-`npm --prefix frontend run dev` starts the dashboard on port `4173`.
-`npm --prefix frontend run build` type-checks and produces the frontend bundle.
-`python3 scripts/mock_upstream.py` starts a local upstream simulator for failover and auth scenarios.
-`python3 scripts/run_regression.py --archive-compress` runs the main local regression pipeline.
+
+- `npm --prefix frontend ci`: install frontend dependencies.
+- `npm --prefix frontend run dev`: start Vite on port `4173`.
+- `npm --prefix frontend run build`: type-check and bundle the console.
+- `cargo build --manifest-path backend/Cargo.toml --locked`: build the backend.
+- `cargo test --manifest-path backend/Cargo.toml --locked`: run Rust tests.
+- `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`: check formatting.
+- `cargo clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings`: run lints.
+- `python3 scripts/run_regression.py --archive-compress`: run routing/archive regressions.
+- `cp .env.example .env` then `docker compose up -d --build`: run the stack locally.
 
 ## Coding Style & Naming Conventions
-Follow the existing style in each subproject: Rust uses 4-space indentation, snake_case modules, and small single-purpose files; run `cargo fmt` before committing and `cargo clippy --manifest-path backend/Cargo.toml` for lint checks. Frontend code uses TypeScript with Solid components in PascalCase (`ProvidersPage.tsx`), utilities in camelCase, and the `@/` alias for `frontend/src`. Keep new files close to the feature they support.
 
-## User-Facing Copy Rules
-Frontend UI copy must be written for end users and operators, not for developers.
-
-- Do not expose implementation details in UI text, including env var names, internal token/header names, raw API paths, protocol fallbacks, preview/mock/demo behavior, or internal routing/cache terminology unless the user must act on it directly.
-- Prefer concise Chinese wording such as “服务地址”、“管理员口令”、“访问密钥”、“节点”、“同步模型”. Keep labels and helper text short.
-- Explanations about architecture, constraints, fallback behavior, or debugging belong in code comments, docs, logs, or `_doc/`, not in the normal UI.
-- Before shipping frontend changes, scan newly added user-facing strings and remove developer-oriented wording.
+Rust uses edition 2024 and `rustfmt`. Prefer `Result` for fallible paths, avoid `unwrap()`/`expect()` outside tests, and use `snake_case` for modules/functions, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Frontend code uses TypeScript, Solid, Tailwind CSS, and the `@/` alias. Name components `PascalCase.tsx`, utilities `lowerCamelCase`, and keep UI copy concise and operator-focused.
 
 ## Testing Guidelines
-There is no large committed unit-test suite yet, so rely on focused validation. Run `cargo test --manifest-path backend/Cargo.toml` when adding backend logic, `npm --prefix frontend run build` for frontend smoke coverage, and the Python regression scripts for routing and failover behavior. Name new Rust tests after the behavior they prove, and keep fixtures in `data/tmp/` or temporary SQLite files instead of committed production data.
+
+Add backend tests near the code they exercise with clear names such as `rejects_empty_admin_token`. Run `cargo test --manifest-path backend/Cargo.toml --locked` before backend PRs. There is no dedicated frontend test runner; use `npm --prefix frontend run build` for frontend validation. Use Python regression scripts for routing, failover, and archive behavior.
 
 ## Commit & Pull Request Guidelines
-Git history currently starts with a single `Initial commit`, so there is no strict house style to copy. Use short imperative commit subjects, keep each commit to one logical change, and mention the area touched when helpful, for example `backend: tighten request log retention`. Pull requests should explain the effect, list the commands you ran, note any env or schema changes, and include screenshots for dashboard changes.
+
+Recent history follows Conventional Commits: `feat(stats): ...`, `fix(proxy): ...`, `chore(repo): ...`, and `feat!:` for breaking changes. Keep each commit focused. Pull requests should include a summary, linked issue when applicable, validation commands, env or schema changes, and screenshots for visible frontend work.
 
 ## Security & Configuration Tips
-Copy `.env.example` to `.env` for local or Docker work. Always set `ADMIN_TOKEN`, prefer a separate `MASTER_KEY`, and do not commit populated `.env` files or live SQLite data. If you change archive behavior, double-check `REQUEST_LOG_ARCHIVE_DIR` and retention settings so tests do not write outside `data/`.
 
-## Active Product Decisions (Upstream Management, 2026-04-13)
-These decisions are confirmed and should be treated as implementation constraints for the current upstream-management iteration.
+Use `.env.example` as the configuration template. Never commit real `ADMIN_TOKEN`, `MASTER_KEY`, provider keys, database files, or archived request logs. Document new environment variables in `.env.example` and deployment docs.
 
-- Keep upstream type as a fixed dropdown (`provider_type`) with exactly:
-  - `openai` (OpenAI)
-  - `openai_compatible` (OpenAI Compatible)
-  - `openai_compatible_responses` (OpenAI Compatible (Responses))
-- Enforce strict backend validation for `provider_type` (reject unknown values).
-- Add/configure these core fields in the new-upstream flow: API key, Base URL, websocket transport toggle.
-- Websocket transport policy:
-  - Control granularity is **provider-level**.
-  - If websocket transport fails, automatically fallback to normal HTTP transport.
-- New-upstream UX:
-  - Keep creation form minimal.
-  - After creation, continue model operations in provider detail (not in the creation drawer).
-- OAuth upstream type has been removed from the current iteration.
-- `openai_compatible_responses` behavior:
-  - Keep responses-only routing semantics.
-  - Also isolate model-list/sync behavior accordingly (do not treat it as a generic chat-completions upstream).
-- Model management requirements remain: sync from `/v1/models`, rename(alias), enable/disable, delete.
-- Product principle: stay minimal and controllable; avoid feature bloat unrelated to upstream management.
+## Agent-Specific Instructions
 
-### Reference Projects
-- https://github.com/router-for-me/CLIProxyAPI
-- https://github.com/bestruirui/octopus
-- https://github.com/atopos31/llmio
-- https://github.com/ding113/claude-code-hub
+Spend time on thinking before editing. Inspect structure and history first, keep changes scoped, and do not overwrite user work.

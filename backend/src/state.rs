@@ -7,6 +7,7 @@ use crate::health::{EndpointHealthBook, UpstreamKeyHealthBook};
 use crate::key_rotation::KeyRotationBook;
 use crate::metrics::Metrics;
 use crate::runtime_settings::RuntimeSettings;
+use crate::system_status::SystemStatusMonitor;
 use crate::telemetry::Telemetry;
 use crate::upstream::UpstreamClient;
 
@@ -20,6 +21,7 @@ pub struct AppState {
     pub upstream_key_health: Arc<UpstreamKeyHealthBook>,
     pub key_rotation: Arc<KeyRotationBook>,
     pub metrics: Arc<Metrics>,
+    pub system_status: SystemStatusMonitor,
     pub runtime_settings: RuntimeSettings,
 }
 

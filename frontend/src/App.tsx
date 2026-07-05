@@ -24,7 +24,7 @@ import {
   loadSystemConfig,
   previewRuntimeEnv,
 } from '@/lib/api';
-import { formatCommitShort, formatCompactInteger, formatCost, formatMs, formatVersionLabel, parseDecimal } from '@/lib/format';
+import { formatBytes, formatCommitShort, formatCompactInteger, formatCost, formatMs, formatVersionLabel, parseDecimal } from '@/lib/format';
 import type {
   ApiKeyWorkspace,
   ConnectionSettings,
@@ -176,6 +176,27 @@ function pageDescription(pathname: string) {
   return '';
 }
 
+function formatUsagePercent(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return t('采样中');
+  return `${value.toFixed(value < 10 ? 1 : 0)}%`;
+}
+
+function formatCpuCapacity(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return t('CPU 采样中');
+  return t('{{count}} 核可用', { count: value.toFixed(value < 10 ? 1 : 0) });
+}
+
+function formatServerScope(scope: string | null | undefined, limited: boolean | undefined) {
+  if (scope === 'container') return limited ? t('容器限额') : t('容器采样');
+  if (scope === 'cgroup') return limited ? t('进程限额') : t('进程采样');
+  return t('主机采样');
+}
+
+function formatServerMemory(status: StatsOverviewResponse['server_status'] | undefined) {
+  if (typeof status?.memory_used_bytes !== 'number' || typeof status.memory_total_bytes !== 'number') return t('等待数据');
+  return `${formatBytes(status.memory_used_bytes)} / ${formatBytes(status.memory_total_bytes)}`;
+}
+
 function TopShell(props: { data: AppDataContext; children: any }) {
   const location = useLocation();
   const [navOrder, setNavOrder] = createSignal<NavKey[]>(readNavOrder());
@@ -210,7 +231,7 @@ function TopShell(props: { data: AppDataContext; children: any }) {
               <p class="text-[0.95rem] font-bold tracking-[0.08em] text-foreground uppercase">LITTLE GATE</p>
             </div>
           </div>
-          <nav class="flex flex-col gap-1" aria-label="Primary">
+          <nav class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1" aria-label="Primary">
             <For each={navItems()}>
               {(item, index) => {
                 const active = () => location.pathname.startsWith(item.to);
@@ -442,6 +463,7 @@ function OverviewPage(props: { data: AppDataContext }) {
 
   const periodLabel = createMemo(() => OVERVIEW_PERIODS.find((item) => item.value === period())?.label ?? '今天');
   const tokenUsage = createMemo(() => overview()?.token_usage);
+  const serverStatus = createMemo(() => overview()?.server_status);
   const apiKeyCount = createMemo(() => props.data.apiKeys().length);
   const enabledApiKeyCount = createMemo(() => props.data.apiKeys().filter((item) => item.apiKey.enabled).length);
   const cacheTokens = createMemo(() => (tokenUsage()?.cache_read_input_tokens ?? 0) + (tokenUsage()?.cache_creation_input_tokens ?? 0));
@@ -563,7 +585,7 @@ function OverviewPage(props: { data: AppDataContext }) {
               </StatusBadge>
             </div>
           </CardHeader>
-          <CardContent class="grid gap-4 md:grid-cols-2">
+          <CardContent class="grid gap-4 md:grid-cols-3">
             <div class="border-l-2 border-primary/20 pl-4 py-1">
               <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">上游健康</div>
               <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
@@ -587,7 +609,24 @@ function OverviewPage(props: { data: AppDataContext }) {
               </div>
               <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('当前可用密钥。')}</p>
             </div>
-            <div class="md:col-span-2 pt-2">
+            <div class="border-l-2 border-primary/20 pl-4 py-1">
+              <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('服务器状态')}</div>
+              <div class="mt-2 grid grid-cols-2 gap-3">
+                <div>
+                  <div class="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">CPU</div>
+                  <div class="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.cpu_usage_percent)}</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">{t('内存')}</div>
+                  <div class="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.memory_usage_percent)}</div>
+                </div>
+              </div>
+              <p class="mt-2 text-xs leading-5 text-muted-foreground opacity-80">
+                {`${formatServerMemory(serverStatus())} · ${formatServerScope(serverStatus()?.scope, serverStatus()?.memory_limited)}`}
+              </p>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-70">{formatCpuCapacity(serverStatus()?.cpu_capacity_cores)}</p>
+            </div>
+            <div class="md:col-span-3 pt-2">
               <A href="/upstreams">
                 <Button type="button" variant="ghost" class="w-full justify-start pl-0 hover:bg-transparent hover:text-primary shrink-0">
                   {`[ ${t('查看上游详情')} ]`}

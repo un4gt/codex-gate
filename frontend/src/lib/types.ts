@@ -423,6 +423,16 @@ export interface StatsOverviewResponse {
     warning: number;
     error: number;
   };
+  server_status?: {
+    scope: 'container' | 'cgroup' | 'host' | string;
+    cpu_usage_percent: number | null;
+    cpu_capacity_cores: number;
+    cpu_sample_ms: number | null;
+    memory_used_bytes: number | null;
+    memory_total_bytes: number | null;
+    memory_usage_percent: number | null;
+    memory_limited: boolean;
+  };
   token_usage: {
     total_tokens: number;
     input_tokens: number;
