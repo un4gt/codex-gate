@@ -121,6 +121,12 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: 'openai_compatible_responses', label: 'OpenAI Compatible (Responses)', description: '仅用于响应式接口的兼容服务' },
 ] as const;
 
+const BETA_FEATURE_RESPONSES_HTTP_TO_WS = 'responses-http-to-ws';
+
+function providerHasBetaFeature(item: ProviderWorkspace, feature: string) {
+  return item.provider.beta_features?.includes(feature) ?? false;
+}
+
 export function ProvidersPage(props: ProvidersPageProps) {
   const [busy, setBusy] = createSignal<string | null>(null);
   const [createOpen, setCreateOpen] = createSignal(false);
@@ -253,6 +259,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       weight: 1,
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'websocket_enabled'),
+      beta_features: readBool(formData, 'responses_http_to_ws') ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS] : [],
       key_selection_strategy: 'round_robin',
     };
     setCreateSubmitError(null);
@@ -334,6 +341,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       weight: item.provider.weight,
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'provider_websocket_enabled'),
+      beta_features: readBool(formData, 'provider_responses_http_to_ws') ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS] : [],
       key_selection_strategy: item.provider.key_selection_strategy || 'round_robin',
     };
 
@@ -1316,7 +1324,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
               </div>
             </Field>
           </FieldGroup>
-          <div class="grid gap-4 md:grid-cols-3">
+          <div class="grid gap-4 md:grid-cols-4">
             <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
               <Checkbox name="enabled" checked />
               <span>{t('创建后启用')}</span>
@@ -1328,6 +1336,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
             <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
               <Checkbox name="websocket_enabled" />
               <span>{t('WebSocket')}</span>
+            </label>
+            <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
+              <Checkbox name="responses_http_to_ws" />
+              <span>{t('HTTP→WS Beta')}</span>
             </label>
           </div>
           <div class="border border-border/40 bg-transparent p-4 text-sm text-muted-foreground font-mono">
@@ -1414,7 +1426,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <FieldDescription>{providerTypeDescription(providerTypeDraft() || item.provider.provider_type)}</FieldDescription>
                     </Field>
                   </FieldGroup>
-                  <div class="grid gap-4 md:grid-cols-3">
+                  <div class="grid gap-4 md:grid-cols-4">
                     <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
                       <Checkbox name="provider_enabled" checked={item.provider.enabled} />
                       <span>{t('启用上游')}</span>
@@ -1426,6 +1438,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
                       <Checkbox name="provider_websocket_enabled" checked={item.provider.websocket_enabled} />
                       <span>{t('启用 WebSocket 传输')}</span>
+                    </label>
+                    <label class="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors">
+                      <Checkbox name="provider_responses_http_to_ws" checked={providerHasBetaFeature(item, BETA_FEATURE_RESPONSES_HTTP_TO_WS)} />
+                      <span>{t('HTTP→WS Beta')}</span>
                     </label>
                   </div>
                   <div class="flex justify-end pt-4 border-t border-border/40 mt-2">

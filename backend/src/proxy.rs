@@ -34,6 +34,9 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     let path = req.uri().path();
     match (req.method(), path) {
         (&Method::GET, "/v1/models") => list_models(req, state).await,
+        (&Method::GET, "/v1/responses") if hyper_tungstenite::is_upgrade_request(&req) => {
+            crate::responses_ws::handle(req, state).await
+        }
         (&Method::POST, "/v1/chat/completions") => {
             proxy_openai(ApiFormat::ChatCompletions, req, state).await
         }
@@ -320,6 +323,7 @@ async fn proxy_openai(
         submit_with_permit(
             permit,
             TelemetryEvent {
+                id: None,
                 api_key_id: api_key.id,
                 log_enabled: api_key.log_enabled,
                 provider_id,
@@ -342,6 +346,10 @@ async fn proxy_openai(
                 cost_in_usd: Decimal::ZERO,
                 cost_out_usd: Decimal::ZERO,
                 time_ms: util::now_ms(),
+                span_kind: "request",
+                transport: "http",
+                parent_id: None,
+                ws_session_id: None,
             },
         );
     };
@@ -514,70 +522,20 @@ async fn proxy_openai(
         let headers =
             build_upstream_headers(&request_headers, out_body.len(), &resolved.key.secret);
 
-        let websocket_attempt = resolved.provider.websocket_enabled
-            && info.stream
-            && matches!(api_format, ApiFormat::Responses);
-        let mut ws_attempt_error: Option<UpstreamDispatchError> = None;
-
-        let upstream_response = if websocket_attempt {
-            if let Some(ws_uri) = websocket_uri_from_http_uri(&upstream_uri) {
-                match dispatch_upstream_request(
-                    &state,
-                    &request_method,
-                    request_version,
-                    &headers,
-                    out_body.clone(),
-                    ws_uri,
-                )
-                .await
-                {
-                    Ok(response) => Ok(response),
-                    Err(error) => {
-                        ws_attempt_error = Some(error);
-                        dispatch_upstream_request(
-                            &state,
-                            &request_method,
-                            request_version,
-                            &headers,
-                            out_body,
-                            upstream_uri,
-                        )
-                        .await
-                    }
-                }
-            } else {
-                dispatch_upstream_request(
-                    &state,
-                    &request_method,
-                    request_version,
-                    &headers,
-                    out_body,
-                    upstream_uri,
-                )
-                .await
-            }
-        } else {
-            dispatch_upstream_request(
-                &state,
-                &request_method,
-                request_version,
-                &headers,
-                out_body,
-                upstream_uri,
-            )
-            .await
-        };
+        let upstream_response = dispatch_upstream_request(
+            &state,
+            &request_method,
+            request_version,
+            &headers,
+            out_body,
+            upstream_uri,
+        )
+        .await;
 
         let upstream_resp = match upstream_response {
             Ok(response) => response,
             Err(error) => {
-                let (status, error_type, mut error_message) = dispatch_error_to_http(error, &state);
-                if let Some(ws_error) = ws_attempt_error {
-                    let ws_error_message = dispatch_error_message(&ws_error, &state);
-                    error_message = format!(
-                        "websocket transport failed ({ws_error_message}), fallback http failed ({error_message})",
-                    );
-                }
+                let (status, error_type, error_message) = dispatch_error_to_http(error, &state);
 
                 record_pre_stream_outcome(
                     &state,
@@ -742,12 +700,12 @@ fn rewrite_model_name(body: Bytes, new_model: &str) -> Result<Bytes, String> {
 }
 
 #[derive(Debug)]
-enum UpstreamDispatchError {
+pub(crate) enum UpstreamDispatchError {
     Request(String),
     Timeout,
 }
 
-async fn dispatch_upstream_request(
+pub(crate) async fn dispatch_upstream_request(
     state: &SharedState,
     request_method: &Method,
     request_version: hyper::Version,
@@ -770,7 +728,7 @@ async fn dispatch_upstream_request(
     .map_err(|e| UpstreamDispatchError::Request(e.to_string()))
 }
 
-fn dispatch_error_to_http(
+pub(crate) fn dispatch_error_to_http(
     error: UpstreamDispatchError,
     state: &SharedState,
 ) -> (StatusCode, &'static str, String) {
@@ -787,27 +745,6 @@ fn dispatch_error_to_http(
             ),
         ),
     }
-}
-
-fn dispatch_error_message(error: &UpstreamDispatchError, state: &SharedState) -> String {
-    match error {
-        UpstreamDispatchError::Request(message) => message.clone(),
-        UpstreamDispatchError::Timeout => format!(
-            "upstream request timeout after {:?}",
-            state.config.upstream_request_timeout
-        ),
-    }
-}
-
-fn websocket_uri_from_http_uri(http_uri: &Uri) -> Option<Uri> {
-    let mut parts = http_uri.clone().into_parts();
-    let next_scheme = match parts.scheme.as_ref()?.as_str() {
-        "http" | "ws" => "ws",
-        "https" | "wss" => "wss",
-        _ => return None,
-    };
-    parts.scheme = Some(next_scheme.parse().ok()?);
-    Uri::from_parts(parts).ok()
 }
 
 fn provider_supports_api_format(provider_type: &str, api_format: ApiFormat) -> bool {
@@ -881,12 +818,12 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
 }
 
 #[derive(Clone)]
-struct ResolvedUpstream {
-    upstream_model: String,
-    provider: crate::types::UpstreamProvider,
-    endpoint: crate::types::UpstreamEndpoint,
-    key: crate::types::UpstreamKey,
-    price: Option<ModelPriceData>,
+pub(crate) struct ResolvedUpstream {
+    pub(crate) upstream_model: String,
+    pub(crate) provider: crate::types::UpstreamProvider,
+    pub(crate) endpoint: crate::types::UpstreamEndpoint,
+    pub(crate) key: crate::types::UpstreamKey,
+    pub(crate) price: Option<ModelPriceData>,
 }
 
 #[derive(Default)]
@@ -946,12 +883,12 @@ impl AttemptFailure {
     }
 }
 
-struct UpstreamPlan {
-    runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
-    attempts: Vec<ResolvedUpstream>,
+pub(crate) struct UpstreamPlan {
+    pub(crate) runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
+    pub(crate) attempts: Vec<ResolvedUpstream>,
 }
 
-async fn build_upstream_plan(
+pub(crate) async fn build_upstream_plan(
     state: &SharedState,
     api_format: ApiFormat,
     requested_model: &str,
@@ -1308,7 +1245,11 @@ fn weighted_pick_alias_group(mut group: Vec<&ModelAliasTarget>) -> Vec<&ModelAli
     out
 }
 
-fn reserve_attempt(state: &SharedState, resolved: &ResolvedUpstream, now_ms: i64) -> bool {
+pub(crate) fn reserve_attempt(
+    state: &SharedState,
+    resolved: &ResolvedUpstream,
+    now_ms: i64,
+) -> bool {
     if !state
         .upstream_key_health
         .try_acquire(resolved.key.id, now_ms)
@@ -1351,7 +1292,7 @@ fn should_avoid_key_on_retry(status: Option<i32>, _error_type: Option<&str>) -> 
     matches!(status, Some(401 | 403))
 }
 
-fn record_pre_stream_outcome(
+pub(crate) fn record_pre_stream_outcome(
     state: &SharedState,
     resolved: &ResolvedUpstream,
     status: Option<i32>,
@@ -1376,7 +1317,7 @@ fn record_pre_stream_outcome(
         error_message,
     );
 }
-fn build_upstream_uri(
+pub(crate) fn build_upstream_uri(
     base_url: &str,
     path_and_query: Option<&hyper::http::uri::PathAndQuery>,
 ) -> Result<Uri, String> {
@@ -1398,7 +1339,7 @@ fn build_upstream_uri(
     out.parse::<Uri>().map_err(|e| e.to_string())
 }
 
-fn sanitize_hop_headers(headers: &mut hyper::HeaderMap) {
+pub(crate) fn sanitize_hop_headers(headers: &mut hyper::HeaderMap) {
     headers.remove(CONNECTION);
     headers.remove(TRANSFER_ENCODING);
     headers.remove(UPGRADE);
@@ -1409,7 +1350,7 @@ fn sanitize_hop_headers(headers: &mut hyper::HeaderMap) {
     headers.remove(HOST);
 }
 
-fn build_upstream_headers(
+pub(crate) fn build_upstream_headers(
     request_headers: &HeaderMap,
     body_len: usize,
     upstream_secret: &str,
@@ -1766,6 +1707,7 @@ fn finalize_tap(
     );
 
     let event = TelemetryEvent {
+        id: None,
         api_key_id: cfg.api_key_id,
         log_enabled: cfg.log_enabled,
         provider_id: cfg.provider_id,
@@ -1785,6 +1727,10 @@ fn finalize_tap(
         cost_in_usd: cost_in,
         cost_out_usd: cost_out,
         time_ms: util::now_ms(),
+        span_kind: "request",
+        transport: "http",
+        parent_id: None,
+        ws_session_id: None,
     };
 
     let Some(permit) = telemetry_permit.take() else {
@@ -2146,7 +2092,7 @@ fn parse_chat_usage(v: &Value) -> Option<Usage> {
     })
 }
 
-fn parse_responses_usage(v: &Value) -> Option<Usage> {
+pub(crate) fn parse_responses_usage(v: &Value) -> Option<Usage> {
     let input = v.get("input_tokens")?.as_i64()?;
     let output = v.get("output_tokens")?.as_i64()?;
     let cached = v
@@ -2206,14 +2152,14 @@ fn chat_has_output_delta(v: &Value) -> bool {
     false
 }
 
-fn responses_has_delta(v: &Value) -> bool {
+pub(crate) fn responses_has_delta(v: &Value) -> bool {
     v.get("delta")
         .and_then(|x| x.as_str())
         .map(|s| !s.is_empty())
         .unwrap_or(false)
 }
 
-fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Decimal) {
+pub(crate) fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Decimal) {
     let Some(price) = price else {
         return (Decimal::ZERO, Decimal::ZERO);
     };

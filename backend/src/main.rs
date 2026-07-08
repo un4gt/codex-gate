@@ -10,6 +10,7 @@ mod log_archive;
 mod metrics;
 mod openai;
 mod proxy;
+mod responses_ws;
 mod runtime_settings;
 mod selector;
 mod state;
@@ -286,7 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::task::spawn(async move {
             let svc = service_fn(move |req| handle(req, state.clone()));
             if let Err(err) = H12AutoBuilder::new(TokioExecutor::new())
-                .serve_connection(io, svc)
+                .serve_connection_with_upgrades(io, svc)
                 .await
             {
                 log::warn!("error serving connection from {}: {}", peer, err);

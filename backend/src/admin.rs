@@ -23,6 +23,7 @@ use tokio::time as tokio_time;
 
 const ALLOWED_PROVIDER_TYPES: [&str; 3] =
     ["openai", "openai_compatible", "openai_compatible_responses"];
+const BETA_FEATURE_RESPONSES_HTTP_TO_WS: &str = "responses-http-to-ws";
 
 // Admin endpoints sometimes probe upstreams that can return arbitrary HTML/JSON.
 // Keep these payloads bounded to avoid untrusted memory spikes.
@@ -1301,6 +1302,8 @@ struct CreateProviderReq {
     supports_include_usage: Option<bool>,
     #[serde(alias = "websocketEnabled")]
     websocket_enabled: Option<bool>,
+    #[serde(default, alias = "betaFeatures")]
+    beta_features: Vec<String>,
     #[serde(alias = "keySelectionStrategy")]
     key_selection_strategy: Option<String>,
 }
@@ -1364,6 +1367,7 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     let weight = body.weight.unwrap_or(1);
     let supports_include_usage = body.supports_include_usage.unwrap_or(true);
     let websocket_enabled = body.websocket_enabled.unwrap_or(false);
+    let beta_features = normalize_beta_features(body.beta_features);
     let key_selection_strategy = body
         .key_selection_strategy
         .as_deref()
@@ -1384,6 +1388,7 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
             weight,
             supports_include_usage,
             websocket_enabled,
+            &beta_features,
             key_selection_strategy,
             now_ms,
         )
@@ -1409,6 +1414,8 @@ struct PatchProviderReq {
     supports_include_usage: Option<bool>,
     #[serde(alias = "websocketEnabled")]
     websocket_enabled: Option<bool>,
+    #[serde(default, alias = "betaFeatures")]
+    beta_features: Option<Vec<String>>,
     #[serde(alias = "keySelectionStrategy")]
     key_selection_strategy: Option<String>,
 }
@@ -1466,6 +1473,9 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     }
     if let Some(v) = patch.websocket_enabled {
         current.websocket_enabled = v;
+    }
+    if let Some(v) = patch.beta_features {
+        current.beta_features = normalize_beta_features(v);
     }
     if let Some(v) = patch.key_selection_strategy {
         let value = v.trim();
@@ -2467,6 +2477,7 @@ fn provider_to_json(p: &UpstreamProvider, health: ProviderHealthView) -> Value {
         "weight": p.weight,
         "supports_include_usage": p.supports_include_usage,
         "websocket_enabled": p.websocket_enabled,
+        "beta_features": p.beta_features,
         "key_selection_strategy": p.key_selection_strategy,
         "health": health
     })
@@ -2478,6 +2489,21 @@ fn is_valid_provider_type(provider_type: &str) -> bool {
 
 fn is_valid_key_selection_strategy(value: &str) -> bool {
     matches!(value, "round_robin" | "weighted")
+}
+
+fn normalize_beta_features(features: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for feature in features {
+        let feature = feature.trim();
+        if !matches!(feature, BETA_FEATURE_RESPONSES_HTTP_TO_WS) {
+            continue;
+        }
+        if out.iter().any(|existing| existing == feature) {
+            continue;
+        }
+        out.push(feature.to_string());
+    }
+    out
 }
 
 fn model_alias_to_json(alias: &ModelAlias, targets: Vec<ModelAliasTarget>) -> Value {

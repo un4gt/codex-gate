@@ -3,16 +3,19 @@ use std::time::Duration;
 
 pub mod api_key_cache;
 pub mod policy;
+pub mod transport_capability;
 pub mod upstream_cache;
 
 use api_key_cache::ApiKeyCache;
 use policy::{ApiKeyCachePolicy, UpstreamCachePolicy};
+use transport_capability::TransportCapabilityCache;
 use upstream_cache::UpstreamCache;
 
 #[derive(Clone)]
 pub struct Caches {
     pub api_keys: Arc<ApiKeyCache>,
     pub upstream: Arc<UpstreamCache>,
+    pub transport_capability: Arc<TransportCapabilityCache>,
 }
 
 impl Caches {
@@ -31,6 +34,7 @@ impl Caches {
                 upstream_ttl,
                 upstream_stale_grace,
             ))),
+            transport_capability: Arc::new(TransportCapabilityCache::new()),
         }
     }
 }

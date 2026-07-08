@@ -41,6 +41,10 @@ export interface RequestLogRow {
   t_first_byte_ms: number | null;
   t_first_token_ms: number | null;
   duration_ms: number | null;
+  span_kind: 'request' | 'ws_session' | 'ws_session_close' | 'ws_turn' | string;
+  transport: 'http' | 'ws' | 'ws_native' | 'ws_http_bridge' | 'ws_setup' | string;
+  parent_id: string | null;
+  ws_session_id: string | null;
   created_at_ms: number;
 }
 
@@ -160,6 +164,7 @@ export interface ProviderSummary {
   weight: number;
   supports_include_usage: boolean;
   websocket_enabled: boolean;
+  beta_features: string[];
   key_selection_strategy: 'round_robin' | 'weighted';
   health?: ProviderHealthSummary;
 }
@@ -250,6 +255,7 @@ export interface CreateProviderInput {
   weight: number;
   supports_include_usage: boolean;
   websocket_enabled: boolean;
+  beta_features: string[];
   key_selection_strategy: 'round_robin' | 'weighted';
 }
 
@@ -261,6 +267,7 @@ export interface UpdateProviderInput {
   weight?: number;
   supports_include_usage?: boolean;
   websocket_enabled?: boolean;
+  beta_features?: string[];
   key_selection_strategy?: 'round_robin' | 'weighted';
 }
 

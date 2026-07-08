@@ -17,6 +17,7 @@ const RETENTION_MAX_BATCHES_PER_RUN: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct TelemetryEvent {
+    pub id: Option<String>,
     pub api_key_id: i64,
     pub log_enabled: bool,
 
@@ -40,6 +41,11 @@ pub struct TelemetryEvent {
     pub cost_in_usd: Decimal,
     pub cost_out_usd: Decimal,
     pub time_ms: i64,
+
+    pub span_kind: &'static str,
+    pub transport: &'static str,
+    pub parent_id: Option<String>,
+    pub ws_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -333,56 +339,85 @@ impl TelemetryWorker {
     async fn on_event(&mut self, event: TelemetryEvent) {
         let ok = event.http_status.unwrap_or(500) < 400 && event.error_type.is_none();
         let wait = event.duration_ms.unwrap_or(0);
+        let counts_for_stats = matches!(event.span_kind, "request" | "ws_turn");
 
-        self.stats_by_key.entry(event.api_key_id).or_default().add(
-            ok,
-            &event.usage,
-            event.usage_observed,
-            event.cost_in_usd,
-            event.cost_out_usd,
-            wait,
-        );
+        if counts_for_stats {
+            self.stats_by_key.entry(event.api_key_id).or_default().add(
+                ok,
+                &event.usage,
+                event.usage_observed,
+                event.cost_in_usd,
+                event.cost_out_usd,
+                wait,
+            );
 
-        self.stats_by_key.entry(0).or_default().add(
-            ok,
-            &event.usage,
-            event.usage_observed,
-            event.cost_in_usd,
-            event.cost_out_usd,
-            wait,
-        );
+            self.stats_by_key.entry(0).or_default().add(
+                ok,
+                &event.usage,
+                event.usage_observed,
+                event.cost_in_usd,
+                event.cost_out_usd,
+                wait,
+            );
 
-        let hourly_key = HourlyKey {
-            bucket_ms: hour_bucket_ms(event.time_ms),
-            api_key_id: event.api_key_id,
-            provider_id: event.provider_id.unwrap_or(0),
-            endpoint_id: event.endpoint_id.unwrap_or(0),
-            upstream_key_id: event.upstream_key_id.unwrap_or(0),
-            api_format: event.api_format,
-            model: event
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("unknown")
-                .to_string(),
-        };
-        self.hourly_stats
-            .entry(hourly_key)
-            .or_default()
-            .add(ok, &event, wait);
+            let hourly_key = HourlyKey {
+                bucket_ms: hour_bucket_ms(event.time_ms),
+                api_key_id: event.api_key_id,
+                provider_id: event.provider_id.unwrap_or(0),
+                endpoint_id: event.endpoint_id.unwrap_or(0),
+                upstream_key_id: event.upstream_key_id.unwrap_or(0),
+                api_format: event.api_format,
+                model: event
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            };
+            self.hourly_stats
+                .entry(hourly_key)
+                .or_default()
+                .add(ok, &event, wait);
 
-        self.stats_event_buffer
-            .push(stats_event_from_event(&event, ok));
-        if self.stats_event_buffer.len() >= self.log_batch_max {
-            self.flush_stats_events().await;
+            self.stats_event_buffer
+                .push(stats_event_from_event(&event, ok));
+            if self.stats_event_buffer.len() >= self.log_batch_max {
+                self.flush_stats_events().await;
+            }
+
+            self.dirty = true;
         }
 
-        self.dirty = true;
-
         if event.log_enabled {
-            let id = util::new_ulid();
-            let mut err_msg = event.error_message;
+            let TelemetryEvent {
+                id,
+                api_key_id,
+                log_enabled: _,
+                provider_id,
+                endpoint_id,
+                upstream_key_id,
+                api_format,
+                model,
+                http_status,
+                error_type,
+                error_message,
+                t_stream_ms,
+                t_first_byte_ms,
+                t_first_token_ms,
+                duration_ms,
+                usage,
+                usage_observed,
+                cost_in_usd,
+                cost_out_usd,
+                time_ms,
+                span_kind,
+                transport,
+                parent_id,
+                ws_session_id,
+            } = event;
+            let id = id.unwrap_or_else(util::new_ulid);
+            let mut err_msg = error_message;
             if let Some(ref mut s) = err_msg
                 && s.len() > 512
             {
@@ -391,29 +426,33 @@ impl TelemetryWorker {
 
             let log_row = RequestLogRow {
                 id,
-                time_ms: event.time_ms,
-                api_key_id: event.api_key_id,
-                provider_id: event.provider_id,
-                endpoint_id: event.endpoint_id,
-                upstream_key_id: event.upstream_key_id,
-                api_format: event.api_format.to_string(),
-                model: event.model,
-                http_status: event.http_status,
-                error_type: event.error_type,
+                time_ms,
+                api_key_id,
+                provider_id,
+                endpoint_id,
+                upstream_key_id,
+                api_format: api_format.to_string(),
+                model,
+                http_status,
+                error_type,
                 error_message: err_msg,
-                input_tokens: event.usage.input_tokens,
-                output_tokens: event.usage.output_tokens,
-                cache_read_input_tokens: event.usage.cache_read_input_tokens,
-                cache_creation_input_tokens: event.usage.cache_creation_input_tokens,
-                reasoning_output_tokens: event.usage.reasoning_output_tokens,
-                usage_observed: event.usage_observed,
-                cost_in_usd: to_cost_storage(event.cost_in_usd),
-                cost_out_usd: to_cost_storage(event.cost_out_usd),
-                cost_total_usd: to_cost_storage(event.cost_in_usd + event.cost_out_usd),
-                t_stream_ms: event.t_stream_ms,
-                t_first_byte_ms: event.t_first_byte_ms,
-                t_first_token_ms: event.t_first_token_ms,
-                duration_ms: event.duration_ms,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                reasoning_output_tokens: usage.reasoning_output_tokens,
+                usage_observed,
+                cost_in_usd: to_cost_storage(cost_in_usd),
+                cost_out_usd: to_cost_storage(cost_out_usd),
+                cost_total_usd: to_cost_storage(cost_in_usd + cost_out_usd),
+                t_stream_ms,
+                t_first_byte_ms,
+                t_first_token_ms,
+                duration_ms,
+                span_kind: span_kind.to_string(),
+                transport: transport.to_string(),
+                parent_id,
+                ws_session_id,
                 created_at_ms: util::now_ms(),
             };
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 jemalloc = ["dep:jemallocator"]
 
@@ -16,10 +16,12 @@ bytes = { version = "1", default-features = false }
 env_logger = { version = "0.11", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 fastrand = { version = "2", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hyper = { version = "1", default-features = false, features = ["client", "server", "http1", "http2"] }
 http-body-util = { version = "0.1", default-features = false }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "rustls-native-certs", "tls12"] }
+hyper-tungstenite = "0.20"
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "server-auto", "tokio", "http1", "http2"] }
 jemallocator = { version = "0.5", default-features = false, optional = true }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -28,10 +30,12 @@ memchr = { version = "2", default-features = false }
 parking_lot = { version = "0.12", default-features = false }
 pin-project-lite = { version = "0.2", default-features = false }
 rust_decimal = { version = "1", default-features = false, features = ["serde-with-str", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres"] }
 tokio = { version = "1", default-features = false, features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 time = { version = "0.3", default-features = false, features = ["formatting"] }
 ulid = { version = "1", default-features = false, features = ["std"] }

@@ -20,6 +20,7 @@ pub struct UpstreamProvider {
     pub weight: i32,
     pub supports_include_usage: bool,
     pub websocket_enabled: bool,
+    pub beta_features: Vec<String>,
     pub key_selection_strategy: String,
 }
 
@@ -278,5 +279,9 @@ pub struct RequestLogRow {
     pub t_first_byte_ms: Option<i64>,
     pub t_first_token_ms: Option<i64>,
     pub duration_ms: Option<i64>,
+    pub span_kind: String,
+    pub transport: String,
+    pub parent_id: Option<String>,
+    pub ws_session_id: Option<String>,
     pub created_at_ms: i64,
 }

@@ -1,5 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js';
-import { Copy, Search } from 'lucide-solid';
+import { ChevronDown, ChevronRight, Copy, Search } from 'lucide-solid';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -86,12 +86,34 @@ function primaryLatency(row: RequestLogRow) {
   return row.duration_ms ?? row.t_first_token_ms ?? row.t_first_byte_ms ?? null;
 }
 
+function isWsSession(row: RequestLogRow) {
+  return row.span_kind === 'ws_session';
+}
+
+function transportLabel(row: RequestLogRow) {
+  if (row.span_kind === 'ws_session') return 'WS';
+  if (row.span_kind === 'ws_session_close') return 'WS Close';
+  if (row.transport === 'ws_setup') return 'WS Setup';
+  if (row.transport === 'ws_http_bridge') return 'HTTP Bridge';
+  if (row.transport === 'ws_native') return 'Native WS';
+  if (row.transport === 'ws') return 'WS';
+  return 'HTTP';
+}
+
+function transportTone(row: RequestLogRow): 'normal' | 'warning' | 'error' | 'disabled' {
+  if (row.transport === 'ws_http_bridge') return 'warning';
+  if (row.transport === 'ws_setup') return 'error';
+  if (row.transport === 'ws_native' || row.transport === 'ws') return 'normal';
+  return 'disabled';
+}
+
 export function LogsPage(props: LogsPageProps) {
   const [filters, setFilters] = createSignal<LogFilters>(EMPTY_FILTERS);
   const [advancedOpen, setAdvancedOpen] = createSignal(false);
   const [rows, setRows] = createSignal<RequestLogRow[]>([]);
   const [loading, setLoading] = createSignal(false);
   const [selected, setSelected] = createSignal<RequestLogRow | null>(null);
+  const [expandedSessions, setExpandedSessions] = createSignal<Record<string, boolean>>({});
 
   const providerNameMap = createMemo(() => new Map(props.providers.map((item) => [item.provider.id, item.provider.name])));
   const endpointNameMap = createMemo(
@@ -176,6 +198,33 @@ export function LogsPage(props: LogsPageProps) {
         );
       })
       .sort((left, right) => right.time_ms - left.time_ms);
+  });
+
+  const visibleRows = createMemo(() => {
+    const all = filteredRows();
+    const visibleIds = new Set(all.map((row) => row.id));
+    const children = new Set(all.filter((row) => row.parent_id && visibleIds.has(row.parent_id)).map((row) => row.id));
+    const byParent = new Map<string, RequestLogRow[]>();
+    for (const row of all) {
+      if (!row.parent_id) continue;
+      const group = byParent.get(row.parent_id) ?? [];
+      group.push(row);
+      byParent.set(row.parent_id, group);
+    }
+    for (const group of byParent.values()) {
+      group.sort((left, right) => left.time_ms - right.time_ms);
+    }
+
+    const out: Array<{ row: RequestLogRow; depth: number; children: RequestLogRow[] }> = [];
+    for (const row of all) {
+      if (children.has(row.id)) continue;
+      const rowChildren = byParent.get(row.id) ?? [];
+      out.push({ row, depth: 0, children: rowChildren });
+      if (expandedSessions()[row.id]) {
+        rowChildren.forEach((child) => out.push({ row: child, depth: 1, children: [] }));
+      }
+    }
+    return out;
   });
 
   const errorCount = createMemo(() => filteredRows().filter((row) => (row.http_status ?? 0) >= 400 || row.error_type).length);
@@ -296,7 +345,7 @@ export function LogsPage(props: LogsPageProps) {
               <div>{t('密钥')}</div>
             </div>
             <Show
-              when={filteredRows().length > 0}
+              when={visibleRows().length > 0}
               fallback={
                 <EmptyState
                   title="未找到日志"
@@ -309,16 +358,42 @@ export function LogsPage(props: LogsPageProps) {
                 />
               }
             >
-              <For each={filteredRows()}>
-                {(row) => {
+              <For each={visibleRows()}>
+                {(item) => {
+                  const row = item.row;
                   const status = rowStatus(row);
+                  const hasChildren = item.children.length > 0;
                   return (
                   <div
-                    class="cursor-pointer border-b border-border bg-transparent px-4 py-5 transition-colors duration-200 ease-out hover:bg-muted/50 grid gap-4 xl:grid-cols-[minmax(160px,1.05fr)_minmax(180px,1fr)_minmax(90px,0.6fr)_minmax(210px,1.2fr)_minmax(140px,0.85fr)_minmax(130px,0.82fr)]"
+                    class={`cursor-pointer border-b border-border bg-transparent px-4 py-5 transition-colors duration-200 ease-out hover:bg-muted/50 grid gap-4 xl:grid-cols-[minmax(160px,1.05fr)_minmax(180px,1fr)_minmax(90px,0.6fr)_minmax(210px,1.2fr)_minmax(140px,0.85fr)_minmax(130px,0.82fr)] ${item.depth > 0 ? 'border-l-2 border-l-primary/30 bg-muted/10' : ''}`}
                     onClick={() => setSelected(row)}
                   >
-                    <div class="font-mono text-xs truncate">{formatDateTime(row.time_ms)}</div>
-                    <div class="font-mono text-xs truncate max-w-[150px]" title={formatModelName(row.model)}>{formatModelName(row.model)}</div>
+                    <div class="flex min-w-0 items-center gap-2 font-mono text-xs">
+                      <Show when={hasChildren} fallback={<span class="size-6 shrink-0" />}>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          class="size-6"
+                          aria-label={expandedSessions()[row.id] ? t('收起 WS 日志') : t('展开 WS 日志')}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setExpandedSessions((current) => ({ ...current, [row.id]: !current[row.id] }));
+                          }}
+                        >
+                          <Show when={expandedSessions()[row.id]} fallback={<ChevronRight class="size-3" />}>
+                            <ChevronDown class="size-3" />
+                          </Show>
+                        </Button>
+                      </Show>
+                      <span class="truncate">{formatDateTime(row.time_ms)}</span>
+                    </div>
+                    <div class="min-w-0 font-mono text-xs">
+                      <div class="truncate max-w-[150px]" title={formatModelName(row.model)}>{isWsSession(row) ? t('WS 会话') : formatModelName(row.model)}</div>
+                      <div class="mt-1">
+                        <StatusBadge tone={transportTone(row)}>{transportLabel(row)}</StatusBadge>
+                      </div>
+                    </div>
                     <div>
                       <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                     </div>
@@ -367,7 +442,11 @@ export function LogsPage(props: LogsPageProps) {
                       <DetailItem label="模型" value={formatModelName(row.model)} onCopy={() => void copyField(formatModelName(row.model), '模型')} />
                       <DetailItem label="密钥" value={apiKeyNameMap().get(row.api_key_id) ?? `#${row.api_key_id}`} onCopy={() => void copyField(String(row.api_key_id), '密钥')} />
                       <DetailItem label="请求类型" value={formatRequestType(row.api_format)} onCopy={() => void copyField(formatRequestType(row.api_format), '请求类型')} />
+                      <DetailItem label="传输" value={transportLabel(row)} onCopy={() => void copyField(row.transport, '传输')} />
+                      <DetailItem label="日志类型" value={row.span_kind} onCopy={() => void copyField(row.span_kind, '日志类型')} />
+                      <DetailItem label="WS 会话" value={row.ws_session_id ?? '—'} onCopy={() => void copyField(row.ws_session_id ?? '', 'WS 会话')} />
                       <DetailItem label="请求 ID" value={row.id} onCopy={() => void copyField(row.id, '请求 ID')} />
+                      <DetailItem label="父日志" value={row.parent_id ?? '—'} onCopy={() => void copyField(row.parent_id ?? '', '父日志')} />
                       <DetailItem
                         label="上游"
                         value={row.provider_id ? providerNameMap().get(row.provider_id) ?? `#${row.provider_id}` : '—'}

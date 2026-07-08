@@ -15,6 +15,17 @@ use crate::types::{
     UpstreamKeyModel, UpstreamProvider,
 };
 
+const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
+  request_logs.id, request_logs.time_ms, request_logs.api_key_id, request_logs.provider_id, request_logs.endpoint_id, request_logs.upstream_key_id,
+  request_logs.api_format, request_logs.model, request_logs.http_status, request_logs.error_type, request_logs.error_message,
+  request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_input_tokens, request_logs.cache_creation_input_tokens,
+  request_logs.reasoning_output_tokens, request_logs.usage_observed,
+  request_logs.cost_in_usd, request_logs.cost_out_usd, request_logs.cost_total_usd,
+  request_logs.t_stream_ms, request_logs.t_first_byte_ms, request_logs.t_first_token_ms, request_logs.duration_ms,
+  request_logs.span_kind, request_logs.transport, request_logs.parent_id, request_logs.ws_session_id,
+  request_logs.created_at_ms
+"#;
+
 #[derive(Debug)]
 pub struct DbError {
     msg: String,
@@ -67,6 +78,25 @@ pub struct RequestLogFilter {
     pub cache_read_input_tokens_max: Option<i64>,
     pub cache_creation_input_tokens_min: Option<i64>,
     pub cache_creation_input_tokens_max: Option<i64>,
+}
+
+fn beta_features_to_json(features: &[String]) -> String {
+    serde_json::to_string(features).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn beta_features_from_json(raw: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<Vec<String>>(raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in value {
+        let item = item.trim();
+        if item.is_empty() || out.iter().any(|existing| existing == item) {
+            continue;
+        }
+        out.push(item.to_string());
+    }
+    out
 }
 
 #[derive(Clone)]
@@ -438,6 +468,7 @@ WHERE id = $1
         weight: i32,
         supports_include_usage: bool,
         websocket_enabled: bool,
+        beta_features: &[String],
         key_selection_strategy: &str,
         now_ms: i64,
     ) -> Result<i64, DbError> {
@@ -445,8 +476,8 @@ WHERE id = $1
             Database::Sqlite(pool) => {
                 let res = sqlx::query(
                     r#"
-INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, key_selection_strategy, created_at_ms, updated_at_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, created_at_ms, updated_at_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
                 )
                 .bind(name)
@@ -456,6 +487,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 .bind(weight as i64)
                 .bind(if supports_include_usage { 1_i64 } else { 0_i64 })
                 .bind(if websocket_enabled { 1_i64 } else { 0_i64 })
+                .bind(beta_features_to_json(beta_features))
                 .bind(key_selection_strategy)
                 .bind(now_ms)
                 .bind(now_ms)
@@ -466,8 +498,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             Database::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, key_selection_strategy, created_at_ms, updated_at_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, created_at_ms, updated_at_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING id
 "#,
                 )
@@ -478,6 +510,7 @@ RETURNING id
                 .bind(weight)
                 .bind(supports_include_usage)
                 .bind(websocket_enabled)
+                .bind(beta_features_to_json(beta_features))
                 .bind(key_selection_strategy)
                 .bind(now_ms)
                 .bind(now_ms)
@@ -498,7 +531,7 @@ RETURNING id
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, websocket_enabled = ?, key_selection_strategy = ?, updated_at_ms = ?
+SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, websocket_enabled = ?, beta_features = ?, key_selection_strategy = ?, updated_at_ms = ?
 WHERE id = ?
 "#,
                 )
@@ -509,6 +542,7 @@ WHERE id = ?
                 .bind(provider.weight as i64)
                 .bind(if provider.supports_include_usage { 1_i64 } else { 0_i64 })
                 .bind(if provider.websocket_enabled { 1_i64 } else { 0_i64 })
+                .bind(beta_features_to_json(&provider.beta_features))
                 .bind(&provider.key_selection_strategy)
                 .bind(now_ms)
                 .bind(provider.id)
@@ -520,8 +554,8 @@ WHERE id = ?
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, websocket_enabled = $7, key_selection_strategy = $8, updated_at_ms = $9
-WHERE id = $10
+SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, websocket_enabled = $7, beta_features = $8, key_selection_strategy = $9, updated_at_ms = $10
+WHERE id = $11
 "#,
                 )
                 .bind(&provider.name)
@@ -531,6 +565,7 @@ WHERE id = $10
                 .bind(provider.weight)
                 .bind(provider.supports_include_usage)
                 .bind(provider.websocket_enabled)
+                .bind(beta_features_to_json(&provider.beta_features))
                 .bind(&provider.key_selection_strategy)
                 .bind(now_ms)
                 .bind(provider.id)
@@ -1151,7 +1186,7 @@ RETURNING id
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, key_selection_strategy
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1170,6 +1205,9 @@ ORDER BY priority ASC, id ASC
                         weight: row.get::<i64, _>("weight") as i32,
                         supports_include_usage: row.get::<i64, _>("supports_include_usage") != 0,
                         websocket_enabled: row.get::<i64, _>("websocket_enabled") != 0,
+                        beta_features: beta_features_from_json(
+                            &row.get::<String, _>("beta_features"),
+                        ),
                         key_selection_strategy: row.get::<String, _>("key_selection_strategy"),
                     })
                     .collect())
@@ -1177,7 +1215,7 @@ ORDER BY priority ASC, id ASC
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, key_selection_strategy
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1196,6 +1234,9 @@ ORDER BY priority ASC, id ASC
                         weight: row.get::<i32, _>("weight"),
                         supports_include_usage: row.get::<bool, _>("supports_include_usage"),
                         websocket_enabled: row.get::<bool, _>("websocket_enabled"),
+                        beta_features: beta_features_from_json(
+                            &row.get::<String, _>("beta_features"),
+                        ),
                         key_selection_strategy: row.get::<String, _>("key_selection_strategy"),
                     })
                     .collect())
@@ -2645,6 +2686,7 @@ INSERT INTO request_logs (
   reasoning_output_tokens, usage_observed,
   cost_in_usd, cost_out_usd, cost_total_usd,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
+  span_kind, transport, parent_id, ws_session_id,
   created_at_ms
 ) VALUES (
   ?, ?, ?, ?, ?, ?,
@@ -2652,6 +2694,7 @@ INSERT INTO request_logs (
   ?, ?, ?, ?,
   ?, ?,
   ?, ?, ?,
+  ?, ?, ?, ?,
   ?, ?, ?, ?,
   ?
 )
@@ -2681,6 +2724,10 @@ INSERT INTO request_logs (
         .bind(r.t_first_byte_ms)
         .bind(r.t_first_token_ms)
         .bind(r.duration_ms)
+        .bind(&r.span_kind)
+        .bind(&r.transport)
+        .bind(&r.parent_id)
+        .bind(&r.ws_session_id)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -2707,6 +2754,7 @@ INSERT INTO request_logs (
   reasoning_output_tokens, usage_observed,
   cost_in_usd, cost_out_usd, cost_total_usd,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
+  span_kind, transport, parent_id, ws_session_id,
   created_at_ms
 ) VALUES (
   $1, $2, $3, $4, $5, $6,
@@ -2715,7 +2763,8 @@ INSERT INTO request_logs (
   $16, $17,
   $18, $19, $20,
   $21, $22, $23, $24,
-  $25
+  $25, $26, $27, $28,
+  $29
 )
 "#,
         )
@@ -2743,6 +2792,10 @@ INSERT INTO request_logs (
         .bind(r.t_first_byte_ms)
         .bind(r.t_first_token_ms)
         .bind(r.duration_ms)
+        .bind(&r.span_kind)
+        .bind(&r.transport)
+        .bind(&r.parent_id)
+        .bind(&r.ws_session_id)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -2977,6 +3030,7 @@ SELECT
   reasoning_output_tokens, usage_observed,
   cost_in_usd, cost_out_usd, cost_total_usd,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
+  span_kind, transport, parent_id, ws_session_id,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < ?
@@ -3051,6 +3105,7 @@ SELECT
   reasoning_output_tokens, usage_observed,
   cost_in_usd, cost_out_usd, cost_total_usd,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
+  span_kind, transport, parent_id, ws_session_id,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < $1
@@ -3163,19 +3218,9 @@ async fn list_request_logs_sqlite(
     limit: i64,
     filter: &RequestLogFilter,
 ) -> Result<Vec<RequestLogRow>, DbError> {
-    let mut qb = QueryBuilder::<Sqlite>::new(
-        r#"
-SELECT
-  request_logs.id, request_logs.time_ms, request_logs.api_key_id, request_logs.provider_id, request_logs.endpoint_id, request_logs.upstream_key_id,
-  request_logs.api_format, request_logs.model, request_logs.http_status, request_logs.error_type, request_logs.error_message,
-  request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_input_tokens, request_logs.cache_creation_input_tokens,
-  request_logs.reasoning_output_tokens, request_logs.usage_observed,
-  request_logs.cost_in_usd, request_logs.cost_out_usd, request_logs.cost_total_usd,
-  request_logs.t_stream_ms, request_logs.t_first_byte_ms, request_logs.t_first_token_ms, request_logs.duration_ms,
-  request_logs.created_at_ms
-FROM request_logs
-"#,
-    );
+    let mut qb = QueryBuilder::<Sqlite>::new(format!(
+        "SELECT {REQUEST_LOG_SELECT_COLUMNS} FROM request_logs"
+    ));
     append_request_logs_joins_sqlite(&mut qb, filter);
     append_request_logs_filters_sqlite(&mut qb, filter);
     qb.push(" ORDER BY request_logs.time_ms DESC LIMIT ");
@@ -3193,19 +3238,9 @@ async fn list_request_logs_postgres(
     limit: i64,
     filter: &RequestLogFilter,
 ) -> Result<Vec<RequestLogRow>, DbError> {
-    let mut qb = QueryBuilder::<Postgres>::new(
-        r#"
-SELECT
-  request_logs.id, request_logs.time_ms, request_logs.api_key_id, request_logs.provider_id, request_logs.endpoint_id, request_logs.upstream_key_id,
-  request_logs.api_format, request_logs.model, request_logs.http_status, request_logs.error_type, request_logs.error_message,
-  request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_input_tokens, request_logs.cache_creation_input_tokens,
-  request_logs.reasoning_output_tokens, request_logs.usage_observed,
-  request_logs.cost_in_usd, request_logs.cost_out_usd, request_logs.cost_total_usd,
-  request_logs.t_stream_ms, request_logs.t_first_byte_ms, request_logs.t_first_token_ms, request_logs.duration_ms,
-  request_logs.created_at_ms
-FROM request_logs
-"#,
-    );
+    let mut qb = QueryBuilder::<Postgres>::new(format!(
+        "SELECT {REQUEST_LOG_SELECT_COLUMNS} FROM request_logs"
+    ));
     append_request_logs_joins_postgres(&mut qb, filter);
     append_request_logs_filters_postgres(&mut qb, filter);
     qb.push(" ORDER BY request_logs.time_ms DESC LIMIT ");
@@ -3246,6 +3281,10 @@ fn append_request_logs_filters_sqlite(
         qb.push(" OR request_logs.error_type LIKE ");
         qb.push_bind(pattern.clone());
         qb.push(" OR request_logs.error_message LIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.transport LIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.span_kind LIKE ");
         qb.push_bind(pattern);
         qb.push(")");
     }
@@ -3445,6 +3484,10 @@ fn append_request_logs_filters_postgres(
         qb.push(" OR request_logs.error_type ILIKE ");
         qb.push_bind(pattern.clone());
         qb.push(" OR request_logs.error_message ILIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.transport ILIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR request_logs.span_kind ILIKE ");
         qb.push_bind(pattern);
         qb.push(")");
     }
@@ -3625,6 +3668,10 @@ fn row_to_request_log_sqlite(row: sqlx::sqlite::SqliteRow) -> RequestLogRow {
         http_status: row.get::<Option<i32>, _>("http_status"),
         error_type: row.get::<Option<String>, _>("error_type"),
         error_message: row.get::<Option<String>, _>("error_message"),
+        span_kind: row.get::<String, _>("span_kind"),
+        transport: row.get::<String, _>("transport"),
+        parent_id: row.get::<Option<String>, _>("parent_id"),
+        ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
         input_tokens: row.get::<i64, _>("input_tokens"),
         output_tokens: row.get::<i64, _>("output_tokens"),
         cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
@@ -3655,6 +3702,10 @@ fn row_to_request_log_postgres(row: sqlx::postgres::PgRow) -> RequestLogRow {
         http_status: row.get::<Option<i32>, _>("http_status"),
         error_type: row.get::<Option<String>, _>("error_type"),
         error_message: row.get::<Option<String>, _>("error_message"),
+        span_kind: row.get::<String, _>("span_kind"),
+        transport: row.get::<String, _>("transport"),
+        parent_id: row.get::<Option<String>, _>("parent_id"),
+        ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
         input_tokens: row.get::<i64, _>("input_tokens"),
         output_tokens: row.get::<i64, _>("output_tokens"),
         cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
@@ -4035,6 +4086,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   weight INTEGER NOT NULL,
   supports_include_usage INTEGER NOT NULL,
   websocket_enabled INTEGER NOT NULL DEFAULT 0,
+  beta_features TEXT NOT NULL DEFAULT '[]',
   key_selection_strategy TEXT NOT NULL DEFAULT 'round_robin',
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
@@ -4309,10 +4361,15 @@ CREATE TABLE IF NOT EXISTS request_logs (
   t_first_byte_ms INTEGER,
   t_first_token_ms INTEGER,
   duration_ms INTEGER,
+  span_kind TEXT NOT NULL DEFAULT 'request',
+  transport TEXT NOT NULL DEFAULT 'http',
+  parent_id TEXT,
+  ws_session_id TEXT,
   created_at_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_time ON request_logs(time_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key_id, time_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC);
 "#,
     )
     .execute(pool)
@@ -4349,7 +4406,9 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
 
     ensure_sqlite_token_usage_columns(pool).await?;
     ensure_sqlite_upstream_providers_websocket_enabled(pool).await?;
+    ensure_sqlite_upstream_providers_beta_features(pool).await?;
     ensure_sqlite_upstream_providers_key_selection_strategy(pool).await?;
+    ensure_sqlite_request_log_span_columns(pool).await?;
     ensure_sqlite_model_prices_provider_scope(pool).await?;
     migrate_sqlite_provider_model_aliases(pool).await?;
     Ok(())
@@ -4385,6 +4444,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   weight INTEGER NOT NULL,
   supports_include_usage BOOLEAN NOT NULL,
   websocket_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  beta_features TEXT NOT NULL DEFAULT '[]',
   key_selection_strategy TEXT NOT NULL DEFAULT 'round_robin',
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL
@@ -4650,10 +4710,15 @@ CREATE TABLE IF NOT EXISTS request_logs (
   t_first_byte_ms BIGINT,
   t_first_token_ms BIGINT,
   duration_ms BIGINT,
+  span_kind TEXT NOT NULL DEFAULT 'request',
+  transport TEXT NOT NULL DEFAULT 'http',
+  parent_id TEXT,
+  ws_session_id TEXT,
   created_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_time ON request_logs(time_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key_id, time_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC);
 "#,
     )
     .execute(pool)
@@ -4690,7 +4755,9 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
 
     ensure_postgres_token_usage_columns(pool).await?;
     ensure_postgres_upstream_providers_websocket_enabled(pool).await?;
+    ensure_postgres_upstream_providers_beta_features(pool).await?;
     ensure_postgres_upstream_providers_key_selection_strategy(pool).await?;
+    ensure_postgres_request_log_span_columns(pool).await?;
     ensure_postgres_model_prices_provider_scope(pool).await?;
     migrate_postgres_provider_model_aliases(pool).await?;
     Ok(())
@@ -4728,6 +4795,17 @@ async fn ensure_sqlite_upstream_providers_websocket_enabled(
     if !sqlite_column_exists(pool, "upstream_providers", "websocket_enabled").await? {
         sqlx::query(
             "ALTER TABLE upstream_providers ADD COLUMN websocket_enabled INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn ensure_sqlite_upstream_providers_beta_features(pool: &SqlitePool) -> Result<(), DbError> {
+    if !sqlite_column_exists(pool, "upstream_providers", "beta_features").await? {
+        sqlx::query(
+            "ALTER TABLE upstream_providers ADD COLUMN beta_features TEXT NOT NULL DEFAULT '[]'",
         )
         .execute(pool)
         .await?;
@@ -4839,6 +4917,37 @@ async fn ensure_sqlite_token_usage_columns(pool: &SqlitePool) -> Result<(), DbEr
     Ok(())
 }
 
+async fn ensure_sqlite_request_log_span_columns(pool: &SqlitePool) -> Result<(), DbError> {
+    if !sqlite_column_exists(pool, "request_logs", "span_kind").await? {
+        sqlx::query(
+            "ALTER TABLE request_logs ADD COLUMN span_kind TEXT NOT NULL DEFAULT 'request'",
+        )
+        .execute(pool)
+        .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "transport").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN transport TEXT NOT NULL DEFAULT 'http'")
+            .execute(pool)
+            .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "parent_id").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN parent_id TEXT")
+            .execute(pool)
+            .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "ws_session_id").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN ws_session_id TEXT")
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn ensure_postgres_model_prices_provider_scope(pool: &PgPool) -> Result<(), DbError> {
     sqlx::query("ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS provider_id BIGINT")
         .execute(pool)
@@ -4856,6 +4965,15 @@ async fn ensure_postgres_upstream_providers_websocket_enabled(
 ) -> Result<(), DbError> {
     sqlx::query(
         "ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS websocket_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_postgres_upstream_providers_beta_features(pool: &PgPool) -> Result<(), DbError> {
+    sqlx::query(
+        "ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS beta_features TEXT NOT NULL DEFAULT '[]'",
     )
     .execute(pool)
     .await?;
@@ -4956,7 +5074,36 @@ async fn ensure_postgres_token_usage_columns(pool: &PgPool) -> Result<(), DbErro
     Ok(())
 }
 
+async fn ensure_postgres_request_log_span_columns(pool: &PgPool) -> Result<(), DbError> {
+    sqlx::query(
+        "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS span_kind TEXT NOT NULL DEFAULT 'request'",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS transport TEXT NOT NULL DEFAULT 'http'",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS parent_id TEXT")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS ws_session_id TEXT")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "legacy db helpers are kept near related SQL sections; tests predate later helper additions"
+)]
 mod tests {
     use super::*;
 
@@ -5012,6 +5159,31 @@ mod tests {
                 .expect("request_logs usage observed column")
         );
         assert!(
+            sqlite_column_exists(&pool, "request_logs", "span_kind")
+                .await
+                .expect("request_logs span kind column")
+        );
+        assert!(
+            sqlite_column_exists(&pool, "request_logs", "transport")
+                .await
+                .expect("request_logs transport column")
+        );
+        assert!(
+            sqlite_column_exists(&pool, "request_logs", "parent_id")
+                .await
+                .expect("request_logs parent column")
+        );
+        assert!(
+            sqlite_column_exists(&pool, "request_logs", "ws_session_id")
+                .await
+                .expect("request_logs ws session column")
+        );
+        assert!(
+            sqlite_column_exists(&pool, "upstream_providers", "beta_features")
+                .await
+                .expect("provider beta features column")
+        );
+        assert!(
             sqlite_column_exists(&pool, "stats_daily", "reasoning_output_tokens")
                 .await
                 .expect("stats_daily reasoning column")
@@ -5039,13 +5211,17 @@ INSERT INTO request_logs (
         .await
         .expect("insert old request log shape");
         let log_row = sqlx::query(
-            "SELECT reasoning_output_tokens, usage_observed FROM request_logs WHERE id = 'log_default'",
+            "SELECT reasoning_output_tokens, usage_observed, span_kind, transport, parent_id, ws_session_id FROM request_logs WHERE id = 'log_default'",
         )
         .fetch_one(&pool)
         .await
         .expect("select request log defaults");
         assert_eq!(log_row.get::<i64, _>("reasoning_output_tokens"), 0);
         assert_eq!(log_row.get::<i64, _>("usage_observed"), 0);
+        assert_eq!(log_row.get::<String, _>("span_kind"), "request");
+        assert_eq!(log_row.get::<String, _>("transport"), "http");
+        assert_eq!(log_row.get::<Option<String>, _>("parent_id"), None);
+        assert_eq!(log_row.get::<Option<String>, _>("ws_session_id"), None);
 
         sqlx::query(
             r#"
