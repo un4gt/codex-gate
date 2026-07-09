@@ -1284,12 +1284,12 @@ fn should_retry_response_status(status: i32) -> bool {
 
 fn should_avoid_endpoint_on_retry(status: Option<i32>, error_type: Option<&str>) -> bool {
     error_type.is_some()
-        || matches!(status, Some(408 | 409 | 429))
+        || matches!(status, Some(408 | 409))
         || status.is_some_and(|code| code >= 500)
 }
 
 fn should_avoid_key_on_retry(status: Option<i32>, _error_type: Option<&str>) -> bool {
-    matches!(status, Some(401 | 403))
+    matches!(status, Some(401 | 403 | 429))
 }
 
 pub(crate) fn record_pre_stream_outcome(
@@ -1604,11 +1604,22 @@ fn record_endpoint_outcome_for_id(
         return;
     }
 
-    health.record_success(endpoint_id, status, observed_latency_ms, now_ms);
+    if should_record_endpoint_success(status, error_type) {
+        health.record_success(endpoint_id, status, observed_latency_ms, now_ms);
+    } else {
+        health.release_probe(endpoint_id, now_ms);
+    }
+}
+
+fn should_record_endpoint_success(status: Option<i32>, error_type: Option<&str>) -> bool {
+    status.is_some() && error_type.is_none() && !matches!(status, Some(429))
 }
 
 fn should_record_key_success(status: Option<i32>, error_type: Option<&str>) -> bool {
-    status.is_some() && error_type.is_none() && !should_trip_key(status, error_type)
+    status.is_some()
+        && error_type.is_none()
+        && !should_trip_key(status, error_type)
+        && !matches!(status, Some(429))
 }
 
 fn record_upstream_key_outcome_for_id(
@@ -2196,8 +2207,11 @@ pub(crate) fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (De
 mod tests {
     use super::{
         UsageCaptureBuffer, build_upstream_headers, compute_cost, extract_usage_from_capture,
-        parse_chat_usage, parse_responses_usage,
+        parse_chat_usage, parse_responses_usage, record_endpoint_outcome_for_id,
+        record_upstream_key_outcome_for_id, should_avoid_endpoint_on_retry,
+        should_avoid_key_on_retry, should_retry_response_status,
     };
+    use crate::health::{CircuitState, RuntimeHealthBook};
     use crate::types::ModelPriceData;
     use bytes::Bytes;
     use hyper::header::{
@@ -2454,6 +2468,32 @@ mod tests {
                 "header {name} should not be forwarded"
             );
         }
+    }
+
+    #[test]
+    fn retry_429_should_avoid_key_without_avoiding_endpoint() {
+        assert!(should_retry_response_status(429));
+        assert!(should_avoid_key_on_retry(Some(429), None));
+        assert!(!should_avoid_endpoint_on_retry(Some(429), None));
+    }
+
+    #[test]
+    fn upstream_429_should_not_trip_endpoint_or_mark_key_success() {
+        let endpoint_health = RuntimeHealthBook::new(1, 30_000);
+        record_endpoint_outcome_for_id(&endpoint_health, Some(7), Some(429), Some(12), None, None);
+        let endpoint = endpoint_health.snapshot(7, crate::util::now_ms());
+
+        assert_eq!(endpoint.state, CircuitState::Closed);
+        assert_eq!(endpoint.failure_count, 0);
+        assert_eq!(endpoint.success_count, 0);
+
+        let key_health = RuntimeHealthBook::new(1, 30_000);
+        record_upstream_key_outcome_for_id(&key_health, Some(9), Some(429), Some(12), None, None);
+        let key = key_health.snapshot(9, crate::util::now_ms());
+
+        assert_eq!(key.state, CircuitState::Closed);
+        assert_eq!(key.failure_count, 0);
+        assert_eq!(key.success_count, 0);
     }
 
     #[test]

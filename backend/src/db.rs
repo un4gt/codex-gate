@@ -4369,7 +4369,6 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_time ON request_logs(time_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key_id, time_ms DESC);
-CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC);
 "#,
     )
     .execute(pool)
@@ -4718,7 +4717,6 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_time ON request_logs(time_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key_id, time_ms DESC);
-CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC);
 "#,
     )
     .execute(pool)
@@ -5247,6 +5245,68 @@ INSERT INTO stats_daily (
         .expect("select stats defaults");
         assert_eq!(stats_row.get::<i64, _>("reasoning_output_tokens"), 0);
         assert_eq!(stats_row.get::<i64, _>("usage_observed_requests"), 0);
+    }
+
+    #[tokio::test]
+    async fn migrate_sqlite_should_add_span_columns_before_parent_index() {
+        let db = Database::connect("sqlite::memory:", 1)
+            .await
+            .expect("connect sqlite memory db");
+        let Database::Sqlite(pool) = db else {
+            panic!("expected sqlite db");
+        };
+
+        sqlx::query(
+            r#"
+CREATE TABLE request_logs (
+  id TEXT PRIMARY KEY,
+  time_ms INTEGER NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  provider_id INTEGER,
+  endpoint_id INTEGER,
+  upstream_key_id INTEGER,
+  api_format TEXT NOT NULL,
+  model TEXT,
+  http_status INTEGER,
+  error_type TEXT,
+  error_message TEXT,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL,
+  cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  usage_observed INTEGER NOT NULL DEFAULT 0,
+  cost_in_usd TEXT NOT NULL,
+  cost_out_usd TEXT NOT NULL,
+  cost_total_usd TEXT NOT NULL,
+  t_stream_ms INTEGER,
+  t_first_byte_ms INTEGER,
+  t_first_token_ms INTEGER,
+  duration_ms INTEGER,
+  created_at_ms INTEGER NOT NULL
+);
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create old request logs table");
+
+        migrate_sqlite(&pool)
+            .await
+            .expect("migrate old sqlite schema");
+
+        assert!(
+            sqlite_column_exists(&pool, "request_logs", "parent_id")
+                .await
+                .expect("request logs parent column")
+        );
+        let index_row = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_request_logs_parent_time'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("query parent index");
+        assert!(index_row.is_some());
     }
 
     #[tokio::test]

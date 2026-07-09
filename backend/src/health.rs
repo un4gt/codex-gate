@@ -413,7 +413,7 @@ pub fn should_trip_endpoint(http_status: Option<i32>, error_type: Option<&str>) 
         return true;
     }
 
-    matches!(http_status, Some(408 | 409 | 429)) || http_status.is_some_and(|status| status >= 500)
+    matches!(http_status, Some(408 | 409)) || http_status.is_some_and(|status| status >= 500)
 }
 
 pub fn should_trip_key(http_status: Option<i32>, _error_type: Option<&str>) -> bool {
