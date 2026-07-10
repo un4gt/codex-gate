@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["mimalloc"]
+# With no allocator feature enabled, main.rs selects std::alloc::System.
+default = []
 mimalloc = ["dep:mimalloc"]
 jemalloc = ["dep:jemallocator"]
 

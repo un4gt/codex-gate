@@ -38,11 +38,15 @@ use crate::state::{AppState, SharedState};
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(all(feature = "jemalloc", not(feature = "mimalloc")))]
 #[global_allocator]
-static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+static GLOBAL_ALLOCATOR: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
+#[cfg(not(any(feature = "mimalloc", feature = "jemalloc")))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: std::alloc::System = std::alloc::System;
 
 async fn handle(
     req: Request<hyper::body::Incoming>,
