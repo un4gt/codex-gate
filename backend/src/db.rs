@@ -2,17 +2,17 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool, postgres::PgPoolOptions};
 
 use crate::crypto;
+use crate::pricing::{PriceCard, PriceVersion};
 use crate::types::{
-    ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelPriceData,
-    ModelRoute, ProviderModel, RequestLogRow, RuntimeSettingRow, StatsDailyRow, StatsEventRow,
-    StatsHourlyRow, StatsOverviewAggRow, UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta,
-    UpstreamKeyModel, UpstreamProvider,
+    ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelRoute,
+    PricingUsageGroupRow, ProviderModel, RequestLogRow, RuntimeSettingRow, StatsDailyRow,
+    StatsEventRow, StatsHourlyRow, StatsOverviewAggRow, UpstreamEndpoint, UpstreamKey,
+    UpstreamKeyMeta, UpstreamKeyModel, UpstreamProvider,
 };
 
 const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
@@ -20,7 +20,7 @@ const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
   request_logs.api_format, request_logs.model, request_logs.http_status, request_logs.error_type, request_logs.error_message,
   request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_input_tokens, request_logs.cache_creation_input_tokens,
   request_logs.reasoning_output_tokens, request_logs.usage_observed,
-  request_logs.cost_in_usd, request_logs.cost_out_usd, request_logs.cost_total_usd,
+  request_logs.price_version_id, request_logs.price_tier_index,
   request_logs.t_stream_ms, request_logs.t_first_byte_ms, request_logs.t_first_token_ms, request_logs.duration_ms,
   request_logs.span_kind, request_logs.transport, request_logs.parent_id, request_logs.ws_session_id,
   request_logs.created_at_ms
@@ -72,8 +72,6 @@ pub struct RequestLogFilter {
     pub usage_observed: Option<bool>,
     pub reasoning_output_tokens_min: Option<i64>,
     pub reasoning_output_tokens_max: Option<i64>,
-    pub cost_total_min: Option<f64>,
-    pub cost_total_max: Option<f64>,
     pub cache_read_input_tokens_min: Option<i64>,
     pub cache_read_input_tokens_max: Option<i64>,
     pub cache_creation_input_tokens_min: Option<i64>,
@@ -998,9 +996,11 @@ WHERE id = $7
         price_data_json: &str,
         now_ms: i64,
     ) -> Result<i64, DbError> {
-        // Validate JSON early so bad data doesn't get into DB.
-        let _: Value = serde_json::from_str(price_data_json)
+        let value: Value = serde_json::from_str(price_data_json)
             .map_err(|e| DbError::new(format!("invalid price_data_json: {e}")))?;
+        let price = PriceCard::from_json(&value).map_err(DbError::new)?;
+        let normalized_json = serde_json::to_string(&price.to_json())
+            .map_err(|e| DbError::new(format!("invalid normalized price data: {e}")))?;
 
         match self {
             Database::Sqlite(pool) => {
@@ -1012,7 +1012,7 @@ VALUES (?, ?, ?, ?, ?)
                 )
                 .bind(provider_id)
                 .bind(model_name)
-                .bind(price_data_json)
+                .bind(&normalized_json)
                 .bind(now_ms)
                 .bind(now_ms)
                 .execute(pool)
@@ -1029,7 +1029,7 @@ RETURNING id
                 )
                 .bind(provider_id)
                 .bind(model_name)
-                .bind(price_data_json)
+                .bind(&normalized_json)
                 .bind(now_ms)
                 .bind(now_ms)
                 .fetch_one(pool)
@@ -1098,6 +1098,28 @@ RETURNING id
             Database::Postgres(pool) => {
                 aggregate_stats_events_range_postgres(pool, time_from_ms, time_to_ms).await
             }
+        }
+    }
+
+    pub async fn aggregate_pricing_usage_groups(
+        &self,
+        time_from_ms: i64,
+        time_to_ms: i64,
+    ) -> Result<Vec<PricingUsageGroupRow>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                aggregate_pricing_usage_groups_sqlite(pool, time_from_ms, time_to_ms).await
+            }
+            Database::Postgres(pool) => {
+                aggregate_pricing_usage_groups_postgres(pool, time_from_ms, time_to_ms).await
+            }
+        }
+    }
+
+    pub async fn list_price_versions(&self, ids: &[i64]) -> Result<Vec<PriceVersion>, DbError> {
+        match self {
+            Database::Sqlite(pool) => list_price_versions_sqlite(pool, ids).await,
+            Database::Postgres(pool) => list_price_versions_postgres(pool, ids).await,
         }
     }
 
@@ -2422,7 +2444,7 @@ async fn list_stats_daily_by_date_sqlite(
 SELECT date, api_key_id, request_success, request_failed,
        input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
        reasoning_output_tokens, usage_observed_requests,
-       cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms, updated_at_ms
+       wait_time_ms, updated_at_ms
 FROM stats_daily
 WHERE date = ?
 ORDER BY api_key_id ASC
@@ -2443,7 +2465,7 @@ async fn list_stats_daily_by_date_postgres(
 SELECT date, api_key_id, request_success, request_failed,
        input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
        reasoning_output_tokens, usage_observed_requests,
-       cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms, updated_at_ms
+       wait_time_ms, updated_at_ms
 FROM stats_daily
 WHERE date = $1
 ORDER BY api_key_id ASC
@@ -2467,9 +2489,6 @@ fn row_to_stats_daily_sqlite(row: sqlx::sqlite::SqliteRow) -> StatsDailyRow {
         cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
         reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
         usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
-        cost_in_usd: row.get::<String, _>("cost_in_usd"),
-        cost_out_usd: row.get::<String, _>("cost_out_usd"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
         wait_time_ms: row.get::<i64, _>("wait_time_ms"),
         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
     }
@@ -2487,9 +2506,6 @@ fn row_to_stats_daily_postgres(row: sqlx::postgres::PgRow) -> StatsDailyRow {
         cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
         reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
         usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
-        cost_in_usd: row.get::<String, _>("cost_in_usd"),
-        cost_out_usd: row.get::<String, _>("cost_out_usd"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
         wait_time_ms: row.get::<i64, _>("wait_time_ms"),
         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
     }
@@ -2508,14 +2524,12 @@ INSERT INTO stats_daily (
   request_success, request_failed,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed_requests,
-  cost_in_usd, cost_out_usd, cost_total_usd,
   wait_time_ms, updated_at_ms
 ) VALUES (
   ?, ?,
   ?, ?,
   ?, ?, ?, ?,
   ?, ?,
-  ?, ?, ?,
   ?, ?
 )
 ON CONFLICT(date, api_key_id) DO UPDATE SET
@@ -2527,9 +2541,6 @@ ON CONFLICT(date, api_key_id) DO UPDATE SET
   cache_creation_input_tokens = excluded.cache_creation_input_tokens,
   reasoning_output_tokens = excluded.reasoning_output_tokens,
   usage_observed_requests = excluded.usage_observed_requests,
-  cost_in_usd = excluded.cost_in_usd,
-  cost_out_usd = excluded.cost_out_usd,
-  cost_total_usd = excluded.cost_total_usd,
   wait_time_ms = excluded.wait_time_ms,
   updated_at_ms = excluded.updated_at_ms
 "#,
@@ -2544,9 +2555,6 @@ ON CONFLICT(date, api_key_id) DO UPDATE SET
         .bind(r.cache_creation_input_tokens)
         .bind(r.reasoning_output_tokens)
         .bind(r.usage_observed_requests)
-        .bind(&r.cost_in_usd)
-        .bind(&r.cost_out_usd)
-        .bind(&r.cost_total_usd)
         .bind(r.wait_time_ms)
         .bind(r.updated_at_ms)
         .execute(&mut *tx)
@@ -2566,15 +2574,13 @@ INSERT INTO stats_daily (
   request_success, request_failed,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed_requests,
-  cost_in_usd, cost_out_usd, cost_total_usd,
   wait_time_ms, updated_at_ms
 ) VALUES (
   $1, $2,
   $3, $4,
   $5, $6, $7, $8,
   $9, $10,
-  $11, $12, $13,
-  $14, $15
+  $11, $12
 )
 ON CONFLICT(date, api_key_id) DO UPDATE SET
   request_success = EXCLUDED.request_success,
@@ -2585,9 +2591,6 @@ ON CONFLICT(date, api_key_id) DO UPDATE SET
   cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens,
   reasoning_output_tokens = EXCLUDED.reasoning_output_tokens,
   usage_observed_requests = EXCLUDED.usage_observed_requests,
-  cost_in_usd = EXCLUDED.cost_in_usd,
-  cost_out_usd = EXCLUDED.cost_out_usd,
-  cost_total_usd = EXCLUDED.cost_total_usd,
   wait_time_ms = EXCLUDED.wait_time_ms,
   updated_at_ms = EXCLUDED.updated_at_ms
 "#,
@@ -2602,9 +2605,6 @@ ON CONFLICT(date, api_key_id) DO UPDATE SET
         .bind(r.cache_creation_input_tokens)
         .bind(r.reasoning_output_tokens)
         .bind(r.usage_observed_requests)
-        .bind(&r.cost_in_usd)
-        .bind(&r.cost_out_usd)
-        .bind(&r.cost_total_usd)
         .bind(r.wait_time_ms)
         .bind(r.updated_at_ms)
         .execute(&mut *tx)
@@ -2625,7 +2625,7 @@ async fn list_stats_daily_range_sqlite(
 SELECT date, api_key_id, request_success, request_failed,
        input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
        reasoning_output_tokens, usage_observed_requests,
-       cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms, updated_at_ms
+       wait_time_ms, updated_at_ms
 FROM stats_daily
 WHERE api_key_id = ?
   AND date >= ?
@@ -2652,7 +2652,7 @@ async fn list_stats_daily_range_postgres(
 SELECT date, api_key_id, request_success, request_failed,
        input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
        reasoning_output_tokens, usage_observed_requests,
-       cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms, updated_at_ms
+       wait_time_ms, updated_at_ms
 FROM stats_daily
 WHERE api_key_id = $1
   AND date >= $2
@@ -2684,7 +2684,7 @@ INSERT INTO request_logs (
   api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
-  cost_in_usd, cost_out_usd, cost_total_usd,
+  price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id,
   created_at_ms
@@ -2693,7 +2693,7 @@ INSERT INTO request_logs (
   ?, ?, ?, ?, ?,
   ?, ?, ?, ?,
   ?, ?,
-  ?, ?, ?,
+  ?, ?,
   ?, ?, ?, ?,
   ?, ?, ?, ?,
   ?
@@ -2717,9 +2717,8 @@ INSERT INTO request_logs (
         .bind(r.cache_creation_input_tokens)
         .bind(r.reasoning_output_tokens)
         .bind(if r.usage_observed { 1_i64 } else { 0_i64 })
-        .bind(&r.cost_in_usd)
-        .bind(&r.cost_out_usd)
-        .bind(&r.cost_total_usd)
+        .bind(r.price_version_id)
+        .bind(r.price_tier_index)
         .bind(r.t_stream_ms)
         .bind(r.t_first_byte_ms)
         .bind(r.t_first_token_ms)
@@ -2752,7 +2751,7 @@ INSERT INTO request_logs (
   api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
-  cost_in_usd, cost_out_usd, cost_total_usd,
+  price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id,
   created_at_ms
@@ -2761,10 +2760,10 @@ INSERT INTO request_logs (
   $7, $8, $9, $10, $11,
   $12, $13, $14, $15,
   $16, $17,
-  $18, $19, $20,
-  $21, $22, $23, $24,
-  $25, $26, $27, $28,
-  $29
+  $18, $19,
+  $20, $21, $22, $23,
+  $24, $25, $26, $27,
+  $28
 )
 "#,
         )
@@ -2785,9 +2784,8 @@ INSERT INTO request_logs (
         .bind(r.cache_creation_input_tokens)
         .bind(r.reasoning_output_tokens)
         .bind(r.usage_observed)
-        .bind(&r.cost_in_usd)
-        .bind(&r.cost_out_usd)
-        .bind(&r.cost_total_usd)
+        .bind(r.price_version_id)
+        .bind(r.price_tier_index)
         .bind(r.t_stream_ms)
         .bind(r.t_first_byte_ms)
         .bind(r.t_first_token_ms)
@@ -2819,12 +2817,14 @@ INSERT INTO stats_events (
   id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
   api_format, model, http_status, error_type,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-  reasoning_output_tokens, usage_observed, cost_total_usd, duration_ms, created_at_ms
+  reasoning_output_tokens, usage_observed, price_version_id, price_tier_index,
+  duration_ms, created_at_ms
 ) VALUES (
   ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?,
   ?, ?, ?, ?,
-  ?, ?, ?, ?, ?
+  ?, ?, ?, ?,
+  ?, ?
 )
 "#,
         )
@@ -2844,7 +2844,8 @@ INSERT INTO stats_events (
         .bind(r.cache_creation_input_tokens)
         .bind(r.reasoning_output_tokens)
         .bind(if r.usage_observed { 1_i64 } else { 0_i64 })
-        .bind(&r.cost_total_usd)
+        .bind(r.price_version_id)
+        .bind(r.price_tier_index)
         .bind(r.duration_ms)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
@@ -2869,12 +2870,14 @@ INSERT INTO stats_events (
   id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
   api_format, model, http_status, error_type,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-  reasoning_output_tokens, usage_observed, cost_total_usd, duration_ms, created_at_ms
+  reasoning_output_tokens, usage_observed, price_version_id, price_tier_index,
+  duration_ms, created_at_ms
 ) VALUES (
   $1, $2, $3, $4, $5, $6,
   $7, $8, $9, $10,
   $11, $12, $13, $14,
-  $15, $16, $17, $18, $19
+  $15, $16, $17, $18,
+  $19, $20
 )
 "#,
         )
@@ -2894,7 +2897,8 @@ INSERT INTO stats_events (
         .bind(r.cache_creation_input_tokens)
         .bind(r.reasoning_output_tokens)
         .bind(r.usage_observed)
-        .bind(&r.cost_total_usd)
+        .bind(r.price_version_id)
+        .bind(r.price_tier_index)
         .bind(r.duration_ms)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
@@ -2914,7 +2918,6 @@ fn row_to_stats_overview_agg_sqlite(row: sqlx::sqlite::SqliteRow) -> StatsOvervi
         cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
         reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
         usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
         wait_time_ms: row.get::<i64, _>("wait_time_ms"),
         latency_lt_500ms: row.get::<i64, _>("latency_lt_500ms"),
         latency_lt_1000ms: row.get::<i64, _>("latency_lt_1000ms"),
@@ -2935,7 +2938,6 @@ fn row_to_stats_overview_agg_postgres(row: sqlx::postgres::PgRow) -> StatsOvervi
         cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
         reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
         usage_observed_requests: row.get::<i64, _>("usage_observed_requests"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
         wait_time_ms: row.get::<i64, _>("wait_time_ms"),
         latency_lt_500ms: row.get::<i64, _>("latency_lt_500ms"),
         latency_lt_1000ms: row.get::<i64, _>("latency_lt_1000ms"),
@@ -2962,7 +2964,6 @@ SELECT
   COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
   COALESCE(SUM(reasoning_output_tokens), 0) AS reasoning_output_tokens,
   COALESCE(SUM(CASE WHEN usage_observed != 0 THEN 1 ELSE 0 END), 0) AS usage_observed_requests,
-  CAST(COALESCE(SUM(CAST(cost_total_usd AS REAL)), 0) AS TEXT) AS cost_total_usd,
   COALESCE(SUM(COALESCE(duration_ms, 0)), 0) AS wait_time_ms,
   COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) < 500 THEN 1 ELSE 0 END), 0) AS latency_lt_500ms,
   COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 500 AND COALESCE(duration_ms, 0) < 1000 THEN 1 ELSE 0 END), 0) AS latency_lt_1000ms,
@@ -2997,7 +2998,6 @@ SELECT
   COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens,
   COALESCE(SUM(reasoning_output_tokens), 0)::BIGINT AS reasoning_output_tokens,
   COALESCE(SUM(CASE WHEN usage_observed THEN 1 ELSE 0 END), 0)::BIGINT AS usage_observed_requests,
-  COALESCE(SUM(cost_total_usd::DOUBLE PRECISION), 0)::TEXT AS cost_total_usd,
   COALESCE(SUM(COALESCE(duration_ms, 0)), 0)::BIGINT AS wait_time_ms,
   COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) < 500 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_500ms,
   COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 500 AND COALESCE(duration_ms, 0) < 1000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_1000ms,
@@ -3016,6 +3016,86 @@ WHERE time_ms >= $1 AND time_ms <= $2
     Ok(row_to_stats_overview_agg_postgres(row))
 }
 
+async fn aggregate_pricing_usage_groups_sqlite(
+    pool: &SqlitePool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<Vec<PricingUsageGroupRow>, DbError> {
+    let rows = sqlx::query(
+        r#"
+SELECT
+  price_version_id,
+  price_tier_index,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens
+FROM stats_events
+WHERE time_ms >= ? AND time_ms <= ? AND usage_observed != 0
+GROUP BY price_version_id, price_tier_index
+ORDER BY price_version_id, price_tier_index
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PricingUsageGroupRow {
+            price_version_id: row.get::<Option<i64>, _>("price_version_id"),
+            price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
+            request_count: row.get::<i64, _>("request_count"),
+            input_tokens: row.get::<i64, _>("input_tokens"),
+            output_tokens: row.get::<i64, _>("output_tokens"),
+            cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
+            cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
+        })
+        .collect())
+}
+
+async fn aggregate_pricing_usage_groups_postgres(
+    pool: &PgPool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<Vec<PricingUsageGroupRow>, DbError> {
+    let rows = sqlx::query(
+        r#"
+SELECT
+  price_version_id,
+  price_tier_index,
+  COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0)::BIGINT AS cache_read_input_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens
+FROM stats_events
+WHERE time_ms >= $1 AND time_ms <= $2 AND usage_observed
+GROUP BY price_version_id, price_tier_index
+ORDER BY price_version_id, price_tier_index
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PricingUsageGroupRow {
+            price_version_id: row.get::<Option<i64>, _>("price_version_id"),
+            price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
+            request_count: row.get::<i64, _>("request_count"),
+            input_tokens: row.get::<i64, _>("input_tokens"),
+            output_tokens: row.get::<i64, _>("output_tokens"),
+            cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
+            cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
+        })
+        .collect())
+}
+
 async fn list_request_logs_before_sqlite(
     pool: &SqlitePool,
     cutoff_time_ms: i64,
@@ -3028,7 +3108,7 @@ SELECT
   api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
-  cost_in_usd, cost_out_usd, cost_total_usd,
+  price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id,
   created_at_ms
@@ -3103,7 +3183,7 @@ SELECT
   api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
-  cost_in_usd, cost_out_usd, cost_total_usd,
+  price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id,
   created_at_ms
@@ -3415,18 +3495,6 @@ fn append_request_logs_filters_sqlite(
         qb.push("reasoning_output_tokens <= ");
         qb.push_bind(reasoning_output_tokens_max);
     }
-    if let Some(cost_total_min) = filter.cost_total_min {
-        qb.push(if has_where { " AND " } else { " WHERE " });
-        has_where = true;
-        qb.push("CAST(cost_total_usd AS REAL) >= ");
-        qb.push_bind(cost_total_min);
-    }
-    if let Some(cost_total_max) = filter.cost_total_max {
-        qb.push(if has_where { " AND " } else { " WHERE " });
-        has_where = true;
-        qb.push("CAST(cost_total_usd AS REAL) <= ");
-        qb.push_bind(cost_total_max);
-    }
     if let Some(cache_read_input_tokens_min) = filter.cache_read_input_tokens_min {
         qb.push(if has_where { " AND " } else { " WHERE " });
         has_where = true;
@@ -3618,18 +3686,6 @@ fn append_request_logs_filters_postgres(
         qb.push("reasoning_output_tokens <= ");
         qb.push_bind(reasoning_output_tokens_max);
     }
-    if let Some(cost_total_min) = filter.cost_total_min {
-        qb.push(if has_where { " AND " } else { " WHERE " });
-        has_where = true;
-        qb.push("CAST(cost_total_usd AS DOUBLE PRECISION) >= ");
-        qb.push_bind(cost_total_min);
-    }
-    if let Some(cost_total_max) = filter.cost_total_max {
-        qb.push(if has_where { " AND " } else { " WHERE " });
-        has_where = true;
-        qb.push("CAST(cost_total_usd AS DOUBLE PRECISION) <= ");
-        qb.push_bind(cost_total_max);
-    }
     if let Some(cache_read_input_tokens_min) = filter.cache_read_input_tokens_min {
         qb.push(if has_where { " AND " } else { " WHERE " });
         has_where = true;
@@ -3678,9 +3734,8 @@ fn row_to_request_log_sqlite(row: sqlx::sqlite::SqliteRow) -> RequestLogRow {
         cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
         reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
         usage_observed: row.get::<i64, _>("usage_observed") != 0,
-        cost_in_usd: row.get::<String, _>("cost_in_usd"),
-        cost_out_usd: row.get::<String, _>("cost_out_usd"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
+        price_version_id: row.get::<Option<i64>, _>("price_version_id"),
+        price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
         t_stream_ms: row.get::<Option<i64>, _>("t_stream_ms"),
         t_first_byte_ms: row.get::<Option<i64>, _>("t_first_byte_ms"),
         t_first_token_ms: row.get::<Option<i64>, _>("t_first_token_ms"),
@@ -3712,9 +3767,8 @@ fn row_to_request_log_postgres(row: sqlx::postgres::PgRow) -> RequestLogRow {
         cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
         reasoning_output_tokens: row.get::<i64, _>("reasoning_output_tokens"),
         usage_observed: row.get::<bool, _>("usage_observed"),
-        cost_in_usd: row.get::<String, _>("cost_in_usd"),
-        cost_out_usd: row.get::<String, _>("cost_out_usd"),
-        cost_total_usd: row.get::<String, _>("cost_total_usd"),
+        price_version_id: row.get::<Option<i64>, _>("price_version_id"),
+        price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
         t_stream_ms: row.get::<Option<i64>, _>("t_stream_ms"),
         t_first_byte_ms: row.get::<Option<i64>, _>("t_first_byte_ms"),
         t_first_token_ms: row.get::<Option<i64>, _>("t_first_token_ms"),
@@ -3878,6 +3932,8 @@ async fn upsert_stats_hourly_sqlite(
             .bind(r.upstream_key_id)
             .bind(&r.api_format)
             .bind(&r.model)
+            .bind(r.price_version_id)
+            .bind(r.price_tier_index)
             .bind(r.request_success)
             .bind(r.request_failed)
             .bind(r.input_tokens)
@@ -3886,9 +3942,6 @@ async fn upsert_stats_hourly_sqlite(
             .bind(r.cache_creation_input_tokens)
             .bind(r.reasoning_output_tokens)
             .bind(r.usage_observed_requests)
-            .bind(&r.cost_in_usd)
-            .bind(&r.cost_out_usd)
-            .bind(&r.cost_total_usd)
             .bind(r.wait_time_ms)
             .bind(r.latency_lt_500ms)
             .bind(r.latency_lt_1000ms)
@@ -3916,6 +3969,8 @@ async fn upsert_stats_hourly_postgres(
             .bind(r.upstream_key_id)
             .bind(&r.api_format)
             .bind(&r.model)
+            .bind(r.price_version_id)
+            .bind(r.price_tier_index)
             .bind(r.request_success)
             .bind(r.request_failed)
             .bind(r.input_tokens)
@@ -3924,9 +3979,6 @@ async fn upsert_stats_hourly_postgres(
             .bind(r.cache_creation_input_tokens)
             .bind(r.reasoning_output_tokens)
             .bind(r.usage_observed_requests)
-            .bind(&r.cost_in_usd)
-            .bind(&r.cost_out_usd)
-            .bind(&r.cost_total_usd)
             .bind(r.wait_time_ms)
             .bind(r.latency_lt_500ms)
             .bind(r.latency_lt_1000ms)
@@ -3944,22 +3996,24 @@ async fn upsert_stats_hourly_postgres(
 const STATS_HOURLY_UPSERT_SQLITE: &str = r#"
 INSERT INTO stats_hourly (
   bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model,
+  price_version_id, price_tier_index,
   request_success, request_failed,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed_requests,
-  cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms,
+  wait_time_ms,
   latency_lt_500ms, latency_lt_1000ms, latency_lt_2000ms, latency_lt_5000ms,
   latency_lt_15000ms, latency_gte_15000ms, updated_at_ms
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?,
   ?, ?,
-  ?, ?, ?, ?,
   ?, ?,
   ?, ?, ?, ?,
+  ?, ?,
+  ?,
   ?, ?, ?, ?,
   ?, ?, ?
 )
-ON CONFLICT(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model)
+ON CONFLICT(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model, price_version_id, price_tier_index)
 DO UPDATE SET
   request_success = stats_hourly.request_success + excluded.request_success,
   request_failed = stats_hourly.request_failed + excluded.request_failed,
@@ -3969,9 +4023,6 @@ DO UPDATE SET
   cache_creation_input_tokens = stats_hourly.cache_creation_input_tokens + excluded.cache_creation_input_tokens,
   reasoning_output_tokens = stats_hourly.reasoning_output_tokens + excluded.reasoning_output_tokens,
   usage_observed_requests = stats_hourly.usage_observed_requests + excluded.usage_observed_requests,
-  cost_in_usd = CAST((CAST(stats_hourly.cost_in_usd AS REAL) + CAST(excluded.cost_in_usd AS REAL)) AS TEXT),
-  cost_out_usd = CAST((CAST(stats_hourly.cost_out_usd AS REAL) + CAST(excluded.cost_out_usd AS REAL)) AS TEXT),
-  cost_total_usd = CAST((CAST(stats_hourly.cost_total_usd AS REAL) + CAST(excluded.cost_total_usd AS REAL)) AS TEXT),
   wait_time_ms = stats_hourly.wait_time_ms + excluded.wait_time_ms,
   latency_lt_500ms = stats_hourly.latency_lt_500ms + excluded.latency_lt_500ms,
   latency_lt_1000ms = stats_hourly.latency_lt_1000ms + excluded.latency_lt_1000ms,
@@ -3985,22 +4036,24 @@ DO UPDATE SET
 const STATS_HOURLY_UPSERT_POSTGRES: &str = r#"
 INSERT INTO stats_hourly (
   bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model,
+  price_version_id, price_tier_index,
   request_success, request_failed,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed_requests,
-  cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms,
+  wait_time_ms,
   latency_lt_500ms, latency_lt_1000ms, latency_lt_2000ms, latency_lt_5000ms,
   latency_lt_15000ms, latency_gte_15000ms, updated_at_ms
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7,
   $8, $9,
-  $10, $11, $12, $13,
-  $14, $15,
-  $16, $17, $18, $19,
-  $20, $21, $22, $23,
-  $24, $25, $26
+  $10, $11,
+  $12, $13, $14, $15,
+  $16, $17,
+  $18,
+  $19, $20, $21, $22,
+  $23, $24, $25
 )
-ON CONFLICT(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model)
+ON CONFLICT(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model, price_version_id, price_tier_index)
 DO UPDATE SET
   request_success = stats_hourly.request_success + EXCLUDED.request_success,
   request_failed = stats_hourly.request_failed + EXCLUDED.request_failed,
@@ -4010,9 +4063,6 @@ DO UPDATE SET
   cache_creation_input_tokens = stats_hourly.cache_creation_input_tokens + EXCLUDED.cache_creation_input_tokens,
   reasoning_output_tokens = stats_hourly.reasoning_output_tokens + EXCLUDED.reasoning_output_tokens,
   usage_observed_requests = stats_hourly.usage_observed_requests + EXCLUDED.usage_observed_requests,
-  cost_in_usd = ((stats_hourly.cost_in_usd::DOUBLE PRECISION + EXCLUDED.cost_in_usd::DOUBLE PRECISION)::TEXT),
-  cost_out_usd = ((stats_hourly.cost_out_usd::DOUBLE PRECISION + EXCLUDED.cost_out_usd::DOUBLE PRECISION)::TEXT),
-  cost_total_usd = ((stats_hourly.cost_total_usd::DOUBLE PRECISION + EXCLUDED.cost_total_usd::DOUBLE PRECISION)::TEXT),
   wait_time_ms = stats_hourly.wait_time_ms + EXCLUDED.wait_time_ms,
   latency_lt_500ms = stats_hourly.latency_lt_500ms + EXCLUDED.latency_lt_500ms,
   latency_lt_1000ms = stats_hourly.latency_lt_1000ms + EXCLUDED.latency_lt_1000ms,
@@ -4249,8 +4299,7 @@ CREATE TABLE IF NOT EXISTS model_prices (
   model_name TEXT NOT NULL,
   price_data_json TEXT NOT NULL,
   created_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL,
-  FOREIGN KEY(provider_id) REFERENCES upstream_providers(id) ON DELETE CASCADE
+  updated_at_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_model_prices_model_created ON model_prices(model_name, created_at_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_model_prices_provider_model_created ON model_prices(provider_id, model_name, created_at_ms DESC, id DESC);
@@ -4272,9 +4321,6 @@ CREATE TABLE IF NOT EXISTS stats_daily (
   cache_creation_input_tokens INTEGER NOT NULL,
   reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
   usage_observed_requests INTEGER NOT NULL DEFAULT 0,
-  cost_in_usd TEXT NOT NULL,
-  cost_out_usd TEXT NOT NULL,
-  cost_total_usd TEXT NOT NULL,
   wait_time_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY(date, api_key_id)
@@ -4294,6 +4340,8 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
   upstream_key_id INTEGER NOT NULL,
   api_format TEXT NOT NULL,
   model TEXT NOT NULL,
+  price_version_id INTEGER NOT NULL DEFAULT 0,
+  price_tier_index INTEGER NOT NULL DEFAULT -1,
   request_success INTEGER NOT NULL,
   request_failed INTEGER NOT NULL,
   input_tokens INTEGER NOT NULL,
@@ -4302,9 +4350,6 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
   cache_creation_input_tokens INTEGER NOT NULL,
   reasoning_output_tokens INTEGER NOT NULL,
   usage_observed_requests INTEGER NOT NULL,
-  cost_in_usd TEXT NOT NULL,
-  cost_out_usd TEXT NOT NULL,
-  cost_total_usd TEXT NOT NULL,
   wait_time_ms INTEGER NOT NULL,
   latency_lt_500ms INTEGER NOT NULL,
   latency_lt_1000ms INTEGER NOT NULL,
@@ -4313,7 +4358,7 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
   latency_lt_15000ms INTEGER NOT NULL,
   latency_gte_15000ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
-  PRIMARY KEY(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model)
+  PRIMARY KEY(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model, price_version_id, price_tier_index)
 );
 CREATE INDEX IF NOT EXISTS idx_stats_hourly_bucket ON stats_hourly(bucket_ms);
 CREATE INDEX IF NOT EXISTS idx_stats_hourly_model_bucket ON stats_hourly(model, bucket_ms);
@@ -4354,9 +4399,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
   cache_creation_input_tokens INTEGER NOT NULL,
   reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
   usage_observed INTEGER NOT NULL DEFAULT 0,
-  cost_in_usd TEXT NOT NULL,
-  cost_out_usd TEXT NOT NULL,
-  cost_total_usd TEXT NOT NULL,
+  price_version_id INTEGER,
+  price_tier_index INTEGER,
   t_stream_ms INTEGER,
   t_first_byte_ms INTEGER,
   t_first_token_ms INTEGER,
@@ -4393,7 +4437,8 @@ CREATE TABLE IF NOT EXISTS stats_events (
   cache_creation_input_tokens INTEGER NOT NULL,
   reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
   usage_observed INTEGER NOT NULL DEFAULT 0,
-  cost_total_usd TEXT NOT NULL,
+  price_version_id INTEGER,
+  price_tier_index INTEGER,
   duration_ms INTEGER,
   created_at_ms INTEGER NOT NULL
 );
@@ -4410,6 +4455,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_sqlite_request_log_span_columns(pool).await?;
     ensure_sqlite_model_prices_provider_scope(pool).await?;
     migrate_sqlite_provider_model_aliases(pool).await?;
+    migrate_sqlite_pricing_storage(pool).await?;
     Ok(())
 }
 
@@ -4594,7 +4640,7 @@ CREATE INDEX IF NOT EXISTS idx_model_alias_targets_provider ON model_alias_targe
         r#"
 CREATE TABLE IF NOT EXISTS model_prices (
   id BIGSERIAL PRIMARY KEY,
-  provider_id BIGINT REFERENCES upstream_providers(id) ON DELETE CASCADE,
+  provider_id BIGINT,
   model_name TEXT NOT NULL,
   price_data_json TEXT NOT NULL,
   created_at_ms BIGINT NOT NULL,
@@ -4620,9 +4666,6 @@ CREATE TABLE IF NOT EXISTS stats_daily (
   cache_creation_input_tokens BIGINT NOT NULL,
   reasoning_output_tokens BIGINT NOT NULL DEFAULT 0,
   usage_observed_requests BIGINT NOT NULL DEFAULT 0,
-  cost_in_usd TEXT NOT NULL,
-  cost_out_usd TEXT NOT NULL,
-  cost_total_usd TEXT NOT NULL,
   wait_time_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL,
   PRIMARY KEY(date, api_key_id)
@@ -4642,6 +4685,8 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
   upstream_key_id BIGINT NOT NULL,
   api_format TEXT NOT NULL,
   model TEXT NOT NULL,
+  price_version_id BIGINT NOT NULL DEFAULT 0,
+  price_tier_index INTEGER NOT NULL DEFAULT -1,
   request_success BIGINT NOT NULL,
   request_failed BIGINT NOT NULL,
   input_tokens BIGINT NOT NULL,
@@ -4650,9 +4695,6 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
   cache_creation_input_tokens BIGINT NOT NULL,
   reasoning_output_tokens BIGINT NOT NULL,
   usage_observed_requests BIGINT NOT NULL,
-  cost_in_usd TEXT NOT NULL,
-  cost_out_usd TEXT NOT NULL,
-  cost_total_usd TEXT NOT NULL,
   wait_time_ms BIGINT NOT NULL,
   latency_lt_500ms BIGINT NOT NULL,
   latency_lt_1000ms BIGINT NOT NULL,
@@ -4661,7 +4703,7 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
   latency_lt_15000ms BIGINT NOT NULL,
   latency_gte_15000ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL,
-  PRIMARY KEY(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model)
+  PRIMARY KEY(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model, price_version_id, price_tier_index)
 );
 CREATE INDEX IF NOT EXISTS idx_stats_hourly_bucket ON stats_hourly(bucket_ms);
 CREATE INDEX IF NOT EXISTS idx_stats_hourly_model_bucket ON stats_hourly(model, bucket_ms);
@@ -4702,9 +4744,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
   cache_creation_input_tokens BIGINT NOT NULL,
   reasoning_output_tokens BIGINT NOT NULL DEFAULT 0,
   usage_observed BOOLEAN NOT NULL DEFAULT FALSE,
-  cost_in_usd TEXT NOT NULL,
-  cost_out_usd TEXT NOT NULL,
-  cost_total_usd TEXT NOT NULL,
+  price_version_id BIGINT,
+  price_tier_index INTEGER,
   t_stream_ms BIGINT,
   t_first_byte_ms BIGINT,
   t_first_token_ms BIGINT,
@@ -4741,7 +4782,8 @@ CREATE TABLE IF NOT EXISTS stats_events (
   cache_creation_input_tokens BIGINT NOT NULL,
   reasoning_output_tokens BIGINT NOT NULL DEFAULT 0,
   usage_observed BOOLEAN NOT NULL DEFAULT FALSE,
-  cost_total_usd TEXT NOT NULL,
+  price_version_id BIGINT,
+  price_tier_index INTEGER,
   duration_ms BIGINT,
   created_at_ms BIGINT NOT NULL
 );
@@ -4758,6 +4800,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_postgres_request_log_span_columns(pool).await?;
     ensure_postgres_model_prices_provider_scope(pool).await?;
     migrate_postgres_provider_model_aliases(pool).await?;
+    migrate_postgres_pricing_storage(pool).await?;
     Ok(())
 }
 
@@ -5048,6 +5091,544 @@ WHERE NOT EXISTS (
     Ok(())
 }
 
+async fn migrate_sqlite_pricing_storage(pool: &SqlitePool) -> Result<(), DbError> {
+    ensure_sqlite_column(
+        pool,
+        "stats_events",
+        "reasoning_output_tokens",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_sqlite_column(
+        pool,
+        "stats_events",
+        "usage_observed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_sqlite_column(
+        pool,
+        "stats_hourly",
+        "reasoning_output_tokens",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_sqlite_column(
+        pool,
+        "stats_hourly",
+        "usage_observed_requests",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+
+    rebuild_sqlite_model_prices_without_provider_fk(pool).await?;
+    rebuild_sqlite_stats_daily_without_cost(pool).await?;
+    rebuild_sqlite_stats_hourly_for_pricing(pool).await?;
+    rebuild_sqlite_request_logs_for_pricing(pool).await?;
+    rebuild_sqlite_stats_events_for_pricing(pool).await?;
+    Ok(())
+}
+
+async fn ensure_sqlite_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), DbError> {
+    if sqlite_column_exists(pool, table, column).await? {
+        return Ok(());
+    }
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    sqlx::query(&sql).execute(pool).await?;
+    Ok(())
+}
+
+async fn sqlite_column_is_in_primary_key(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+) -> Result<bool, DbError> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .any(|row| row.get::<String, _>("name") == column && row.get::<i64, _>("pk") > 0))
+}
+
+async fn rebuild_sqlite_model_prices_without_provider_fk(pool: &SqlitePool) -> Result<(), DbError> {
+    let foreign_keys = sqlx::query("PRAGMA foreign_key_list(model_prices)")
+        .fetch_all(pool)
+        .await?;
+    let has_provider_fk = foreign_keys.into_iter().any(|row| {
+        row.get::<String, _>("table") == "upstream_providers"
+            && row.get::<String, _>("from") == "provider_id"
+    });
+    if !has_provider_fk {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE model_prices RENAME TO model_prices_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+CREATE TABLE model_prices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER,
+  model_name TEXT NOT NULL,
+  price_data_json TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+)
+"#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT INTO model_prices (id, provider_id, model_name, price_data_json, created_at_ms, updated_at_ms)
+SELECT id, provider_id, model_name, price_data_json, created_at_ms, updated_at_ms
+FROM model_prices_legacy_pricing
+"#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DROP TABLE model_prices_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX idx_model_prices_model_created ON model_prices(model_name, created_at_ms DESC, id DESC)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX idx_model_prices_provider_model_created ON model_prices(provider_id, model_name, created_at_ms DESC, id DESC)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn rebuild_sqlite_stats_daily_without_cost(pool: &SqlitePool) -> Result<(), DbError> {
+    if !sqlite_column_exists(pool, "stats_daily", "cost_total_usd").await? {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE stats_daily RENAME TO stats_daily_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+CREATE TABLE stats_daily (
+  date TEXT NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  request_success INTEGER NOT NULL,
+  request_failed INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL,
+  cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  usage_observed_requests INTEGER NOT NULL DEFAULT 0,
+  wait_time_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(date, api_key_id)
+)
+"#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT INTO stats_daily (
+  date, api_key_id, request_success, request_failed,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed_requests, wait_time_ms, updated_at_ms
+)
+SELECT
+  date, api_key_id, request_success, request_failed,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed_requests, wait_time_ms, updated_at_ms
+FROM stats_daily_legacy_pricing
+"#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DROP TABLE stats_daily_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn rebuild_sqlite_stats_hourly_for_pricing(pool: &SqlitePool) -> Result<(), DbError> {
+    let has_price_version = sqlite_column_exists(pool, "stats_hourly", "price_version_id").await?;
+    let has_price_tier = sqlite_column_exists(pool, "stats_hourly", "price_tier_index").await?;
+    let has_cost = sqlite_column_exists(pool, "stats_hourly", "cost_total_usd").await?;
+    let pricing_in_primary_key = has_price_version
+        && has_price_tier
+        && sqlite_column_is_in_primary_key(pool, "stats_hourly", "price_version_id").await?
+        && sqlite_column_is_in_primary_key(pool, "stats_hourly", "price_tier_index").await?;
+    if !has_cost && has_price_version && has_price_tier && pricing_in_primary_key {
+        return Ok(());
+    }
+    let price_version_select = if has_price_version {
+        "price_version_id"
+    } else {
+        "0"
+    };
+    let price_tier_select = if has_price_tier {
+        "price_tier_index"
+    } else {
+        "-1"
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE stats_hourly RENAME TO stats_hourly_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+CREATE TABLE stats_hourly (
+  bucket_ms INTEGER NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  provider_id INTEGER NOT NULL,
+  endpoint_id INTEGER NOT NULL,
+  upstream_key_id INTEGER NOT NULL,
+  api_format TEXT NOT NULL,
+  model TEXT NOT NULL,
+  price_version_id INTEGER NOT NULL DEFAULT 0,
+  price_tier_index INTEGER NOT NULL DEFAULT -1,
+  request_success INTEGER NOT NULL,
+  request_failed INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL,
+  cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL,
+  usage_observed_requests INTEGER NOT NULL,
+  wait_time_ms INTEGER NOT NULL,
+  latency_lt_500ms INTEGER NOT NULL,
+  latency_lt_1000ms INTEGER NOT NULL,
+  latency_lt_2000ms INTEGER NOT NULL,
+  latency_lt_5000ms INTEGER NOT NULL,
+  latency_lt_15000ms INTEGER NOT NULL,
+  latency_gte_15000ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model, price_version_id, price_tier_index)
+)
+"#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let insert_sql = format!(
+        r#"
+INSERT INTO stats_hourly (
+  bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model,
+  price_version_id, price_tier_index, request_success, request_failed,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed_requests, wait_time_ms,
+  latency_lt_500ms, latency_lt_1000ms, latency_lt_2000ms, latency_lt_5000ms,
+  latency_lt_15000ms, latency_gte_15000ms, updated_at_ms
+)
+SELECT
+  bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model,
+  {price_version_select}, {price_tier_select}, request_success, request_failed,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed_requests, wait_time_ms,
+  latency_lt_500ms, latency_lt_1000ms, latency_lt_2000ms, latency_lt_5000ms,
+  latency_lt_15000ms, latency_gte_15000ms, updated_at_ms
+FROM stats_hourly_legacy_pricing
+"#,
+    );
+    sqlx::query(&insert_sql).execute(&mut *tx).await?;
+    sqlx::query("DROP TABLE stats_hourly_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE INDEX idx_stats_hourly_bucket ON stats_hourly(bucket_ms)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE INDEX idx_stats_hourly_model_bucket ON stats_hourly(model, bucket_ms)")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn rebuild_sqlite_request_logs_for_pricing(pool: &SqlitePool) -> Result<(), DbError> {
+    let has_price_version = sqlite_column_exists(pool, "request_logs", "price_version_id").await?;
+    let has_price_tier = sqlite_column_exists(pool, "request_logs", "price_tier_index").await?;
+    let has_cost = sqlite_column_exists(pool, "request_logs", "cost_total_usd").await?;
+    if !has_cost && has_price_version && has_price_tier {
+        return Ok(());
+    }
+    let price_version_select = if has_price_version {
+        "price_version_id"
+    } else {
+        "NULL"
+    };
+    let price_tier_select = if has_price_tier {
+        "price_tier_index"
+    } else {
+        "NULL"
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE request_logs RENAME TO request_logs_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+CREATE TABLE request_logs (
+  id TEXT PRIMARY KEY,
+  time_ms INTEGER NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  provider_id INTEGER,
+  endpoint_id INTEGER,
+  upstream_key_id INTEGER,
+  api_format TEXT NOT NULL,
+  model TEXT,
+  http_status INTEGER,
+  error_type TEXT,
+  error_message TEXT,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL,
+  cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  usage_observed INTEGER NOT NULL DEFAULT 0,
+  price_version_id INTEGER,
+  price_tier_index INTEGER,
+  t_stream_ms INTEGER,
+  t_first_byte_ms INTEGER,
+  t_first_token_ms INTEGER,
+  duration_ms INTEGER,
+  span_kind TEXT NOT NULL DEFAULT 'request',
+  transport TEXT NOT NULL DEFAULT 'http',
+  parent_id TEXT,
+  ws_session_id TEXT,
+  created_at_ms INTEGER NOT NULL
+)
+"#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let insert_sql = format!(
+        r#"
+INSERT INTO request_logs (
+  id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
+  api_format, model, http_status, error_type, error_message,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed, price_version_id, price_tier_index,
+  t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
+  span_kind, transport, parent_id, ws_session_id, created_at_ms
+)
+SELECT
+  id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
+  api_format, model, http_status, error_type, error_message,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed, {price_version_select}, {price_tier_select},
+  t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
+  span_kind, transport, parent_id, ws_session_id, created_at_ms
+FROM request_logs_legacy_pricing
+"#,
+    );
+    sqlx::query(&insert_sql).execute(&mut *tx).await?;
+    sqlx::query("DROP TABLE request_logs_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE INDEX idx_request_logs_time ON request_logs(time_ms DESC)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX idx_request_logs_api_key_time ON request_logs(api_key_id, time_ms DESC)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn rebuild_sqlite_stats_events_for_pricing(pool: &SqlitePool) -> Result<(), DbError> {
+    let has_price_version = sqlite_column_exists(pool, "stats_events", "price_version_id").await?;
+    let has_price_tier = sqlite_column_exists(pool, "stats_events", "price_tier_index").await?;
+    let has_cost = sqlite_column_exists(pool, "stats_events", "cost_total_usd").await?;
+    if !has_cost && has_price_version && has_price_tier {
+        return Ok(());
+    }
+    let price_version_select = if has_price_version {
+        "price_version_id"
+    } else {
+        "NULL"
+    };
+    let price_tier_select = if has_price_tier {
+        "price_tier_index"
+    } else {
+        "NULL"
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE stats_events RENAME TO stats_events_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+CREATE TABLE stats_events (
+  id TEXT PRIMARY KEY,
+  time_ms INTEGER NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  provider_id INTEGER,
+  endpoint_id INTEGER,
+  upstream_key_id INTEGER,
+  api_format TEXT NOT NULL,
+  model TEXT,
+  http_status INTEGER,
+  error_type TEXT,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL,
+  cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  usage_observed INTEGER NOT NULL DEFAULT 0,
+  price_version_id INTEGER,
+  price_tier_index INTEGER,
+  duration_ms INTEGER,
+  created_at_ms INTEGER NOT NULL
+)
+"#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let insert_sql = format!(
+        r#"
+INSERT INTO stats_events (
+  id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
+  api_format, model, http_status, error_type,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed, price_version_id, price_tier_index,
+  duration_ms, created_at_ms
+)
+SELECT
+  id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
+  api_format, model, http_status, error_type,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  reasoning_output_tokens, usage_observed, {price_version_select}, {price_tier_select},
+  duration_ms, created_at_ms
+FROM stats_events_legacy_pricing
+"#,
+    );
+    sqlx::query(&insert_sql).execute(&mut *tx).await?;
+    sqlx::query("DROP TABLE stats_events_legacy_pricing")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE INDEX idx_stats_events_time ON stats_events(time_ms DESC)")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn migrate_postgres_pricing_storage(pool: &PgPool) -> Result<(), DbError> {
+    sqlx::query("ALTER TABLE model_prices DROP CONSTRAINT IF EXISTS model_prices_provider_id_fkey")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS price_version_id BIGINT")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS price_tier_index INTEGER")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE request_logs DROP COLUMN IF EXISTS cost_in_usd")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE request_logs DROP COLUMN IF EXISTS cost_out_usd")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE request_logs DROP COLUMN IF EXISTS cost_total_usd")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("ALTER TABLE stats_events ADD COLUMN IF NOT EXISTS price_version_id BIGINT")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE stats_events ADD COLUMN IF NOT EXISTS price_tier_index INTEGER")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE stats_events DROP COLUMN IF EXISTS cost_total_usd")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("ALTER TABLE stats_daily DROP COLUMN IF EXISTS cost_in_usd")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE stats_daily DROP COLUMN IF EXISTS cost_out_usd")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE stats_daily DROP COLUMN IF EXISTS cost_total_usd")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS price_version_id BIGINT NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS price_tier_index INTEGER NOT NULL DEFAULT -1",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE stats_hourly DROP COLUMN IF EXISTS cost_in_usd")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE stats_hourly DROP COLUMN IF EXISTS cost_out_usd")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE stats_hourly DROP COLUMN IF EXISTS cost_total_usd")
+        .execute(pool)
+        .await?;
+    let primary_key = sqlx::query(
+        r#"
+SELECT pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE conrelid = 'stats_hourly'::regclass AND contype = 'p'
+"#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let pricing_is_in_primary_key = primary_key.is_some_and(|row| {
+        let definition = row.get::<String, _>("definition");
+        definition.contains("price_version_id") && definition.contains("price_tier_index")
+    });
+    if !pricing_is_in_primary_key {
+        sqlx::query("ALTER TABLE stats_hourly DROP CONSTRAINT IF EXISTS stats_hourly_pkey")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            r#"
+ALTER TABLE stats_hourly
+ADD CONSTRAINT stats_hourly_pkey PRIMARY KEY (
+  bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
+  api_format, model, price_version_id, price_tier_index
+)
+"#,
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn ensure_postgres_token_usage_columns(pool: &PgPool) -> Result<(), DbError> {
     sqlx::query(
         "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS reasoning_output_tokens BIGINT NOT NULL DEFAULT 0",
@@ -5131,14 +5712,15 @@ mod tests {
             cache_creation_input_tokens: 5,
             reasoning_output_tokens: 1,
             usage_observed: true,
-            cost_total_usd: "1.250000000000000".to_string(),
+            price_version_id: Some(7),
+            price_tier_index: Some(1),
             duration_ms: Some(750),
             created_at_ms: time_ms,
         }
     }
 
     #[tokio::test]
-    async fn migrate_sqlite_should_add_token_usage_columns_idempotently_with_defaults() {
+    async fn migrate_sqlite_should_be_idempotent_with_pricing_references() {
         let db = sqlite_memory_db().await;
         db.migrate().await.expect("second migrate");
 
@@ -5191,17 +5773,27 @@ mod tests {
                 .await
                 .expect("stats_daily usage observed column")
         );
+        assert!(
+            sqlite_column_exists(&pool, "request_logs", "price_version_id")
+                .await
+                .expect("request_logs price version column")
+        );
+        assert!(
+            !sqlite_column_exists(&pool, "request_logs", "cost_total_usd")
+                .await
+                .expect("request_logs cost column")
+        );
 
         sqlx::query(
             r#"
 INSERT INTO request_logs (
   id, time_ms, api_key_id, api_format,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-  cost_in_usd, cost_out_usd, cost_total_usd, created_at_ms
+  price_version_id, price_tier_index, created_at_ms
 ) VALUES (
   'log_default', 1, 1, 'chat_completions',
   0, 0, 0, 0,
-  '0.000000000000000', '0.000000000000000', '0.000000000000000', 1
+  17, 2, 1
 )
 "#,
         )
@@ -5209,13 +5801,15 @@ INSERT INTO request_logs (
         .await
         .expect("insert old request log shape");
         let log_row = sqlx::query(
-            "SELECT reasoning_output_tokens, usage_observed, span_kind, transport, parent_id, ws_session_id FROM request_logs WHERE id = 'log_default'",
+            "SELECT reasoning_output_tokens, usage_observed, price_version_id, price_tier_index, span_kind, transport, parent_id, ws_session_id FROM request_logs WHERE id = 'log_default'",
         )
         .fetch_one(&pool)
         .await
         .expect("select request log defaults");
         assert_eq!(log_row.get::<i64, _>("reasoning_output_tokens"), 0);
         assert_eq!(log_row.get::<i64, _>("usage_observed"), 0);
+        assert_eq!(log_row.get::<Option<i64>, _>("price_version_id"), Some(17));
+        assert_eq!(log_row.get::<Option<i32>, _>("price_tier_index"), Some(2));
         assert_eq!(log_row.get::<String, _>("span_kind"), "request");
         assert_eq!(log_row.get::<String, _>("transport"), "http");
         assert_eq!(log_row.get::<Option<String>, _>("parent_id"), None);
@@ -5226,11 +5820,11 @@ INSERT INTO request_logs (
 INSERT INTO stats_daily (
   date, api_key_id, request_success, request_failed,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-  cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms, updated_at_ms
+  wait_time_ms, updated_at_ms
 ) VALUES (
   '20260514', 0, 1, 0,
   0, 0, 0, 0,
-  '0.000000000000000', '0.000000000000000', '0.000000000000000', 0, 1
+  0, 1
 )
 "#,
         )
@@ -5300,6 +5894,16 @@ CREATE TABLE request_logs (
                 .await
                 .expect("request logs parent column")
         );
+        assert!(
+            sqlite_column_exists(&pool, "request_logs", "price_version_id")
+                .await
+                .expect("request logs price version column")
+        );
+        assert!(
+            !sqlite_column_exists(&pool, "request_logs", "cost_total_usd")
+                .await
+                .expect("request logs cost column")
+        );
         let index_row = sqlx::query(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_request_logs_parent_time'",
         )
@@ -5307,6 +5911,121 @@ CREATE TABLE request_logs (
         .await
         .expect("query parent index");
         assert!(index_row.is_some());
+    }
+
+    #[tokio::test]
+    async fn migrate_sqlite_should_remove_persisted_costs_and_keep_usage() {
+        let db = Database::connect("sqlite::memory:", 1)
+            .await
+            .expect("connect sqlite memory db");
+        let Database::Sqlite(pool) = &db else {
+            panic!("expected sqlite db");
+        };
+        sqlx::query(
+            r#"
+CREATE TABLE stats_daily (
+  date TEXT NOT NULL, api_key_id INTEGER NOT NULL,
+  request_success INTEGER NOT NULL, request_failed INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL, cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  usage_observed_requests INTEGER NOT NULL DEFAULT 0,
+  cost_in_usd TEXT NOT NULL, cost_out_usd TEXT NOT NULL, cost_total_usd TEXT NOT NULL,
+  wait_time_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(date, api_key_id)
+)
+"#,
+        )
+        .execute(pool)
+        .await
+        .expect("create old stats_daily");
+        sqlx::query(
+            "INSERT INTO stats_daily VALUES ('20260710', 1, 1, 0, 10, 2, 3, 4, 1, 1, '1', '2', '3', 25, 99)",
+        )
+        .execute(pool)
+        .await
+        .expect("insert old stats_daily");
+        sqlx::query(
+            r#"
+CREATE TABLE stats_hourly (
+  bucket_ms INTEGER NOT NULL, api_key_id INTEGER NOT NULL,
+  provider_id INTEGER NOT NULL, endpoint_id INTEGER NOT NULL, upstream_key_id INTEGER NOT NULL,
+  api_format TEXT NOT NULL, model TEXT NOT NULL,
+  request_success INTEGER NOT NULL, request_failed INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL, cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL, usage_observed_requests INTEGER NOT NULL,
+  cost_in_usd TEXT NOT NULL, cost_out_usd TEXT NOT NULL, cost_total_usd TEXT NOT NULL,
+  wait_time_ms INTEGER NOT NULL,
+  latency_lt_500ms INTEGER NOT NULL, latency_lt_1000ms INTEGER NOT NULL,
+  latency_lt_2000ms INTEGER NOT NULL, latency_lt_5000ms INTEGER NOT NULL,
+  latency_lt_15000ms INTEGER NOT NULL, latency_gte_15000ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(bucket_ms, api_key_id, provider_id, endpoint_id, upstream_key_id, api_format, model)
+)
+"#,
+        )
+        .execute(pool)
+        .await
+        .expect("create old stats_hourly");
+        sqlx::query(
+            "INSERT INTO stats_hourly VALUES (1000, 1, 2, 3, 4, 'responses', 'model-a', 1, 0, 10, 2, 3, 4, 1, 1, '1', '2', '3', 25, 1, 0, 0, 0, 0, 0, 99)",
+        )
+        .execute(pool)
+        .await
+        .expect("insert old stats_hourly");
+        sqlx::query(
+            r#"
+CREATE TABLE stats_events (
+  id TEXT PRIMARY KEY, time_ms INTEGER NOT NULL, api_key_id INTEGER NOT NULL,
+  provider_id INTEGER, endpoint_id INTEGER, upstream_key_id INTEGER,
+  api_format TEXT NOT NULL, model TEXT, http_status INTEGER, error_type TEXT,
+  input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+  cache_read_input_tokens INTEGER NOT NULL, cache_creation_input_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  usage_observed INTEGER NOT NULL DEFAULT 0,
+  cost_total_usd TEXT NOT NULL, duration_ms INTEGER, created_at_ms INTEGER NOT NULL
+)
+"#,
+        )
+        .execute(pool)
+        .await
+        .expect("create old stats_events");
+        sqlx::query(
+            "INSERT INTO stats_events VALUES ('event-a', 1000, 1, 2, 3, 4, 'responses', 'model-a', 200, NULL, 10, 2, 3, 4, 1, 1, '3', 25, 99)",
+        )
+        .execute(pool)
+        .await
+        .expect("insert old stats_events");
+
+        db.migrate().await.expect("migrate old pricing schema");
+        db.migrate().await.expect("repeat pricing migration");
+
+        for table in ["stats_daily", "stats_hourly", "stats_events"] {
+            assert!(
+                !sqlite_column_exists(pool, table, "cost_total_usd")
+                    .await
+                    .expect("inspect migrated table")
+            );
+        }
+        let hourly = sqlx::query(
+            "SELECT input_tokens, price_version_id, price_tier_index FROM stats_hourly",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read migrated hourly row");
+        assert_eq!(hourly.get::<i64, _>("input_tokens"), 10);
+        assert_eq!(hourly.get::<i64, _>("price_version_id"), 0);
+        assert_eq!(hourly.get::<i32, _>("price_tier_index"), -1);
+        let event = sqlx::query(
+            "SELECT input_tokens, price_version_id, price_tier_index FROM stats_events",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read migrated event row");
+        assert_eq!(event.get::<i64, _>("input_tokens"), 10);
+        assert_eq!(event.get::<Option<i64>, _>("price_version_id"), None);
+        assert_eq!(event.get::<Option<i32>, _>("price_tier_index"), None);
     }
 
     #[tokio::test]
@@ -5336,6 +6055,85 @@ CREATE TABLE request_logs (
         assert_eq!(agg.usage_observed_requests, 2);
         assert_eq!(agg.wait_time_ms, 1_500);
         assert_eq!(agg.latency_lt_1000ms, 2);
+    }
+
+    #[tokio::test]
+    async fn aggregate_pricing_usage_groups_should_group_by_version_and_tier() {
+        let db = sqlite_memory_db().await;
+        let mut unpriced = stats_event("unpriced", 1_500, Some(200));
+        unpriced.price_version_id = None;
+        unpriced.price_tier_index = None;
+        db.insert_stats_events(&[
+            stats_event("priced-a", 1_000, Some(200)),
+            stats_event("priced-b", 2_000, Some(200)),
+            unpriced,
+        ])
+        .await
+        .expect("insert pricing events");
+
+        let groups = db
+            .aggregate_pricing_usage_groups(1_000, 2_000)
+            .await
+            .expect("aggregate pricing groups");
+
+        assert_eq!(groups.len(), 2);
+        let priced = groups
+            .iter()
+            .find(|group| group.price_version_id == Some(7))
+            .expect("priced group");
+        assert_eq!(priced.price_tier_index, Some(1));
+        assert_eq!(priced.request_count, 2);
+        assert_eq!(priced.input_tokens, 20);
+    }
+
+    #[tokio::test]
+    async fn provider_deletion_should_not_delete_price_versions() {
+        let db = sqlite_memory_db().await;
+        let provider_id = db
+            .insert_upstream_provider(
+                "provider-a",
+                "openai",
+                true,
+                1,
+                1,
+                true,
+                false,
+                &[],
+                "round_robin",
+                1,
+            )
+            .await
+            .expect("insert provider");
+        let price_id = db
+            .insert_model_price(
+                Some(provider_id),
+                "model-a",
+                r#"{
+                  "schema_version": 2,
+                  "unit": "usd_per_million_tokens",
+                  "base": { "input": "1", "output": "2", "cache_read": null, "cache_write": null },
+                  "tiers": []
+                }"#,
+                2,
+            )
+            .await
+            .expect("insert price version");
+        let Database::Sqlite(pool) = &db else {
+            panic!("expected sqlite db");
+        };
+        sqlx::query("DELETE FROM upstream_providers WHERE id = ?")
+            .bind(provider_id)
+            .execute(pool)
+            .await
+            .expect("delete provider");
+
+        let versions = db
+            .list_price_versions(&[price_id])
+            .await
+            .expect("load retained price version");
+
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].id, price_id);
     }
 }
 
@@ -5453,7 +6251,6 @@ ORDER BY (provider_id IS NOT NULL) ASC, provider_id ASC, model_name ASC, created
             id: row.get::<i64, _>("id"),
             provider_id,
             model_name,
-            price_data_json,
             price,
             created_at_ms: row.get::<i64, _>("created_at_ms"),
             updated_at_ms: row.get::<i64, _>("updated_at_ms"),
@@ -5493,7 +6290,6 @@ ORDER BY (provider_id IS NOT NULL) ASC, provider_id ASC, model_name ASC, created
             id: row.get::<i64, _>("id"),
             provider_id,
             model_name,
-            price_data_json,
             price,
             created_at_ms: row.get::<i64, _>("created_at_ms"),
             updated_at_ms: row.get::<i64, _>("updated_at_ms"),
@@ -5503,25 +6299,64 @@ ORDER BY (provider_id IS NOT NULL) ASC, provider_id ASC, model_name ASC, created
     Ok(out)
 }
 
-fn parse_model_price_data(json: &str) -> Result<ModelPriceData, DbError> {
-    let v: Value = serde_json::from_str(json)
-        .map_err(|e| DbError::new(format!("invalid price_data_json: {e}")))?;
-    Ok(ModelPriceData {
-        input_cost_per_token: extract_decimal(v.get("input_cost_per_token")),
-        output_cost_per_token: extract_decimal(v.get("output_cost_per_token")),
-        cache_creation_input_token_cost: extract_decimal(v.get("cache_creation_input_token_cost")),
-        cache_creation_input_token_cost_above_1hr: extract_decimal(
-            v.get("cache_creation_input_token_cost_above_1hr"),
-        ),
-        cache_read_input_token_cost: extract_decimal(v.get("cache_read_input_token_cost")),
-    })
+async fn list_price_versions_sqlite(
+    pool: &SqlitePool,
+    ids: &[i64],
+) -> Result<Vec<PriceVersion>, DbError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut qb =
+        QueryBuilder::<Sqlite>::new("SELECT id, price_data_json FROM model_prices WHERE id IN (");
+    {
+        let mut separated = qb.separated(", ");
+        for id in ids {
+            separated.push_bind(*id);
+        }
+        separated.push_unseparated(") ORDER BY id ASC");
+    }
+    let rows = qb.build().fetch_all(pool).await?;
+    rows.into_iter()
+        .map(|row| {
+            let price_data_json = row.get::<String, _>("price_data_json");
+            Ok(PriceVersion {
+                id: row.get::<i64, _>("id"),
+                card: parse_model_price_data(&price_data_json)?,
+            })
+        })
+        .collect()
 }
 
-fn extract_decimal(v: Option<&Value>) -> Option<Decimal> {
-    let v = v?;
-    match v {
-        Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
-        Value::String(s) => Decimal::from_str(s).ok(),
-        _ => None,
+async fn list_price_versions_postgres(
+    pool: &PgPool,
+    ids: &[i64],
+) -> Result<Vec<PriceVersion>, DbError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
     }
+    let mut qb =
+        QueryBuilder::<Postgres>::new("SELECT id, price_data_json FROM model_prices WHERE id IN (");
+    {
+        let mut separated = qb.separated(", ");
+        for id in ids {
+            separated.push_bind(*id);
+        }
+        separated.push_unseparated(") ORDER BY id ASC");
+    }
+    let rows = qb.build().fetch_all(pool).await?;
+    rows.into_iter()
+        .map(|row| {
+            let price_data_json = row.get::<String, _>("price_data_json");
+            Ok(PriceVersion {
+                id: row.get::<i64, _>("id"),
+                card: parse_model_price_data(&price_data_json)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_model_price_data(json: &str) -> Result<PriceCard, DbError> {
+    let v: Value = serde_json::from_str(json)
+        .map_err(|e| DbError::new(format!("invalid price_data_json: {e}")))?;
+    PriceCard::from_json(&v).map_err(DbError::new)
 }

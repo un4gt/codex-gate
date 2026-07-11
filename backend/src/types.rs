@@ -1,5 +1,6 @@
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+use crate::pricing::PriceCard;
 
 #[derive(Clone, Debug)]
 pub struct ApiKeyAuth {
@@ -116,25 +117,12 @@ pub struct ModelAliasTarget {
     pub updated_at_ms: i64,
 }
 
-/// Matches `claude-code-hub`'s `ModelPriceData` *fields* for the ones we need in v1.
-/// We store the raw JSON in DB, but extract these numeric fields for fast cost computation.
-/// Values are interpreted as USD per 1,000,000 tokens.
-#[derive(Clone, Debug, Default)]
-pub struct ModelPriceData {
-    pub input_cost_per_token: Option<Decimal>,
-    pub output_cost_per_token: Option<Decimal>,
-    pub cache_creation_input_token_cost: Option<Decimal>,
-    pub cache_creation_input_token_cost_above_1hr: Option<Decimal>,
-    pub cache_read_input_token_cost: Option<Decimal>,
-}
-
 #[derive(Clone, Debug)]
 pub struct ModelPrice {
     pub id: i64,
     pub provider_id: Option<i64>,
     pub model_name: String,
-    pub price_data_json: String,
-    pub price: ModelPriceData,
+    pub price: PriceCard,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -166,9 +154,6 @@ pub struct StatsDailyRow {
     pub cache_creation_input_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub usage_observed_requests: i64,
-    pub cost_in_usd: String,    // fixed scale 15
-    pub cost_out_usd: String,   // fixed scale 15
-    pub cost_total_usd: String, // fixed scale 15
     pub wait_time_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -182,6 +167,8 @@ pub struct StatsHourlyRow {
     pub upstream_key_id: i64,
     pub api_format: String,
     pub model: String,
+    pub price_version_id: i64,
+    pub price_tier_index: i32,
     pub request_success: i64,
     pub request_failed: i64,
     pub input_tokens: i64,
@@ -190,9 +177,6 @@ pub struct StatsHourlyRow {
     pub cache_creation_input_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub usage_observed_requests: i64,
-    pub cost_in_usd: String,
-    pub cost_out_usd: String,
-    pub cost_total_usd: String,
     pub wait_time_ms: i64,
     pub latency_lt_500ms: i64,
     pub latency_lt_1000ms: i64,
@@ -221,7 +205,8 @@ pub struct StatsEventRow {
     pub cache_creation_input_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub usage_observed: bool,
-    pub cost_total_usd: String,
+    pub price_version_id: Option<i64>,
+    pub price_tier_index: Option<i32>,
     pub duration_ms: Option<i64>,
     pub created_at_ms: i64,
 }
@@ -236,7 +221,6 @@ pub struct StatsOverviewAggRow {
     pub cache_creation_input_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub usage_observed_requests: i64,
-    pub cost_total_usd: String,
     pub wait_time_ms: i64,
     pub latency_lt_500ms: i64,
     pub latency_lt_1000ms: i64,
@@ -244,6 +228,17 @@ pub struct StatsOverviewAggRow {
     pub latency_lt_5000ms: i64,
     pub latency_lt_15000ms: i64,
     pub latency_gte_15000ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PricingUsageGroupRow {
+    pub price_version_id: Option<i64>,
+    pub price_tier_index: Option<i32>,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_creation_input_tokens: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -272,9 +267,8 @@ pub struct RequestLogRow {
     pub cache_creation_input_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub usage_observed: bool,
-    pub cost_in_usd: String,    // fixed scale 15
-    pub cost_out_usd: String,   // fixed scale 15
-    pub cost_total_usd: String, // fixed scale 15
+    pub price_version_id: Option<i64>,
+    pub price_tier_index: Option<i32>,
     pub t_stream_ms: Option<i64>,
     pub t_first_byte_ms: Option<i64>,
     pub t_first_token_ms: Option<i64>,

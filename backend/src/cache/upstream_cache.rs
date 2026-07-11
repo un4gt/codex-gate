@@ -7,9 +7,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::cache::policy::UpstreamCachePolicy;
 use crate::db::Database;
+use crate::pricing::PriceVersion;
 use crate::types::{
-    ModelAlias, ModelAliasTarget, ModelPriceData, ModelRoute, UpstreamEndpoint, UpstreamKey,
-    UpstreamProvider,
+    ModelAlias, ModelAliasTarget, ModelRoute, UpstreamEndpoint, UpstreamKey, UpstreamProvider,
 };
 
 #[derive(Clone, Debug)]
@@ -24,12 +24,12 @@ pub struct UpstreamSnapshot {
     pub alias_targets_by_alias: HashMap<i64, Vec<ModelAliasTarget>>,
     pub key_models_by_key: HashMap<i64, HashMap<String, bool>>,
     pub globally_disabled_models: HashSet<String>,
-    pub provider_prices_by_model: HashMap<i64, HashMap<String, ModelPriceData>>,
-    pub global_prices_by_model: HashMap<String, ModelPriceData>,
+    pub provider_prices_by_model: HashMap<i64, HashMap<String, PriceVersion>>,
+    pub global_prices_by_model: HashMap<String, PriceVersion>,
 }
 
 impl UpstreamSnapshot {
-    pub fn find_price(&self, provider_id: i64, model_name: &str) -> Option<ModelPriceData> {
+    pub fn find_price(&self, provider_id: i64, model_name: &str) -> Option<PriceVersion> {
         self.provider_prices_by_model
             .get(&provider_id)
             .and_then(|items| items.get(model_name))
@@ -42,7 +42,7 @@ impl UpstreamSnapshot {
         provider_id: i64,
         requested_model: &str,
         upstream_model: &str,
-    ) -> Option<ModelPriceData> {
+    ) -> Option<PriceVersion> {
         self.find_price(provider_id, upstream_model).or_else(|| {
             if requested_model == upstream_model {
                 None
@@ -259,7 +259,7 @@ impl UpstreamCache {
             .map(|policy| policy.model_name)
             .collect::<HashSet<_>>();
 
-        let mut provider_prices_by_model: HashMap<i64, HashMap<String, ModelPriceData>> =
+        let mut provider_prices_by_model: HashMap<i64, HashMap<String, PriceVersion>> =
             HashMap::new();
         let mut global_prices_by_model = HashMap::new();
         for price in prices {
@@ -267,9 +267,21 @@ impl UpstreamCache {
                 provider_prices_by_model
                     .entry(provider_id)
                     .or_default()
-                    .insert(price.model_name.clone(), price.price.clone());
+                    .insert(
+                        price.model_name.clone(),
+                        PriceVersion {
+                            id: price.id,
+                            card: price.price.clone(),
+                        },
+                    );
             } else {
-                global_prices_by_model.insert(price.model_name.clone(), price.price.clone());
+                global_prices_by_model.insert(
+                    price.model_name.clone(),
+                    PriceVersion {
+                        id: price.id,
+                        card: price.price.clone(),
+                    },
+                );
             }
         }
 
@@ -293,14 +305,20 @@ impl UpstreamCache {
 #[cfg(test)]
 mod tests {
     use super::UpstreamSnapshot;
-    use crate::types::ModelPriceData;
+    use crate::pricing::{PriceCard, PriceRates, PriceVersion};
     use rust_decimal::Decimal;
     use std::collections::{HashMap, HashSet};
 
-    fn price(tag: i64) -> ModelPriceData {
-        ModelPriceData {
-            input_cost_per_token: Some(Decimal::new(tag, 0)),
-            ..ModelPriceData::default()
+    fn price(tag: i64) -> PriceVersion {
+        PriceVersion {
+            id: tag,
+            card: PriceCard {
+                base: PriceRates {
+                    input: Some(Decimal::new(tag, 0)),
+                    ..PriceRates::default()
+                },
+                tiers: Vec::new(),
+            },
         }
     }
 
@@ -333,7 +351,7 @@ mod tests {
 
         let found = snapshot
             .find_price_for_request(7, "gateway-alias", "upstream-model")
-            .and_then(|item| item.input_cost_per_token);
+            .and_then(|item| item.card.base.input);
 
         assert_eq!(found, Some(Decimal::new(7, 0)));
     }
@@ -345,7 +363,7 @@ mod tests {
 
         let found = snapshot
             .find_price_for_request(7, "gateway-alias", "upstream-model")
-            .and_then(|item| item.input_cost_per_token);
+            .and_then(|item| item.card.base.input);
 
         assert_eq!(found, Some(Decimal::new(3, 0)));
     }

@@ -200,12 +200,6 @@ export async function loadRequestLogs(settings: ConnectionSettings, params: Requ
   if (typeof params.reasoning_output_tokens_max === 'number') {
     search.set('reasoning_output_tokens_max', String(params.reasoning_output_tokens_max));
   }
-  if (typeof params.cost_total_min === 'number') {
-    search.set('cost_total_min', String(params.cost_total_min));
-  }
-  if (typeof params.cost_total_max === 'number') {
-    search.set('cost_total_max', String(params.cost_total_max));
-  }
   if (typeof params.cache_read_input_tokens_min === 'number') {
     search.set('cache_read_input_tokens_min', String(params.cache_read_input_tokens_min));
   }
@@ -310,7 +304,6 @@ export async function loadApiKeyWorkspace(settings: ConnectionSettings): Promise
       success: 0,
       failed: 0,
       tokens: 0,
-      cost: 0,
       averageWaitMs: 0,
       activeDays: 0,
     },

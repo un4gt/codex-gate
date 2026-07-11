@@ -9,7 +9,6 @@ use hyper::header::{
     ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
 use hyper::{Method, Request, Response, StatusCode, Uri};
-use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -23,6 +22,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use crate::cache::transport_capability::{TransportCapabilityKey, WsCapability};
 use crate::http::{self, HttpResponse};
 use crate::metrics::RequestMetric;
+use crate::pricing::{PricingEvaluation, evaluate_price};
 use crate::proxy::{self, ResolvedUpstream};
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
@@ -210,8 +210,7 @@ fn record_handshake_metric(
             error_type,
             duration_ms: Some(0),
             usage: Usage::default(),
-            cost_in_usd: Decimal::ZERO,
-            cost_out_usd: Decimal::ZERO,
+            pricing: PricingEvaluation::usage_missing(),
         },
     );
 }
@@ -1403,7 +1402,11 @@ fn record_turn(
     outcome: &TurnOutcome,
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
 ) {
-    let (cost_in, cost_out) = proxy::compute_cost(&outcome.usage, resolved.price.as_ref());
+    let pricing = evaluate_price(
+        &outcome.usage,
+        outcome.usage_observed,
+        resolved.price.as_ref(),
+    );
     let status_i32 = outcome.status.as_u16() as i32;
     let error_type = outcome.error_type.as_deref();
     let error_message = outcome.error_message.as_deref();
@@ -1427,8 +1430,7 @@ fn record_turn(
             error_type,
             duration_ms: Some(outcome.duration_ms),
             usage: outcome.usage,
-            cost_in_usd: cost_in,
-            cost_out_usd: cost_out,
+            pricing,
         },
     );
 
@@ -1453,8 +1455,8 @@ fn record_turn(
         duration_ms: Some(outcome.duration_ms),
         usage: outcome.usage,
         usage_observed: outcome.usage_observed,
-        cost_in_usd: cost_in,
-        cost_out_usd: cost_out,
+        price_version_id: resolved.price.as_ref().map(|price| price.id),
+        price_tier_index: pricing.tier_index,
         time_ms: util::now_ms(),
         span_kind: "ws_turn",
         transport: transport.as_log_value(),
@@ -1482,8 +1484,7 @@ fn record_ws_setup_failed_turn(
             error_type: Some(&error_type),
             duration_ms: Some(duration_ms),
             usage: Usage::default(),
-            cost_in_usd: Decimal::ZERO,
-            cost_out_usd: Decimal::ZERO,
+            pricing: PricingEvaluation::usage_missing(),
         },
     );
 
@@ -1515,8 +1516,8 @@ fn record_ws_setup_failed_turn(
         duration_ms: Some(duration_ms),
         usage: Usage::default(),
         usage_observed: false,
-        cost_in_usd: Decimal::ZERO,
-        cost_out_usd: Decimal::ZERO,
+        price_version_id: None,
+        price_tier_index: None,
         time_ms: util::now_ms(),
         span_kind: "ws_turn",
         transport: TurnTransport::WsSetup.as_log_value(),
@@ -1548,8 +1549,8 @@ fn record_session_open(ctx: &WsContext) {
         duration_ms: None,
         usage: Usage::default(),
         usage_observed: false,
-        cost_in_usd: Decimal::ZERO,
-        cost_out_usd: Decimal::ZERO,
+        price_version_id: None,
+        price_tier_index: None,
         time_ms: ctx.session_started_at_ms,
         span_kind: "ws_session",
         transport: "ws",
@@ -1586,8 +1587,8 @@ fn record_session_close(
         duration_ms: Some(util::now_ms().saturating_sub(ctx.session_started_at_ms)),
         usage: Usage::default(),
         usage_observed: false,
-        cost_in_usd: Decimal::ZERO,
-        cost_out_usd: Decimal::ZERO,
+        price_version_id: None,
+        price_tier_index: None,
         time_ms: util::now_ms(),
         span_kind: "ws_session_close",
         transport: "ws",

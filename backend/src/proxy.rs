@@ -14,7 +14,6 @@ use hyper::http::HeaderMap;
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use memchr::memchr;
 use pin_project_lite::pin_project;
-use rust_decimal::Decimal;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -24,10 +23,11 @@ use crate::health::{should_trip_endpoint, should_trip_key};
 use crate::http::{self, HttpResponse};
 use crate::metrics::{FailoverKind, RequestMetric};
 use crate::openai::{OpenAiRequestInfo, ensure_include_usage, parse_request_info};
+use crate::pricing::{PriceVersion, PricingEvaluation, evaluate_price};
 use crate::selector;
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
-use crate::types::{ApiFormat, ModelAlias, ModelAliasTarget, ModelPriceData, UpstreamKey, Usage};
+use crate::types::{ApiFormat, ModelAlias, ModelAliasTarget, UpstreamKey, Usage};
 use crate::util;
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -251,8 +251,7 @@ async fn proxy_openai(
                 error_type,
                 duration_ms: Some(start.elapsed().as_millis() as i64),
                 usage: Usage::default(),
-                cost_in_usd: Decimal::ZERO,
-                cost_out_usd: Decimal::ZERO,
+                pricing: PricingEvaluation::usage_missing(),
             },
         );
     };
@@ -343,8 +342,8 @@ async fn proxy_openai(
                 duration_ms: Some(start.elapsed().as_millis() as i64),
                 usage: Usage::default(),
                 usage_observed: false,
-                cost_in_usd: Decimal::ZERO,
-                cost_out_usd: Decimal::ZERO,
+                price_version_id: None,
+                price_tier_index: None,
                 time_ms: util::now_ms(),
                 span_kind: "request",
                 transport: "http",
@@ -823,7 +822,7 @@ pub(crate) struct ResolvedUpstream {
     pub(crate) provider: crate::types::UpstreamProvider,
     pub(crate) endpoint: crate::types::UpstreamEndpoint,
     pub(crate) key: crate::types::UpstreamKey,
-    pub(crate) price: Option<ModelPriceData>,
+    pub(crate) price: Option<PriceVersion>,
 }
 
 #[derive(Default)]
@@ -1415,7 +1414,7 @@ struct TapConfig {
     t_stream_ms: Option<i64>,
     start: Instant,
     is_sse: bool,
-    price: Option<ModelPriceData>,
+    price: Option<PriceVersion>,
     usage_capture_bytes: usize,
     usage_capture_tail_bytes: usize,
     endpoint_health: std::sync::Arc<crate::health::EndpointHealthBook>,
@@ -1696,7 +1695,7 @@ fn finalize_tap(
         *inputs.usage_observed = true;
     }
 
-    let (cost_in, cost_out) = compute_cost(inputs.usage, cfg.price.as_ref());
+    let pricing = evaluate_price(inputs.usage, *inputs.usage_observed, cfg.price.as_ref());
     record_runtime_outcomes(
         cfg,
         inputs.first_byte_ms,
@@ -1712,8 +1711,7 @@ fn finalize_tap(
             error_type: inputs.error_type.as_deref(),
             duration_ms,
             usage: *inputs.usage,
-            cost_in_usd: cost_in,
-            cost_out_usd: cost_out,
+            pricing,
         },
     );
 
@@ -1735,8 +1733,8 @@ fn finalize_tap(
         duration_ms: Some(cfg.start.elapsed().as_millis() as i64),
         usage: *inputs.usage,
         usage_observed: *inputs.usage_observed,
-        cost_in_usd: cost_in,
-        cost_out_usd: cost_out,
+        price_version_id: cfg.price.as_ref().map(|price| price.id),
+        price_tier_index: pricing.tier_index,
         time_ms: util::now_ms(),
         span_kind: "request",
         transport: "http",
@@ -2170,56 +2168,20 @@ pub(crate) fn responses_has_delta(v: &Value) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn compute_cost(usage: &Usage, price: Option<&ModelPriceData>) -> (Decimal, Decimal) {
-    let Some(price) = price else {
-        return (Decimal::ZERO, Decimal::ZERO);
-    };
-
-    let mtoken = Decimal::from(1_000_000);
-    let input_tokens = Decimal::from(usage.input_tokens);
-    let output_tokens = Decimal::from(usage.output_tokens);
-    let cache_read_tokens = Decimal::from(usage.cache_read_input_tokens);
-    let cache_create_tokens = Decimal::from(usage.cache_creation_input_tokens);
-
-    let mut cost_in = Decimal::ZERO;
-    let mut cost_out = Decimal::ZERO;
-
-    if let Some(v) = price.input_cost_per_token {
-        cost_in += input_tokens * v / mtoken;
-    }
-    if let Some(v) = price.output_cost_per_token {
-        cost_out += output_tokens * v / mtoken;
-    }
-    if let Some(v) = price.cache_read_input_token_cost {
-        cost_in += cache_read_tokens * v / mtoken;
-    }
-    if let Some(v) = price
-        .cache_creation_input_token_cost
-        .or(price.cache_creation_input_token_cost_above_1hr)
-    {
-        cost_in += cache_create_tokens * v / mtoken;
-    }
-
-    (cost_in, cost_out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        UsageCaptureBuffer, build_upstream_headers, compute_cost, extract_usage_from_capture,
-        parse_chat_usage, parse_responses_usage, record_endpoint_outcome_for_id,
-        record_upstream_key_outcome_for_id, should_avoid_endpoint_on_retry,
-        should_avoid_key_on_retry, should_retry_response_status,
+        UsageCaptureBuffer, build_upstream_headers, extract_usage_from_capture, parse_chat_usage,
+        parse_responses_usage, record_endpoint_outcome_for_id, record_upstream_key_outcome_for_id,
+        should_avoid_endpoint_on_retry, should_avoid_key_on_retry, should_retry_response_status,
     };
     use crate::health::{CircuitState, RuntimeHealthBook};
-    use crate::types::ModelPriceData;
     use bytes::Bytes;
     use hyper::header::{
         ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderName,
         HeaderValue, USER_AGENT,
     };
     use hyper::http::HeaderMap;
-    use rust_decimal::Decimal;
     use serde_json::json;
 
     #[test]
@@ -2294,29 +2256,6 @@ mod tests {
 
         assert_eq!(usage.output_tokens, 13);
         assert_eq!(usage.reasoning_output_tokens, 8);
-    }
-
-    #[test]
-    fn compute_cost_should_use_price_per_mtoken() {
-        let usage = crate::types::Usage {
-            input_tokens: 10,
-            output_tokens: 4,
-            cache_read_input_tokens: 2,
-            cache_creation_input_tokens: 6,
-            reasoning_output_tokens: 3,
-        };
-        let price = ModelPriceData {
-            input_cost_per_token: Some(Decimal::new(2, 0)),
-            output_cost_per_token: Some(Decimal::new(3, 0)),
-            cache_read_input_token_cost: Some(Decimal::new(5, 0)),
-            cache_creation_input_token_cost: Some(Decimal::new(7, 0)),
-            cache_creation_input_token_cost_above_1hr: None,
-        };
-
-        let (cost_in, cost_out) = compute_cost(&usage, Some(&price));
-
-        assert_eq!(cost_in, Decimal::new(72, 6));
-        assert_eq!(cost_out, Decimal::new(12, 6));
     }
 
     #[test]

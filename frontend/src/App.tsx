@@ -24,7 +24,8 @@ import {
   loadSystemConfig,
   previewRuntimeEnv,
 } from '@/lib/api';
-import { formatBytes, formatCommitShort, formatCompactInteger, formatCost, formatMs, formatVersionLabel, parseDecimal } from '@/lib/format';
+import { formatBytes, formatCommitShort, formatCompactInteger, formatMs, formatVersionLabel } from '@/lib/format';
+import { calculateOverviewPricing, formatUsd } from '@/lib/pricing';
 import type {
   ApiKeyWorkspace,
   ConnectionSettings,
@@ -472,6 +473,10 @@ function OverviewPage(props: { data: AppDataContext }) {
     if (total <= 0) return 0;
     return (cacheTokens() / total) * 100;
   });
+  const overviewPricing = createMemo(() => {
+    const current = overview();
+    return current ? calculateOverviewPricing(current) : null;
+  });
   const metrics = createMemo<StatItem[]>(() => {
     const current = live();
     if (current) {
@@ -489,8 +494,20 @@ function OverviewPage(props: { data: AppDataContext }) {
         },
         {
           label: '消费',
-          value: formatCost(parseDecimal(current.kpis.cost_total_usd)),
-          hint: t('当前窗口：{{window}}', { window: t(periodLabel()) }),
+          value: overviewPricing() && overviewPricing()!.priceableRequests > 0
+            ? formatUsd(overviewPricing()!.totalUsd)
+            : '—',
+          hint: overviewPricing()
+            ? t('已计价 {{priced}} · 未定价 {{unpriced}} · 缺用量 {{missing}} · token 覆盖 {{coverage}}%', {
+                priced: formatCompactInteger(overviewPricing()!.priceableRequests),
+                unpriced: formatCompactInteger(overviewPricing()!.unpricedRequests),
+                missing: formatCompactInteger(overviewPricing()!.usageMissingRequests),
+                coverage: overviewPricing()!.tokenCoveragePercent.toDecimalPlaces(1).toFixed(1),
+              })
+            : t('当前窗口：{{window}}', { window: t(periodLabel()) }),
+          tone: overviewPricing() && (overviewPricing()!.unpricedRequests > 0 || overviewPricing()!.usageMissingRequests > 0)
+            ? 'warning'
+            : 'success',
         },
         {
           label: '用量',

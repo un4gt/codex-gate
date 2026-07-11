@@ -9,9 +9,6 @@ export interface StatsDailyRow {
   cache_creation_input_tokens: number;
   reasoning_output_tokens: number;
   usage_observed_requests: number;
-  cost_in_usd: string;
-  cost_out_usd: string;
-  cost_total_usd: string;
   wait_time_ms: number;
   updated_at_ms: number;
 }
@@ -34,9 +31,7 @@ export interface RequestLogRow {
   cache_creation_input_tokens: number;
   reasoning_output_tokens: number;
   usage_observed: boolean;
-  cost_in_usd: string;
-  cost_out_usd: string;
-  cost_total_usd: string;
+  pricing: RequestPricing | null;
   t_stream_ms: number | null;
   t_first_byte_ms: number | null;
   t_first_token_ms: number | null;
@@ -70,8 +65,6 @@ export interface RequestLogSearchParams {
   usage_observed?: boolean;
   reasoning_output_tokens_min?: number;
   reasoning_output_tokens_max?: number;
-  cost_total_min?: number;
-  cost_total_max?: number;
   cache_read_input_tokens_min?: number;
   cache_read_input_tokens_max?: number;
   cache_creation_input_tokens_min?: number;
@@ -116,7 +109,6 @@ export interface ApiKeyWorkspace {
     success: number;
     failed: number;
     tokens: number;
-    cost: number;
     averageWaitMs: number;
     activeDays: number;
   };
@@ -310,11 +302,36 @@ export interface ModelRoute {
   provider_ids: number[];
 }
 
+export interface PriceRates {
+  input: string | null;
+  output: string | null;
+  cache_read: string | null;
+  cache_write: string | null;
+}
+
+export interface ContextPriceTier {
+  over_total_input_tokens: number;
+  rates: PriceRates;
+}
+
+export interface PriceCardV2 {
+  schema_version: 2;
+  unit: 'usd_per_million_tokens';
+  base: PriceRates;
+  tiers: ContextPriceTier[];
+}
+
+export interface RequestPricing {
+  price_version_id: number;
+  tier_index: number | null;
+  card: PriceCardV2 | null;
+}
+
 export interface ModelPrice {
   id: number;
   provider_id: number | null;
   model_name: string;
-  price_data: Record<string, string | number | boolean | null>;
+  price_data: PriceCardV2;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -322,7 +339,7 @@ export interface ModelPrice {
 export interface CreatePriceInput {
   provider_id: number | null;
   model_name: string;
-  price_data: Record<string, string | number | boolean | null>;
+  price_data: PriceCardV2;
 }
 
 export interface ConnectionSettings {
@@ -420,7 +437,6 @@ export interface StatsOverviewResponse {
     error_rate: number;
     p95_latency_ms: number;
     avg_latency_ms: number;
-    cost_total_usd: string;
   };
   service_health: {
     providers_enabled: number;
@@ -449,5 +465,20 @@ export interface StatsOverviewResponse {
     cache_creation_input_tokens: number;
     reasoning_output_tokens: number;
     usage_observed_requests: number;
+  };
+  pricing: {
+    versions: Array<{
+      id: number;
+      card: PriceCardV2;
+    }>;
+    usage_groups: Array<{
+      price_version_id: number | null;
+      tier_index: number | null;
+      request_count: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_input_tokens: number;
+      cache_creation_input_tokens: number;
+    }>;
   };
 }

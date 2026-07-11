@@ -9,6 +9,7 @@ mod key_rotation;
 mod log_archive;
 mod metrics;
 mod openai;
+mod pricing;
 mod proxy;
 mod responses_ws;
 mod runtime_settings;

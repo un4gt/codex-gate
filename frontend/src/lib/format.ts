@@ -45,10 +45,6 @@ export function formatCompactInteger(value: number): string {
   return integer.format(value);
 }
 
-export function formatCost(value: number): string {
-  return `$${getFormatters().decimal.format(value)}`;
-}
-
 export function formatMs(value: number): string {
   const { decimal, integer } = getFormatters();
   if (value >= 1000) {
@@ -101,12 +97,6 @@ export function parseDateTimeLocalInput(value: string): number | null {
   if (!trimmed) return null;
   const timestamp = new Date(trimmed).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
-}
-
-export function parseDecimal(value: string | null | undefined): number {
-  if (!value) return 0;
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export function formatVersionLabel(value: string | null | undefined): string {

@@ -95,10 +95,15 @@ def create_price(base_url, admin_token, provider_id, model, timeout):
         'providerId': provider_id,
         'modelName': model,
         'priceData': {
-            'input_cost_per_token': '1',
-            'output_cost_per_token': '2',
-            'cache_creation_input_token_cost': '0.5',
-            'cache_read_input_token_cost': '0.25',
+            'schema_version': 2,
+            'unit': 'usd_per_million_tokens',
+            'base': {
+                'input': '1',
+                'output': '2',
+                'cache_read': '0.25',
+                'cache_write': '0.5',
+            },
+            'tiers': [],
         },
     }, timeout)['id']
 

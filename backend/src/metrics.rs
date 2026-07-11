@@ -6,6 +6,7 @@ use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 
 use crate::health::{CircuitState, summarize_provider_health};
+use crate::pricing::{PricingEvaluation, PricingStatus};
 use crate::state::SharedState;
 use crate::types::{ApiFormat, Usage};
 use crate::util;
@@ -27,6 +28,9 @@ struct ApiCounters {
     cache_read_tokens_total: AtomicU64,
     cache_write_tokens_total: AtomicU64,
     reasoning_tokens_total: AtomicU64,
+    pricing_priced_total: AtomicU64,
+    pricing_unpriced_total: AtomicU64,
+    pricing_usage_missing_total: AtomicU64,
     cost_in_micro_usd_total: AtomicU64,
     cost_out_micro_usd_total: AtomicU64,
     cost_total_micro_usd_total: AtomicU64,
@@ -43,6 +47,9 @@ struct ApiCountersSnapshot {
     cache_read_tokens_total: u64,
     cache_write_tokens_total: u64,
     reasoning_tokens_total: u64,
+    pricing_priced_total: u64,
+    pricing_unpriced_total: u64,
+    pricing_usage_missing_total: u64,
     cost_in_micro_usd_total: u64,
     cost_out_micro_usd_total: u64,
     cost_total_micro_usd_total: u64,
@@ -60,6 +67,9 @@ impl ApiCounters {
             cache_read_tokens_total: self.cache_read_tokens_total.load(Ordering::Relaxed),
             cache_write_tokens_total: self.cache_write_tokens_total.load(Ordering::Relaxed),
             reasoning_tokens_total: self.reasoning_tokens_total.load(Ordering::Relaxed),
+            pricing_priced_total: self.pricing_priced_total.load(Ordering::Relaxed),
+            pricing_unpriced_total: self.pricing_unpriced_total.load(Ordering::Relaxed),
+            pricing_usage_missing_total: self.pricing_usage_missing_total.load(Ordering::Relaxed),
             cost_in_micro_usd_total: self.cost_in_micro_usd_total.load(Ordering::Relaxed),
             cost_out_micro_usd_total: self.cost_out_micro_usd_total.load(Ordering::Relaxed),
             cost_total_micro_usd_total: self.cost_total_micro_usd_total.load(Ordering::Relaxed),
@@ -85,8 +95,7 @@ pub struct RequestMetric<'a> {
     pub error_type: Option<&'a str>,
     pub duration_ms: Option<i64>,
     pub usage: Usage,
-    pub cost_in_usd: Decimal,
-    pub cost_out_usd: Decimal,
+    pub pricing: PricingEvaluation,
 }
 
 impl Metrics {
@@ -200,18 +209,33 @@ impl Metrics {
             Ordering::Relaxed,
         );
 
-        let cost_total = metric.cost_in_usd + metric.cost_out_usd;
-        target.cost_in_micro_usd_total.fetch_add(
-            decimal_to_micro_units(metric.cost_in_usd),
-            Ordering::Relaxed,
-        );
-        target.cost_out_micro_usd_total.fetch_add(
-            decimal_to_micro_units(metric.cost_out_usd),
-            Ordering::Relaxed,
-        );
-        target
-            .cost_total_micro_usd_total
-            .fetch_add(decimal_to_micro_units(cost_total), Ordering::Relaxed);
+        match metric.pricing.status {
+            PricingStatus::Priced => {
+                target.pricing_priced_total.fetch_add(1, Ordering::Relaxed);
+            }
+            PricingStatus::Unpriced => {
+                target
+                    .pricing_unpriced_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            PricingStatus::UsageMissing => {
+                target
+                    .pricing_usage_missing_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let Some(cost) = metric.pricing.cost {
+            let cost_total = cost.input_usd + cost.output_usd;
+            target
+                .cost_in_micro_usd_total
+                .fetch_add(decimal_to_micro_units(cost.input_usd), Ordering::Relaxed);
+            target
+                .cost_out_micro_usd_total
+                .fetch_add(decimal_to_micro_units(cost.output_usd), Ordering::Relaxed);
+            target
+                .cost_total_micro_usd_total
+                .fetch_add(decimal_to_micro_units(cost_total), Ordering::Relaxed);
+        }
     }
 }
 
@@ -226,6 +250,9 @@ pub struct ApiCountersPublicSnapshot {
     pub cache_read_tokens_total: u64,
     pub cache_write_tokens_total: u64,
     pub reasoning_tokens_total: u64,
+    pub pricing_priced_total: u64,
+    pub pricing_unpriced_total: u64,
+    pub pricing_usage_missing_total: u64,
     pub cost_in_micro_usd_total: u64,
     pub cost_out_micro_usd_total: u64,
     pub cost_total_micro_usd_total: u64,
@@ -243,6 +270,9 @@ impl From<ApiCountersSnapshot> for ApiCountersPublicSnapshot {
             cache_read_tokens_total: value.cache_read_tokens_total,
             cache_write_tokens_total: value.cache_write_tokens_total,
             reasoning_tokens_total: value.reasoning_tokens_total,
+            pricing_priced_total: value.pricing_priced_total,
+            pricing_unpriced_total: value.pricing_unpriced_total,
+            pricing_usage_missing_total: value.pricing_usage_missing_total,
             cost_in_micro_usd_total: value.cost_in_micro_usd_total,
             cost_out_micro_usd_total: value.cost_out_micro_usd_total,
             cost_total_micro_usd_total: value.cost_total_micro_usd_total,
@@ -515,6 +545,21 @@ fn write_api_metrics(out: &mut String, api_format: &str, snapshot: ApiCountersSn
     out.push_str(&format!(
         "little_gate_tokens_total{{api_format=\"{}\",kind=\"reasoning\"}} {}\n",
         api_format, snapshot.reasoning_tokens_total
+    ));
+
+    out.push_str("# HELP little_gate_pricing_requests_total Completed requests by pricing coverage status.\n");
+    out.push_str("# TYPE little_gate_pricing_requests_total counter\n");
+    out.push_str(&format!(
+        "little_gate_pricing_requests_total{{api_format=\"{}\",status=\"priced\"}} {}\n",
+        api_format, snapshot.pricing_priced_total
+    ));
+    out.push_str(&format!(
+        "little_gate_pricing_requests_total{{api_format=\"{}\",status=\"unpriced\"}} {}\n",
+        api_format, snapshot.pricing_unpriced_total
+    ));
+    out.push_str(&format!(
+        "little_gate_pricing_requests_total{{api_format=\"{}\",status=\"usage_missing\"}} {}\n",
+        api_format, snapshot.pricing_usage_missing_total
     ));
 
     out.push_str("# HELP little_gate_cost_usd_total Aggregated request cost in USD by API format and direction.\n");

@@ -1,16 +1,13 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::time::Duration;
 
 use log::{error, info, warn};
-use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use crate::db::{Database, DbError};
 use crate::types::{RequestLogRow, StatsDailyRow, StatsEventRow, StatsHourlyRow, Usage};
 use crate::util;
 
-pub const COST_SCALE: u32 = 15;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
 const RETENTION_MAX_BATCHES_PER_RUN: usize = 4;
@@ -38,8 +35,8 @@ pub struct TelemetryEvent {
 
     pub usage: Usage,
     pub usage_observed: bool,
-    pub cost_in_usd: Decimal,
-    pub cost_out_usd: Decimal,
+    pub price_version_id: Option<i64>,
+    pub price_tier_index: Option<i32>,
     pub time_ms: i64,
 
     pub span_kind: &'static str,
@@ -121,21 +118,11 @@ struct StatsAgg {
     cache_creation_input_tokens: i64,
     reasoning_output_tokens: i64,
     usage_observed_requests: i64,
-    cost_in_usd: Decimal,
-    cost_out_usd: Decimal,
     wait_time_ms: i64,
 }
 
 impl StatsAgg {
-    fn add(
-        &mut self,
-        ok: bool,
-        usage: &Usage,
-        usage_observed: bool,
-        cost_in: Decimal,
-        cost_out: Decimal,
-        wait_time_ms: i64,
-    ) {
+    fn add(&mut self, ok: bool, usage: &Usage, usage_observed: bool, wait_time_ms: i64) {
         if ok {
             self.request_success += 1;
         } else {
@@ -149,8 +136,6 @@ impl StatsAgg {
         if usage_observed {
             self.usage_observed_requests += 1;
         }
-        self.cost_in_usd += cost_in;
-        self.cost_out_usd += cost_out;
         self.wait_time_ms += wait_time_ms;
     }
 }
@@ -164,6 +149,8 @@ struct HourlyKey {
     upstream_key_id: i64,
     api_format: &'static str,
     model: String,
+    price_version_id: i64,
+    price_tier_index: i32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -179,14 +166,8 @@ struct HourlyStatsAgg {
 
 impl HourlyStatsAgg {
     fn add(&mut self, ok: bool, event: &TelemetryEvent, wait_time_ms: i64) {
-        self.stats.add(
-            ok,
-            &event.usage,
-            event.usage_observed,
-            event.cost_in_usd,
-            event.cost_out_usd,
-            wait_time_ms,
-        );
+        self.stats
+            .add(ok, &event.usage, event.usage_observed, wait_time_ms);
 
         match wait_time_ms {
             value if value < 500 => self.latency_lt_500ms += 1,
@@ -227,8 +208,6 @@ impl TelemetryWorker {
 
         let rows = db.list_stats_daily_by_date(&current_date).await?;
         for row in rows {
-            let cost_in = Decimal::from_str(&row.cost_in_usd).unwrap_or(Decimal::ZERO);
-            let cost_out = Decimal::from_str(&row.cost_out_usd).unwrap_or(Decimal::ZERO);
             stats_by_key.insert(
                 row.api_key_id,
                 StatsAgg {
@@ -240,8 +219,6 @@ impl TelemetryWorker {
                     cache_creation_input_tokens: row.cache_creation_input_tokens,
                     reasoning_output_tokens: row.reasoning_output_tokens,
                     usage_observed_requests: row.usage_observed_requests,
-                    cost_in_usd: cost_in,
-                    cost_out_usd: cost_out,
                     wait_time_ms: row.wait_time_ms,
                 },
             );
@@ -309,8 +286,6 @@ impl TelemetryWorker {
         match self.db.list_stats_daily_by_date(&self.current_date).await {
             Ok(rows) => {
                 for row in rows {
-                    let cost_in = Decimal::from_str(&row.cost_in_usd).unwrap_or(Decimal::ZERO);
-                    let cost_out = Decimal::from_str(&row.cost_out_usd).unwrap_or(Decimal::ZERO);
                     self.stats_by_key.insert(
                         row.api_key_id,
                         StatsAgg {
@@ -322,8 +297,6 @@ impl TelemetryWorker {
                             cache_creation_input_tokens: row.cache_creation_input_tokens,
                             reasoning_output_tokens: row.reasoning_output_tokens,
                             usage_observed_requests: row.usage_observed_requests,
-                            cost_in_usd: cost_in,
-                            cost_out_usd: cost_out,
                             wait_time_ms: row.wait_time_ms,
                         },
                     );
@@ -346,8 +319,6 @@ impl TelemetryWorker {
                 ok,
                 &event.usage,
                 event.usage_observed,
-                event.cost_in_usd,
-                event.cost_out_usd,
                 wait,
             );
 
@@ -355,8 +326,6 @@ impl TelemetryWorker {
                 ok,
                 &event.usage,
                 event.usage_observed,
-                event.cost_in_usd,
-                event.cost_out_usd,
                 wait,
             );
 
@@ -374,6 +343,8 @@ impl TelemetryWorker {
                     .filter(|value| !value.is_empty())
                     .unwrap_or("unknown")
                     .to_string(),
+                price_version_id: event.price_version_id.unwrap_or(0),
+                price_tier_index: event.price_tier_index.unwrap_or(-1),
             };
             self.hourly_stats
                 .entry(hourly_key)
@@ -408,8 +379,8 @@ impl TelemetryWorker {
                 duration_ms,
                 usage,
                 usage_observed,
-                cost_in_usd,
-                cost_out_usd,
+                price_version_id,
+                price_tier_index,
                 time_ms,
                 span_kind,
                 transport,
@@ -442,9 +413,8 @@ impl TelemetryWorker {
                 cache_creation_input_tokens: usage.cache_creation_input_tokens,
                 reasoning_output_tokens: usage.reasoning_output_tokens,
                 usage_observed,
-                cost_in_usd: to_cost_storage(cost_in_usd),
-                cost_out_usd: to_cost_storage(cost_out_usd),
-                cost_total_usd: to_cost_storage(cost_in_usd + cost_out_usd),
+                price_version_id,
+                price_tier_index,
                 t_stream_ms,
                 t_first_byte_ms,
                 t_first_token_ms,
@@ -493,9 +463,6 @@ impl TelemetryWorker {
                 cache_creation_input_tokens: agg.cache_creation_input_tokens,
                 reasoning_output_tokens: agg.reasoning_output_tokens,
                 usage_observed_requests: agg.usage_observed_requests,
-                cost_in_usd: to_cost_storage(agg.cost_in_usd),
-                cost_out_usd: to_cost_storage(agg.cost_out_usd),
-                cost_total_usd: to_cost_storage(agg.cost_in_usd + agg.cost_out_usd),
                 wait_time_ms: agg.wait_time_ms,
                 updated_at_ms: now_ms,
             });
@@ -528,6 +495,8 @@ impl TelemetryWorker {
                 upstream_key_id: key.upstream_key_id,
                 api_format: key.api_format.to_string(),
                 model: key.model.clone(),
+                price_version_id: key.price_version_id,
+                price_tier_index: key.price_tier_index,
                 request_success: agg.stats.request_success,
                 request_failed: agg.stats.request_failed,
                 input_tokens: agg.stats.input_tokens,
@@ -536,9 +505,6 @@ impl TelemetryWorker {
                 cache_creation_input_tokens: agg.stats.cache_creation_input_tokens,
                 reasoning_output_tokens: agg.stats.reasoning_output_tokens,
                 usage_observed_requests: agg.stats.usage_observed_requests,
-                cost_in_usd: to_cost_storage(agg.stats.cost_in_usd),
-                cost_out_usd: to_cost_storage(agg.stats.cost_out_usd),
-                cost_total_usd: to_cost_storage(agg.stats.cost_in_usd + agg.stats.cost_out_usd),
                 wait_time_ms: agg.stats.wait_time_ms,
                 latency_lt_500ms: agg.latency_lt_500ms,
                 latency_lt_1000ms: agg.latency_lt_1000ms,
@@ -759,19 +725,11 @@ fn stats_event_from_event(event: &TelemetryEvent, ok: bool) -> StatsEventRow {
         cache_creation_input_tokens: event.usage.cache_creation_input_tokens,
         reasoning_output_tokens: event.usage.reasoning_output_tokens,
         usage_observed: event.usage_observed,
-        cost_total_usd: to_cost_storage(event.cost_in_usd + event.cost_out_usd),
+        price_version_id: event.price_version_id,
+        price_tier_index: event.price_tier_index,
         duration_ms: event.duration_ms,
         created_at_ms: util::now_ms(),
     }
-}
-
-fn to_cost_storage(v: Decimal) -> String {
-    v.round_dp_with_strategy(
-        COST_SCALE,
-        rust_decimal::RoundingStrategy::MidpointAwayFromZero,
-    )
-    .normalize()
-    .to_string()
 }
 
 fn hour_bucket_ms(time_ms: i64) -> i64 {

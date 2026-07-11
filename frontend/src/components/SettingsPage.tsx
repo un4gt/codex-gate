@@ -6,15 +6,14 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import { PricesPage } from '@/components/PricesPage';
 import { t } from '@/lib/i18n';
-import { createPrice, updateRuntimeSetting } from '../lib/api';
-import { formatBytes, formatCommitShort, formatDateTime, formatMs, formatRoutingStrategy, formatVersionLabel } from '../lib/format';
+import { updateRuntimeSetting } from '../lib/api';
+import { formatBytes, formatCommitShort, formatMs, formatRoutingStrategy, formatVersionLabel } from '../lib/format';
 import type {
   ConnectionSettings,
-  CreatePriceInput,
   ModelPrice,
   ProviderWorkspace,
   RuntimeEnvPreviewResponse,
@@ -79,52 +78,6 @@ export function SettingsPage(props: SettingsPageProps) {
       await props.onRefresh(`${setting.label} 已更新。`);
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新设置失败。');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submitPrice = async (event: SubmitEvent) => {
-    event.preventDefault();
-    if (!props.settings.adminToken.trim()) {
-      props.onMessage('请先填写管理员口令。');
-      return;
-    }
-
-    const formData = new FormData(event.currentTarget as HTMLFormElement);
-    const modelName = readString(formData, 'model_name');
-    if (!modelName) {
-      props.onMessage('模型名称不能为空。');
-      return;
-    }
-
-    const payload: CreatePriceInput = {
-      provider_id: readString(formData, 'provider_id') ? Number(readString(formData, 'provider_id')) : null,
-      model_name: modelName,
-      price_data: {},
-    };
-
-    const input = Number(readString(formData, 'input_cost_per_token') || '0');
-    const output = Number(readString(formData, 'output_cost_per_token') || '0');
-    const cacheRead = Number(readString(formData, 'cache_read_input_token_cost') || '0');
-    const cacheWrite = Number(readString(formData, 'cache_creation_input_token_cost') || '0');
-
-    if (input > 0) payload.price_data.input_cost_per_token = input;
-    if (output > 0) payload.price_data.output_cost_per_token = output;
-    if (cacheRead > 0) payload.price_data.cache_read_input_token_cost = cacheRead;
-    if (cacheWrite > 0) payload.price_data.cache_creation_input_token_cost = cacheWrite;
-
-    if (Object.keys(payload.price_data).length === 0) {
-      props.onMessage('至少填写一个价格字段。');
-      return;
-    }
-
-    setBusy(true);
-    try {
-      await createPrice(props.settings, payload);
-      await props.onRefresh(t('价格 {{name}} 已写入。', { name: payload.model_name }));
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '写入价格失败。');
     } finally {
       setBusy(false);
     }
@@ -297,95 +250,13 @@ export function SettingsPage(props: SettingsPageProps) {
         open={openSection() === 'pricing'}
         onToggle={() => toggleSection('pricing')}
       >
-        <div class="grid gap-6 xl:grid-cols-[420px_minmax(0,1fr)]">
-          <Card>
-            <CardHeader>
-              <CardTitle>新增价格</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <form class="flex flex-col gap-4" onSubmit={(event) => void submitPrice(event)}>
-                <FieldGroup>
-                  <Field>
-                    <FieldLabel>上游</FieldLabel>
-                    <select
-                      name="provider_id"
-                      class="flex h-10 w-full rounded-none border border-border bg-transparent px-3 text-sm text-foreground"
-                    >
-                      <option value="">{t('全局默认')}</option>
-                      <For each={props.providers}>
-                        {(item) => <option value={item.provider.id}>{item.provider.name}</option>}
-                      </For>
-                    </select>
-                  </Field>
-                  <Field>
-                    <FieldLabel>模型名称</FieldLabel>
-                    <Input name="model_name" placeholder="gpt-4.1-mini" />
-                  </Field>
-                </FieldGroup>
-                <FieldGroup class="grid gap-4 md:grid-cols-2">
-                  <Field>
-                    <FieldLabel>输入 / MToken</FieldLabel>
-                    <Input name="input_cost_per_token" type="number" min="0" step="0.000001" placeholder="1.20" />
-                  </Field>
-                  <Field>
-                    <FieldLabel>输出 / MToken</FieldLabel>
-                    <Input name="output_cost_per_token" type="number" min="0" step="0.000001" placeholder="4.80" />
-                  </Field>
-                  <Field>
-                    <FieldLabel>缓存读取 / MToken</FieldLabel>
-                    <Input name="cache_read_input_token_cost" type="number" min="0" step="0.000001" placeholder="0.20" />
-                  </Field>
-                  <Field>
-                    <FieldLabel>缓存写入 / MToken</FieldLabel>
-                    <Input name="cache_creation_input_token_cost" type="number" min="0" step="0.000001" placeholder="0.90" />
-                  </Field>
-                </FieldGroup>
-                <Button type="submit" disabled={busy()}>
-                  {busy() ? '写入中…' : '写入价格'}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>当前价格项</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>模型</TableHead>
-                    <TableHead>作用域</TableHead>
-                    <TableHead>更新时间</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  <Show
-                    when={props.prices.length > 0}
-                    fallback={
-                      <TableRow>
-                        <TableCell colspan={3} class="text-center text-muted-foreground">
-                          {t('暂无价格项。')}
-                        </TableCell>
-                      </TableRow>
-                    }
-                  >
-                    <For each={props.prices}>
-                      {(item) => (
-                        <TableRow>
-                          <TableCell>{item.model_name}</TableCell>
-                          <TableCell>{item.provider_id ? props.providers.find((provider) => provider.provider.id === item.provider_id)?.provider.name ?? `#${item.provider_id}` : t('全局默认')}</TableCell>
-                          <TableCell>{formatDateTime(item.updated_at_ms)}</TableCell>
-                        </TableRow>
-                      )}
-                    </For>
-                  </Show>
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        </div>
+        <PricesPage
+          settings={props.settings}
+          providers={props.providers}
+          items={props.prices}
+          onRefresh={props.onRefresh}
+          onMessage={props.onMessage}
+        />
       </SettingsSection>
     </div>
   );

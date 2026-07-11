@@ -6,19 +6,19 @@ use hyper::body::Incoming;
 use hyper::{Method, Request, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
-use std::str::FromStr;
+use std::collections::HashMap;
 
 use crate::db::RequestLogFilter;
 use crate::health::{
     EndpointHealthView, ProviderHealthView, UpstreamKeyHealthView, summarize_provider_health,
 };
 use crate::http::{self, HttpResponse};
+use crate::pricing::PriceCard;
 use crate::state::SharedState;
 use crate::types::{
     ApiKeyAuth, ModelAlias, ModelAliasTarget, UpstreamEndpoint, UpstreamKeyMeta, UpstreamProvider,
 };
 use crate::util;
-use rust_decimal::Decimal;
 use tokio::time as tokio_time;
 
 const ALLOWED_PROVIDER_TYPES: [&str; 3] =
@@ -1965,13 +1965,11 @@ async fn list_prices(req: Request<Incoming>, state: SharedState) -> HttpResponse
                 .into_iter()
                 .filter(|p| provider_id.is_none_or(|id| p.provider_id == Some(id)))
                 .map(|p| {
-                    let price_data: Value =
-                        serde_json::from_str(&p.price_data_json).unwrap_or(Value::Null);
                     serde_json::json!({
                         "id": p.id,
                         "provider_id": p.provider_id,
                         "model_name": p.model_name,
-                        "price_data": price_data,
+                        "price_data": p.price.to_json(),
                         "created_at_ms": p.created_at_ms,
                         "updated_at_ms": p.updated_at_ms
                     })
@@ -2008,6 +2006,9 @@ async fn create_price(req: Request<Incoming>, state: SharedState) -> HttpRespons
     }
     if !body.price_data.is_object() {
         return http::json_error(StatusCode::BAD_REQUEST, "price_data must be an object");
+    }
+    if let Err(error) = PriceCard::from_json(&body.price_data) {
+        return http::json_error(StatusCode::BAD_REQUEST, error);
     }
     if let Some(provider_id) = body.provider_id {
         let providers = match state.db.list_upstream_providers().await {
@@ -2077,14 +2078,13 @@ async fn get_price(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let Some(p) = price else {
         return http::json_error(StatusCode::NOT_FOUND, "price not found");
     };
-    let price_data: Value = serde_json::from_str(&p.price_data_json).unwrap_or(Value::Null);
     http::json(
         StatusCode::OK,
         &serde_json::json!({
             "id": p.id,
             "provider_id": p.provider_id,
             "model_name": p.model_name,
-            "price_data": price_data,
+            "price_data": p.price.to_json(),
             "created_at_ms": p.created_at_ms,
             "updated_at_ms": p.updated_at_ms
         }),
@@ -2170,10 +2170,50 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         None => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
     };
 
-    let agg = match state.db.aggregate_stats_events_range(from_ms, to_ms).await {
-        Ok(row) => row,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    let (agg, pricing_groups) = match tokio::join!(
+        state.db.aggregate_stats_events_range(from_ms, to_ms),
+        state.db.aggregate_pricing_usage_groups(from_ms, to_ms)
+    ) {
+        (Ok(agg), Ok(groups)) => (agg, groups),
+        (Err(error), _) | (_, Err(error)) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
     };
+    let mut price_version_ids = pricing_groups
+        .iter()
+        .filter_map(|group| group.price_version_id)
+        .collect::<Vec<_>>();
+    price_version_ids.sort_unstable();
+    price_version_ids.dedup();
+    let price_versions = match state.db.list_price_versions(&price_version_ids).await {
+        Ok(versions) => versions,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let pricing_versions_json = price_versions
+        .into_iter()
+        .map(|version| {
+            serde_json::json!({
+                "id": version.id,
+                "card": version.card.to_json(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let pricing_groups_json = pricing_groups
+        .into_iter()
+        .map(|group| {
+            serde_json::json!({
+                "price_version_id": group.price_version_id,
+                "tier_index": group.price_tier_index,
+                "request_count": group.request_count,
+                "input_tokens": group.input_tokens,
+                "output_tokens": group.output_tokens,
+                "cache_read_input_tokens": group.cache_read_input_tokens,
+                "cache_creation_input_tokens": group.cache_creation_input_tokens,
+            })
+        })
+        .collect::<Vec<_>>();
 
     let requests_total = agg.request_success + agg.request_failed;
     let failed_total = agg.request_failed;
@@ -2184,8 +2224,6 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
     let visible_output_tokens = agg
         .output_tokens
         .saturating_sub(agg.reasoning_output_tokens);
-    let cost_total = Decimal::from_str(&agg.cost_total_usd).unwrap_or(Decimal::ZERO);
-
     let p95 = approximate_p95_latency_ms(&[
         agg.latency_lt_500ms,
         agg.latency_lt_1000ms,
@@ -2268,8 +2306,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             "failed": failed_total,
             "error_rate": error_rate,
             "p95_latency_ms": p95,
-            "avg_latency_ms": avg_latency_ms,
-            "cost_total_usd": format!("{:.15}", cost_total)
+            "avg_latency_ms": avg_latency_ms
         },
         "service_health": {
             "providers_enabled": providers_enabled,
@@ -2289,6 +2326,10 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             "cache_creation_input_tokens": agg.cache_creation_input_tokens,
             "reasoning_output_tokens": agg.reasoning_output_tokens,
             "usage_observed_requests": agg.usage_observed_requests
+        },
+        "pricing": {
+            "versions": pricing_versions_json,
+            "usage_groups": pricing_groups_json
         }
     });
 
@@ -2343,8 +2384,6 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     };
     let reasoning_output_tokens_min = query_i64(req.uri().query(), "reasoning_output_tokens_min");
     let reasoning_output_tokens_max = query_i64(req.uri().query(), "reasoning_output_tokens_max");
-    let cost_total_min = query_f64(req.uri().query(), "cost_total_min");
-    let cost_total_max = query_f64(req.uri().query(), "cost_total_max");
     let cache_read_input_tokens_min = query_i64(req.uri().query(), "cache_read_input_tokens_min");
     let cache_read_input_tokens_max = query_i64(req.uri().query(), "cache_read_input_tokens_max");
     let cache_creation_input_tokens_min =
@@ -2395,14 +2434,6 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
             "reasoning_output_tokens_min must be <= reasoning_output_tokens_max",
         );
     }
-    if let (Some(min_cost), Some(max_cost)) = (cost_total_min, cost_total_max)
-        && min_cost > max_cost
-    {
-        return http::json_error(
-            StatusCode::BAD_REQUEST,
-            "cost_total_min must be <= cost_total_max",
-        );
-    }
     if let (Some(min_tokens), Some(max_tokens)) =
         (cache_read_input_tokens_min, cache_read_input_tokens_max)
         && min_tokens > max_tokens
@@ -2443,8 +2474,6 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
         usage_observed,
         reasoning_output_tokens_min,
         reasoning_output_tokens_max,
-        cost_total_min,
-        cost_total_max,
         cache_read_input_tokens_min,
         cache_read_input_tokens_max,
         cache_creation_input_tokens_min,
@@ -2452,9 +2481,54 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     };
 
     match state.db.list_request_logs(page, page_size, &filter).await {
-        Ok(rows) => http::json(StatusCode::OK, &rows),
+        Ok(rows) => {
+            let mut price_version_ids = rows
+                .iter()
+                .filter_map(|row| row.price_version_id)
+                .collect::<Vec<_>>();
+            price_version_ids.sort_unstable();
+            price_version_ids.dedup();
+            let versions = match state.db.list_price_versions(&price_version_ids).await {
+                Ok(versions) => versions,
+                Err(error) => {
+                    return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+                }
+            };
+            let cards_by_id = versions
+                .into_iter()
+                .map(|version| (version.id, version.card.to_json()))
+                .collect::<HashMap<_, _>>();
+            let payload = rows
+                .into_iter()
+                .map(|row| request_log_to_json(row, &cards_by_id))
+                .collect::<Vec<_>>();
+            http::json(StatusCode::OK, &payload)
+        }
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+fn request_log_to_json(
+    row: crate::types::RequestLogRow,
+    cards_by_id: &HashMap<i64, Value>,
+) -> Value {
+    let price_version_id = row.price_version_id;
+    let tier_index = row.price_tier_index;
+    let mut value = serde_json::to_value(row).unwrap_or(Value::Null);
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    object.remove("price_version_id");
+    object.remove("price_tier_index");
+    let pricing = price_version_id.map(|version_id| {
+        serde_json::json!({
+            "price_version_id": version_id,
+            "tier_index": tier_index,
+            "card": cards_by_id.get(&version_id),
+        })
+    });
+    object.insert("pricing".to_string(), pricing.unwrap_or(Value::Null));
+    value
 }
 
 fn api_key_to_json(k: &ApiKeyAuth) -> Value {
@@ -2649,19 +2723,6 @@ fn query_string(q: Option<&str>, key: &str) -> Option<String> {
         let v = it.next().unwrap_or("").trim();
         if k == key && !v.is_empty() {
             return Some(decode_query_value(v));
-        }
-    }
-    None
-}
-
-fn query_f64(q: Option<&str>, key: &str) -> Option<f64> {
-    let q = q?;
-    for part in q.split('&') {
-        let mut it = part.splitn(2, '=');
-        let k = it.next()?.trim();
-        let v = it.next().unwrap_or("").trim();
-        if k == key && !v.is_empty() {
-            return v.parse::<f64>().ok();
         }
     }
     None

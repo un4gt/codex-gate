@@ -139,10 +139,23 @@ def bootstrap_main_provider(admin_token):
         'providerId': provider_id,
         'modelName': 'gpt-4o-mini',
         'priceData': {
-            'input_cost_per_token': '1',
-            'output_cost_per_token': '2',
-            'cache_creation_input_token_cost': '0.5',
-            'cache_read_input_token_cost': '0.25',
+            'schema_version': 2,
+            'unit': 'usd_per_million_tokens',
+            'base': {
+                'input': '1',
+                'output': '2',
+                'cache_read': '0.25',
+                'cache_write': '0.5',
+            },
+            'tiers': [{
+                'over_total_input_tokens': 272000,
+                'rates': {
+                    'input': '2',
+                    'output': '3',
+                    'cache_read': '0.5',
+                    'cache_write': '1',
+                },
+            }],
         },
     })
     request_json('PUT', f'{BASE_URL}/api/v1/routes/gpt-4o-mini', admin_token, {
@@ -162,27 +175,29 @@ def seed_expired_rows():
     old_ms = now_ms - 3 * 86400 * 1000
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    cur.execute('SELECT id FROM model_prices ORDER BY id DESC LIMIT 1')
+    price_version_id = cur.fetchone()[0]
     cur.execute(
         """
         INSERT INTO request_logs (
           id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
           api_format, model, http_status, error_type, error_message,
           input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-          cost_in_usd, cost_out_usd, cost_total_usd,
+          reasoning_output_tokens, usage_observed, price_version_id, price_tier_index,
           t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
           created_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             '01ARZ3NDEKTSV4RRFFQ69G5FAV', old_ms, 999, 1, 1, 1,
             'chat_completions', 'archive-model', 200, None, None,
-            11, 7, 3, 2, '0.000011', '0.000014', '0.000025',
+            11, 7, 3, 2, 1, 1, price_version_id, 0,
             12, 14, 15, 18, old_ms,
         ),
     )
     cur.execute(
-        'INSERT OR REPLACE INTO stats_daily (date, api_key_id, request_success, request_failed, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, cost_in_usd, cost_out_usd, cost_total_usd, wait_time_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        ('20260301', 999, 1, 0, 11, 7, 3, 2, '0.000011', '0.000014', '0.000025', 18, old_ms),
+        'INSERT OR REPLACE INTO stats_daily (date, api_key_id, request_success, request_failed, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, reasoning_output_tokens, usage_observed_requests, wait_time_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ('20260301', 999, 1, 0, 11, 7, 3, 2, 1, 1, 18, old_ms),
     )
     conn.commit()
     conn.close()
@@ -209,13 +224,22 @@ def archive_summary():
     req_after = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM stats_daily WHERE date='20260301' AND api_key_id=999")
     stats_after = cur.fetchone()[0]
+    monetary_columns = {}
+    for table in ('request_logs', 'stats_events', 'stats_daily', 'stats_hourly'):
+        cur.execute(f'PRAGMA table_info({table})')
+        monetary_columns[table] = [row[1] for row in cur.fetchall() if row[1].startswith('cost_')]
     conn.close()
+    archive_record = json.loads(preview) if preview else {}
     return {
         'archive_files': [str(p.relative_to(ROOT)) for p in files],
         'archive_preview': preview,
         'index_entries': index_lines,
         'request_logs_after': req_after,
         'stats_daily_after': stats_after,
+        'monetary_columns': monetary_columns,
+        'archive_has_cost_fields': any(key.startswith('cost_') for key in archive_record),
+        'archive_price_version_id': archive_record.get('price_version_id'),
+        'archive_price_tier_index': archive_record.get('price_tier_index'),
     }
 
 
@@ -241,6 +265,7 @@ def main():
         'DB_DSN': f'sqlite://./{DB_PATH.relative_to(ROOT)}',
         'LISTEN_ADDR': '127.0.0.1:18082',
         'STATIC_DIR': './frontend/dist',
+        'STATS_FLUSH_INTERVAL_MS': '500',
         'RETENTION_CLEANUP_INTERVAL_MS': '1000',
         'RETENTION_DELETE_BATCH': '100',
         'REQUEST_LOG_RETENTION_DAYS': '1',
@@ -296,6 +321,9 @@ def main():
             '--good-key-secret', 'good-key',
         ]).stdout)
 
+        logs_payload = request_json('GET', f'{BASE_URL}/api/v1/logs?page=1&page_size=5', 'adm')
+        overview_payload = request_json('GET', f'{BASE_URL}/api/v1/stats/overview?period=24h', 'adm')
+
         seed_expired_rows()
         time.sleep(2.0)
         archive = archive_summary()
@@ -305,6 +333,12 @@ def main():
             'bench': bench_data,
             'failover_endpoint': failover_endpoint,
             'failover_key': failover_key,
+            'pricing_contract': {
+                'logs_have_pricing': bool(logs_payload) and 'pricing' in logs_payload[0],
+                'logs_have_cost_fields': bool(logs_payload) and any(key.startswith('cost_') for key in logs_payload[0]),
+                'overview_has_pricing': 'pricing' in overview_payload,
+                'overview_kpis_have_cost': any(key.startswith('cost_') for key in overview_payload.get('kpis', {})),
+            },
             'archive': archive,
             'logs': {
                 'mock': str((TMP / 'regression_mock.log').relative_to(ROOT)),

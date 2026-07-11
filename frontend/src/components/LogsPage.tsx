@@ -12,7 +12,8 @@ import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
 import { loadRequestLogs } from '../lib/api';
-import { formatCompactInteger, formatCost, formatDateTime, formatModelName, formatMs, formatRequestType, parseDecimal } from '../lib/format';
+import { formatCompactInteger, formatDateTime, formatModelName, formatMs, formatRequestType } from '../lib/format';
+import { calculateRequestPricing, describeUnpricedReason, formatUsd } from '../lib/pricing';
 import type { ApiKeyWorkspace, ConnectionSettings, ProviderWorkspace, RequestLogRow } from '../lib/types';
 
 interface LogsPageProps {
@@ -38,8 +39,6 @@ interface LogFilters {
   usageObserved: '' | 'true' | 'false';
   reasoningMin: string;
   reasoningMax: string;
-  costMin: string;
-  costMax: string;
 }
 
 const EMPTY_FILTERS: LogFilters = {
@@ -57,8 +56,6 @@ const EMPTY_FILTERS: LogFilters = {
   usageObserved: '',
   reasoningMin: '',
   reasoningMax: '',
-  costMin: '',
-  costMax: '',
 };
 
 function totalTokens(row: RequestLogRow) {
@@ -158,8 +155,6 @@ export function LogsPage(props: LogsPageProps) {
         usage_observed: current.usageObserved ? current.usageObserved === 'true' : undefined,
         reasoning_output_tokens_min: current.reasoningMin ? Number(current.reasoningMin) : undefined,
         reasoning_output_tokens_max: current.reasoningMax ? Number(current.reasoningMax) : undefined,
-        cost_total_min: current.costMin ? Number(current.costMin) : undefined,
-        cost_total_max: current.costMax ? Number(current.costMax) : undefined,
       });
       setRows(result);
     } catch (error) {
@@ -297,8 +292,6 @@ export function LogsPage(props: LogsPageProps) {
             </Select>
             <Input value={filters().reasoningMin} placeholder="思考下限" onInput={(event) => setFilters((current) => ({ ...current, reasoningMin: event.currentTarget.value }))} />
             <Input value={filters().reasoningMax} placeholder="思考上限" onInput={(event) => setFilters((current) => ({ ...current, reasoningMax: event.currentTarget.value }))} />
-            <Input value={filters().costMin} placeholder="成本下限" onInput={(event) => setFilters((current) => ({ ...current, costMin: event.currentTarget.value }))} />
-            <Input value={filters().costMax} placeholder="成本上限" onInput={(event) => setFilters((current) => ({ ...current, costMax: event.currentTarget.value }))} />
           </>
         }
         advancedOpen={advancedOpen()}
@@ -422,6 +415,9 @@ export function LogsPage(props: LogsPageProps) {
           {(rowSignal) => {
             const row = rowSignal();
             const status = rowStatus(row);
+            const pricing = calculateRequestPricing(row, row.usage_observed, row.pricing);
+            const pricingValue = pricing.status === 'priced' ? formatUsd(pricing.totalUsd) : t('未定价');
+            const pricingReason = pricing.status === 'unpriced' ? t(describeUnpricedReason(pricing.reason)) : null;
             return (
               <div class="grid gap-6">
                 <div class="flex flex-col gap-6 md:flex-row border-t border-border/40 pt-8 mt-2 pb-6">
@@ -429,7 +425,11 @@ export function LogsPage(props: LogsPageProps) {
                   <MetricCard label="首字节" value={formatMaybeMs(row.t_first_byte_ms)} />
                   <MetricCard label="TTFT" value={formatMaybeMs(row.t_first_token_ms)} />
                   <MetricCard label="总耗时" value={formatMaybeMs(primaryLatency(row))} />
-                  <MetricCard label="成本" value={formatCost(parseDecimal(row.cost_total_usd))} />
+                  <MetricCard
+                    label="成本"
+                    value={pricingValue}
+                    badge={pricing.status === 'unpriced' ? <StatusBadge tone="warning">{t('未定价')}</StatusBadge> : undefined}
+                  />
                 </div>
 
                 <Card class="rounded-none border border-border bg-background shadow-none">
@@ -476,7 +476,14 @@ export function LogsPage(props: LogsPageProps) {
                       <DetailItem label="缓存读取" value={formatCompactInteger(row.cache_read_input_tokens)} onCopy={() => void copyField(String(row.cache_read_input_tokens), '缓存读取')} />
                       <DetailItem label="缓存写入" value={formatCompactInteger(row.cache_creation_input_tokens)} onCopy={() => void copyField(String(row.cache_creation_input_tokens), '缓存写入')} />
                       <DetailItem label="用量状态" value={row.usage_observed ? '已返回用量' : '未返回用量'} onCopy={() => void copyField(row.usage_observed ? 'observed' : 'missing', '用量状态')} />
-                      <DetailItem label="成本" value={formatCost(parseDecimal(row.cost_total_usd))} onCopy={() => void copyField(row.cost_total_usd, '成本')} />
+                      <DetailItem
+                        label="成本"
+                        value={pricingValue}
+                        onCopy={pricing.status === 'priced' ? () => void copyField(pricing.totalUsd.toString(), '成本') : undefined}
+                      />
+                      <DetailItem label="定价状态" value={pricing.status === 'priced' ? t('已定价') : pricingReason ?? t('未定价')} />
+                      <DetailItem label="价格版本" value={row.pricing ? `#${row.pricing.price_version_id}` : '—'} />
+                      <DetailItem label="价格层级" value={row.pricing?.tier_index === null || row.pricing === null ? '—' : String(row.pricing.tier_index)} />
                       <DetailItem label="错误信息" value={row.error_message ?? '无'} onCopy={() => void copyField(row.error_message ?? '', '错误信息')} />
                     </div>
                   </CardContent>
@@ -552,16 +559,18 @@ function MetricCard(props: { label: string; value: string; badge?: any }) {
   );
 }
 
-function DetailItem(props: { label: string; value: string; onCopy: () => void }) {
+function DetailItem(props: { label: string; value: string; onCopy?: () => void }) {
   return (
     <div class="flex flex-col gap-2 border-b border-r border-border/40 p-4 relative group hover:bg-muted/10 transition-colors">
       <div class="flex items-center justify-between gap-2">
         <span class="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t(props.label)}</span>
       </div>
       <div class="break-all font-mono text-sm text-foreground pr-8 truncate" title={props.value}>{props.value}</div>
-      <Button type="button" size="icon" variant="ghost" class="absolute right-2 bottom-2 size-6 opacity-0 group-hover:opacity-100 transition-opacity h-auto" onClick={props.onCopy}>
-        <Copy class="size-3" />
-      </Button>
+      <Show when={props.onCopy}>
+        <Button type="button" size="icon" variant="ghost" class="absolute right-2 bottom-2 size-6 opacity-0 group-hover:opacity-100 transition-opacity h-auto" onClick={props.onCopy} aria-label={t('复制 {{label}}', { label: props.label })}>
+          <Copy class="size-3" aria-hidden="true" />
+        </Button>
+      </Show>
     </div>
   );
 }
