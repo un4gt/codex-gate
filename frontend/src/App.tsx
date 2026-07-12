@@ -1,10 +1,6 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js';
-import { A, Navigate, Route, Router, useLocation } from '@solidjs/router';
-import { Activity, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal } from 'lucide-solid';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router';
+import { Activity, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal } from "lucide-react";
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
@@ -13,47 +9,33 @@ import { ApiKeysPage } from '@/components/ApiKeysPage';
 import { LogsPage } from '@/components/LogsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
-import { installLocaleEffect, t } from '@/lib/i18n';
-import {
-  loadApiKeyWorkspace,
-  loadPrices,
-  loadModelAliases,
-  loadProviderWorkspace,
-  loadRuntimeSettings,
-  loadStatsOverview,
-  loadSystemConfig,
-  previewRuntimeEnv,
-} from '@/lib/api';
+import { t, useI18n } from '@/lib/i18n';
+import { loadApiKeyWorkspace, loadPrices, loadModelAliases, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
 import { formatBytes, formatCommitShort, formatCompactInteger, formatMs, formatVersionLabel } from '@/lib/format';
 import { calculateOverviewPricing, formatUsd } from '@/lib/pricing';
-import type {
-  ApiKeyWorkspace,
-  ConnectionSettings,
-  ModelPrice,
-  ModelAlias,
-  ProviderWorkspace,
-  RuntimeEnvPreviewResponse,
-  RuntimeSettingsResponse,
-  StatsOverviewResponse,
-  StatsPeriod,
-  SystemConfigResponse,
-} from '@/lib/types';
-
+import type { ApiKeyWorkspace, ConnectionSettings, ModelPrice, ModelAlias, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingsResponse, StatsOverviewResponse, StatsPeriod, SystemConfigResponse } from '@/lib/types';
+import Alert from "@mui/material/Alert";
+import AlertTitle from "@mui/material/AlertTitle";
+import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
+import Card from "@mui/material/Card";
+import CardContent from "@mui/material/CardContent";
+import InputBase from "@mui/material/InputBase";
+import Typography from "@mui/material/Typography";
 type LoadState = 'idle' | 'loading' | 'ready';
 type ConsoleMode = 'connect' | 'console';
-
 interface AppDataContext {
-  settings: () => ConnectionSettings;
-  providers: () => ProviderWorkspace[];
-  modelAliases: () => ModelAlias[];
-  apiKeys: () => ApiKeyWorkspace[];
-  prices: () => ModelPrice[];
-  systemConfig: () => SystemConfigResponse | null;
-  runtimeSettings: () => RuntimeSettingsResponse | null;
-  runtimeEnvPreview: () => RuntimeEnvPreviewResponse | null;
-  status: () => LoadState;
-  message: () => string;
-  refreshKey: () => number;
+  settings: ConnectionSettings;
+  providers: ProviderWorkspace[];
+  modelAliases: ModelAlias[];
+  apiKeys: ApiKeyWorkspace[];
+  prices: ModelPrice[];
+  systemConfig: SystemConfigResponse | null;
+  runtimeSettings: RuntimeSettingsResponse | null;
+  runtimeEnvPreview: RuntimeEnvPreviewResponse | null;
+  status: LoadState;
+  message: string;
+  refreshKey: number;
   loadProviders: (successMessage?: string) => Promise<void>;
   loadModelAliases: (successMessage?: string) => Promise<void>;
   loadApiKeys: (successMessage?: string) => Promise<void>;
@@ -64,55 +46,81 @@ interface AppDataContext {
   onLogout: () => void;
   onMessage: (message: string) => void;
 }
-
 const API_BASE_KEY = 'little_gate_api_base';
 const ADMIN_TOKEN_KEY = 'little_gate_admin_token';
 const NAV_ORDER_KEY = 'little_gate_nav_order';
-
 const NAV_ITEMS_BY_KEY = {
-  overview: { to: '/overview', label: '总览', icon: Activity },
-  upstreams: { to: '/upstreams', label: '上游', icon: Server },
-  logs: { to: '/logs', label: '日志', icon: ListFilter },
-  keys: { to: '/keys', label: '密钥', icon: KeyRound },
-  settings: { to: '/settings', label: '设置', icon: Settings },
+  overview: {
+    to: '/overview',
+    label: '总览',
+    icon: Activity
+  },
+  upstreams: {
+    to: '/upstreams',
+    label: '上游',
+    icon: Server
+  },
+  logs: {
+    to: '/logs',
+    label: '日志',
+    icon: ListFilter
+  },
+  keys: {
+    to: '/keys',
+    label: '密钥',
+    icon: KeyRound
+  },
+  settings: {
+    to: '/settings',
+    label: '设置',
+    icon: Settings
+  }
 } as const;
-
 type NavKey = keyof typeof NAV_ITEMS_BY_KEY;
-
 const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'logs', 'keys', 'settings'];
-const OVERVIEW_PERIODS: { value: StatsPeriod; label: string }[] = [
-  { value: 'today', label: '今天' },
-  { value: '7h', label: '最近7小时' },
-  { value: '24h', label: '最近24小时' },
-  { value: 'week', label: '周' },
-  { value: 'month', label: '月' },
-];
-
+const OVERVIEW_PERIODS: {
+  value: StatsPeriod;
+  label: string;
+}[] = [{
+  value: 'today',
+  label: '今天'
+}, {
+  value: '7h',
+  label: '最近7小时'
+}, {
+  value: '24h',
+  label: '最近24小时'
+}, {
+  value: 'week',
+  label: '周'
+}, {
+  value: 'month',
+  label: '月'
+}];
 function defaultApiBase() {
   if (typeof window === 'undefined') return 'http://127.0.0.1:18080';
   return window.location.origin;
 }
-
 function readSettings(): ConnectionSettings {
   if (typeof window === 'undefined') {
-    return { apiBase: defaultApiBase(), adminToken: '' };
+    return {
+      apiBase: defaultApiBase(),
+      adminToken: ''
+    };
   }
   return {
     apiBase: window.localStorage.getItem(API_BASE_KEY) ?? defaultApiBase(),
-    adminToken: window.sessionStorage.getItem(ADMIN_TOKEN_KEY) ?? '',
+    adminToken: window.sessionStorage.getItem(ADMIN_TOKEN_KEY) ?? ''
   };
 }
-
 function persistSettings(settings: ConnectionSettings) {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(API_BASE_KEY, settings.apiBase);
   window.sessionStorage.setItem(ADMIN_TOKEN_KEY, settings.adminToken);
 }
-
 function isNavKey(value: string): value is NavKey {
   return value in NAV_ITEMS_BY_KEY;
 }
-
 function normalizeNavOrder(values: string[]): NavKey[] {
   const ordered: NavKey[] = [];
   for (const value of values) {
@@ -127,7 +135,6 @@ function normalizeNavOrder(values: string[]): NavKey[] {
   }
   return ordered;
 }
-
 function readNavOrder(): NavKey[] {
   if (typeof window === 'undefined') return DEFAULT_NAV_ORDER;
   const raw = window.localStorage.getItem(NAV_ORDER_KEY);
@@ -142,12 +149,10 @@ function readNavOrder(): NavKey[] {
   }
   return DEFAULT_NAV_ORDER;
 }
-
 function persistNavOrder(order: NavKey[]) {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(NAV_ORDER_KEY, JSON.stringify(order));
 }
-
 function moveNavKey(order: NavKey[], from: NavKey, to: NavKey): NavKey[] {
   if (from === to) return order;
   const next = [...order];
@@ -158,7 +163,6 @@ function moveNavKey(order: NavKey[], from: NavKey, to: NavKey): NavKey[] {
   next.splice(toIndex, 0, item);
   return next;
 }
-
 async function copyText(value: string, success: string, onMessage: (message: string) => void) {
   if (!navigator?.clipboard) {
     onMessage(t('当前环境不支持剪贴板。'));
@@ -167,7 +171,6 @@ async function copyText(value: string, success: string, onMessage: (message: str
   await navigator.clipboard.writeText(value);
   onMessage(t(success));
 }
-
 function pageDescription(pathname: string) {
   if (pathname.startsWith('/overview')) return '查看请求、用量与响应表现。';
   if (pathname.startsWith('/keys')) return '创建和管理访问密钥。';
@@ -176,596 +179,460 @@ function pageDescription(pathname: string) {
   if (pathname.startsWith('/settings')) return '维护连接信息与高级设置。';
   return '';
 }
-
 function formatUsagePercent(value: number | null | undefined) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return t('采样中');
   return `${value.toFixed(value < 10 ? 1 : 0)}%`;
 }
-
 function formatCpuCapacity(value: number | null | undefined) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return t('CPU 采样中');
-  return t('{{count}} 核可用', { count: value.toFixed(value < 10 ? 1 : 0) });
+  return t('{{count}} 核可用', {
+    count: value.toFixed(value < 10 ? 1 : 0)
+  });
 }
-
 function formatServerScope(scope: string | null | undefined, limited: boolean | undefined) {
   if (scope === 'container') return limited ? t('容器限额') : t('容器采样');
   if (scope === 'cgroup') return limited ? t('进程限额') : t('进程采样');
   return t('主机采样');
 }
-
 function formatServerMemory(status: StatsOverviewResponse['server_status'] | undefined) {
   if (typeof status?.memory_used_bytes !== 'number' || typeof status.memory_total_bytes !== 'number') return t('等待数据');
   return `${formatBytes(status.memory_used_bytes)} / ${formatBytes(status.memory_total_bytes)}`;
 }
-
-function TopShell(props: { data: AppDataContext; children: any }) {
+function TopShell(props: {
+  data: AppDataContext;
+  children: ReactNode;
+}) {
   const location = useLocation();
-  const [navOrder, setNavOrder] = createSignal<NavKey[]>(readNavOrder());
-  const [draggingKey, setDraggingKey] = createSignal<NavKey | null>(null);
-  const navItems = createMemo(() => navOrder().map((key) => ({ key, ...NAV_ITEMS_BY_KEY[key] })));
-  const currentItem = createMemo(() => navItems().find((item) => location.pathname.startsWith(item.to)) ?? NAV_ITEMS_BY_KEY.overview);
-  const serviceVersion = createMemo(() => formatVersionLabel(props.data.systemConfig()?.build?.version));
-  const serviceCommit = createMemo(() => formatCommitShort(props.data.systemConfig()?.build?.commit));
-  const serviceCommitTitle = createMemo(() => {
-    const commit = props.data.systemConfig()?.build?.commit?.trim();
+  const [navOrder, setNavOrder] = useState<NavKey[]>(readNavOrder());
+  const [draggingKey, setDraggingKey] = useState<NavKey | null>(null);
+  const navItems = navOrder.map(key => ({
+    key,
+    ...NAV_ITEMS_BY_KEY[key]
+  }));
+  const currentItem = navItems.find(item => location.pathname.startsWith(item.to)) ?? NAV_ITEMS_BY_KEY.overview;
+  const serviceVersion = formatVersionLabel(props.data.systemConfig?.build?.version);
+  const serviceCommit = formatCommitShort(props.data.systemConfig?.build?.commit);
+  const serviceCommitTitle = (() => {
+    const commit = props.data.systemConfig?.build?.commit?.trim();
     return commit && commit !== 'unknown' ? commit : undefined;
-  });
-
+  })();
   const reorderNav = (target: NavKey) => {
-    const source = draggingKey();
+    const source = draggingKey;
     if (!source) return;
-    const next = moveNavKey(navOrder(), source, target);
-    setNavOrder(next);
-    persistNavOrder(next);
+    setNavOrder(current => {
+      const next = moveNavKey(current, source, target);
+      persistNavOrder(next);
+      return next;
+    });
     setDraggingKey(null);
   };
-
-  return (
-    <div class="min-h-screen bg-background">
-      <div class="app-shell">
-        <aside class="app-sidebar">
-          <div class="flex items-center gap-3 px-2 pb-10">
-            <div class="flex size-8 items-center justify-center bg-foreground text-background">
-              <SquareTerminal class="size-4" />
-            </div>
-            <div class="min-w-0">
-              <p class="text-[0.95rem] font-bold tracking-[0.08em] text-foreground uppercase">LITTLE GATE</p>
-            </div>
-          </div>
-          <nav class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1" aria-label="Primary">
-            <For each={navItems()}>
-              {(item, index) => {
-                const active = () => location.pathname.startsWith(item.to);
-                const Icon = item.icon;
-                return (
-                  <div
-                    class={`group relative flex items-center border-b border-border/40 ${
-                      active() ? 'text-primary font-bold' : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={() => reorderNav(item.key)}
-                  >
-                    <A
-                      href={item.to}
-                      class="relative z-10 flex min-h-12 flex-1 items-center gap-3 px-3 py-3 text-sm font-medium transition-colors"
-                    >
-                      <Icon class="size-4 opacity-70" />
-                      <span>{t(item.label)}</span>
-                    </A>
-                    <span class="relative z-10 font-mono text-[0.6rem] text-muted-foreground opacity-40">{String(index() + 1).padStart(2, '0')}</span>
-                    <button
-                      type="button"
-                      class="relative z-10 ml-2 flex size-10 cursor-grab items-center justify-center text-muted-foreground opacity-60 transition-colors hover:text-foreground hover:opacity-100 active:cursor-grabbing"
-                      aria-label={t('调整导航顺序')}
-                      title={t('调整导航顺序')}
-                      draggable
-                      onDragStart={() => setDraggingKey(item.key)}
-                      onDragEnd={() => setDraggingKey(null)}
-                    >
-                      <GripVertical class="size-4" />
-                    </button>
-                    {active() && (
-                      <span class="absolute inset-y-0 left-0 w-1 bg-primary/20" />
-                    )}
-                  </div>
-                );
-              }}
-            </For>
-          </nav>
-          <div class="mt-auto flex flex-col gap-3 border-t border-border/40 px-3 pt-7">
-            <div class="flex items-center justify-between">
-              <span class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('SYSTEM STATUS')}</span>
-              <span class="size-2 rounded-full bg-primary" />
-            </div>
-            <p class="truncate text-xs leading-5 text-muted-foreground">{props.data.message()}</p>
-            <div class="flex items-center justify-between gap-3 border border-border/50 px-3 py-2">
-              <span class="text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('版本')}</span>
-              <span class="truncate font-mono text-xs text-foreground" title={serviceCommitTitle()}>
-                {serviceVersion()}
-                <Show when={serviceCommit() !== '—'}>
-                  <span class="ml-2 text-muted-foreground">{serviceCommit()}</span>
-                </Show>
-              </span>
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              class="mt-2 h-10 justify-start border border-border/60 px-3 text-muted-foreground hover:text-foreground"
-              onClick={props.data.onLogout}
-            >
-              <LogOut class="size-4" />
+  return <Box className="min-h-screen bg-background">
+      <Box className="app-shell">
+        <Box className="app-sidebar" component="aside">
+          <Box className="flex items-center gap-3 px-2 pb-10">
+            <Box className="flex size-8 items-center justify-center bg-foreground text-background">
+              <SquareTerminal className="size-4" />
+            </Box>
+            <Box className="min-w-0">
+              <Box className="text-[0.95rem] font-bold tracking-[0.08em] text-foreground uppercase" component="p">LITTLE GATE</Box>
+            </Box>
+          </Box>
+          <Box className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1" aria-label="Primary" component="nav">
+            {navItems.map((item, index) => {
+            const active = location.pathname.startsWith(item.to);
+            const Icon = item.icon;
+            return <Box key={item.key} className={`group relative flex items-center border-b border-border/40 ${active ? 'text-primary font-bold' : 'text-muted-foreground hover:text-foreground'}`} onDragOver={event => event.preventDefault()} onDrop={() => reorderNav(item.key)}>
+                    <Link to={item.to} className="relative z-10 flex min-h-12 flex-1 items-center gap-3 px-3 py-3 text-sm font-medium transition-colors">
+                      <Icon className="size-4 opacity-70" />
+                      <Box component="span">{t(item.label)}</Box>
+                    </Link>
+                    <Box className="relative z-10 font-mono text-[0.6rem] text-muted-foreground opacity-40" component="span">{String(index + 1).padStart(2, '0')}</Box>
+                    <Button type="button" className="relative z-10 ml-2 flex size-10 cursor-grab items-center justify-center text-muted-foreground opacity-60 transition-colors hover:text-foreground hover:opacity-100 active:cursor-grabbing" aria-label={t('调整导航顺序')} title={t('调整导航顺序')} draggable onDragStart={() => setDraggingKey(item.key)} onDragEnd={() => setDraggingKey(null)} variant="ghost">
+                      <GripVertical className="size-4" />
+                    </Button>
+                    {active ? <Box className="absolute inset-y-0 left-0 w-1 bg-primary/20" component="span" /> : null}
+                  </Box>;
+          })}
+          </Box>
+          <Box className="mt-auto flex flex-col gap-3 border-t border-border/40 px-3 pt-7">
+            <Box className="flex items-center justify-between">
+              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('SYSTEM STATUS')}</Box>
+              <Box className="size-2 rounded-full bg-primary" component="span" />
+            </Box>
+            <Box className="truncate text-xs leading-5 text-muted-foreground" component="p">{props.data.message}</Box>
+            <Box className="flex items-center justify-between gap-3 border border-border/50 px-3 py-2">
+              <Box className="text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('版本')}</Box>
+              <Box className="truncate font-mono text-xs text-foreground" title={serviceCommitTitle} component="span">
+                {serviceVersion}
+                {serviceCommit !== '—' ? <Box className="ml-2 text-muted-foreground" component="span">{serviceCommit}</Box> : null}
+              </Box>
+            </Box>
+            <Button type="button" variant="ghost" className="mt-2 h-10 justify-start border border-border/60 px-3 text-muted-foreground hover:text-foreground" onClick={props.data.onLogout}>
+              <LogOut className="size-4" />
               {t('退出')}
             </Button>
-          </div>
-        </aside>
+          </Box>
+        </Box>
 
-        <main class="app-main">
-          <div class="app-content">
-            <div class="app-pagebar">
-              <div class="min-w-0">
-                <div class="mb-3 flex items-center gap-3">
-                  <span class="size-1.5 rounded-full bg-primary" />
-                  <p class="app-kicker">{`${t(currentItem().label)} ${t('MODULE')}`}</p>
-                </div>
-                <h1 class="app-title">{t(currentItem().label)}</h1>
-                <p class="app-description">{t(pageDescription(location.pathname))}</p>
-              </div>
-              <div class="app-toolbar">
+        <Box className="app-main" component="main">
+          <Box className="app-content">
+            <Box className="app-pagebar">
+              <Box className="min-w-0">
+                <Box className="mb-3 flex items-center gap-3">
+                  <Box className="size-1.5 rounded-full bg-primary" component="span" />
+                  <Box className="app-kicker" component="p">{`${t(currentItem.label)} ${t('MODULE')}`}</Box>
+                </Box>
+                <Box className="app-title" component="h1">{t(currentItem.label)}</Box>
+                <Box className="app-description" component="p">{t(pageDescription(location.pathname))}</Box>
+              </Box>
+              <Box className="app-toolbar">
                 <LocaleSwitch />
                 <StatusBadge tone="normal">实时</StatusBadge>
-                <div class="flex items-center gap-2">
-                  <span class="size-1.5 rounded-full bg-primary" />
-                  <span class="text-xs font-medium text-muted-foreground opacity-80">{t('已连接')}</span>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  class="border-border text-foreground hover:bg-muted"
-                  onClick={() => void props.data.onRefresh()}
-                  disabled={props.data.status() === 'loading'}
-                >
-                  <RefreshCw class="mr-2 size-3" />
+                <Box className="flex items-center gap-2">
+                  <Box className="size-1.5 rounded-full bg-primary" component="span" />
+                  <Box className="text-xs font-medium text-muted-foreground opacity-80" component="span">{t('已连接')}</Box>
+                </Box>
+                <Button type="button" variant="ghost" size="sm" className="border-border text-foreground hover:bg-muted" onClick={() => void props.data.onRefresh()} disabled={props.data.status === 'loading'}>
+                  <RefreshCw className="mr-2 size-3" />
                   {t('SYNC')}
                 </Button>
-              </div>
-            </div>
+              </Box>
+            </Box>
             {props.children}
-          </div>
-        </main>
-      </div>
-    </div>
-  );
+          </Box>
+        </Box>
+      </Box>
+    </Box>;
 }
-
 function ConnectionGate(props: {
-  settings: () => ConnectionSettings;
-  status: () => LoadState;
-  message: () => string;
+  settings: ConnectionSettings;
+  status: LoadState;
+  message: string;
   onApiBaseChange: (value: string) => void;
   onAdminTokenChange: (value: string) => void;
   onRefresh: (successMessage?: string) => Promise<void>;
 }) {
-  return (
-    <div class="min-h-screen bg-background px-4 py-10 sm:px-6 lg:px-8">
-      <div class="mx-auto flex max-w-xl flex-col gap-10 mt-12">
-        <div class="flex justify-end">
+  return <Box className="min-h-screen bg-background px-4 py-10 sm:px-6 lg:px-8">
+      <Box className="mx-auto flex max-w-xl flex-col gap-10 mt-12">
+        <Box className="flex justify-end">
           <LocaleSwitch />
-        </div>
-        <div class="flex flex-col gap-4 text-center items-center">
-          <div class="flex size-12 items-center justify-center bg-foreground text-background">
-            <SquareTerminal class="size-6" />
-          </div>
-          <div>
-            <h1 class="text-4xl font-medium tracking-tight text-foreground mt-6">LITTLE GATE</h1>
-            <p class="mt-2 text-sm font-medium text-muted-foreground tracking-[0.08em] uppercase">{t('ADMIN CONSOLE INITIALIZATION')}</p>
-          </div>
-        </div>
+        </Box>
+        <Box className="flex flex-col gap-4 text-center items-center">
+          <Box className="flex size-12 items-center justify-center bg-foreground text-background">
+            <SquareTerminal className="size-6" />
+          </Box>
+          <Box>
+            <Box className="text-4xl font-medium tracking-tight text-foreground mt-6" component="h1">LITTLE GATE</Box>
+            <Box className="mt-2 text-sm font-medium text-muted-foreground tracking-[0.08em] uppercase" component="p">{t('ADMIN CONSOLE INITIALIZATION')}</Box>
+          </Box>
+        </Box>
 
-        <Card class="rounded-none border border-border bg-background shadow-none">
-          <CardHeader>
-            <CardTitle class="text-xl font-medium tracking-tight">连接信息</CardTitle>
-            <CardDescription>连接成功后进入控制台。</CardDescription>
-          </CardHeader>
+        <Card className="rounded-none border border-border bg-background shadow-none">
+          <Box className="flex flex-col gap-3 p-6 pb-5">
+            <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("连接信息")}</Typography>
+            <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t("连接成功后进入控制台。")}</Typography>
+          </Box>
           <CardContent>
-            <form
-              class="flex flex-col gap-6"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void props.onRefresh('连接信息已刷新。');
-              }}
-            >
-              <div class="grid gap-6">
-                <label class="flex flex-col gap-3">
-                  <span class="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('服务地址')}</span>
-                  <Input
-                    value={props.settings().apiBase}
-                    onInput={(event) => props.onApiBaseChange(event.currentTarget.value)}
-                    placeholder="http://127.0.0.1:8080"
-                    class="rounded-none font-mono text-sm"
-                  />
-                </label>
-                <label class="flex flex-col gap-3">
-                  <span class="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('管理员口令')}</span>
-                  <Input
-                    type="password"
-                    value={props.settings().adminToken}
-                    onInput={(event) => props.onAdminTokenChange(event.currentTarget.value)}
-                    placeholder="输入管理员口令"
-                    class="rounded-none font-mono text-sm"
-                  />
-                </label>
-              </div>
+            <Box className="flex flex-col gap-6" onSubmit={event => {
+            event.preventDefault();
+            void props.onRefresh('连接信息已刷新。');
+          }} component="form">
+              <Box className="grid gap-6">
+                <Box className="flex flex-col gap-3" component="label">
+                  <Box className="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('服务地址')}</Box>
+                  <InputBase value={props.settings.apiBase} onChange={event => props.onApiBaseChange(event.target.value)} placeholder={t("http://127.0.0.1:8080")} className="rounded-none font-mono text-sm" />
+                </Box>
+                <Box className="flex flex-col gap-3" component="label">
+                  <Box className="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('管理员口令')}</Box>
+                  <InputBase type="password" value={props.settings.adminToken} onChange={event => props.onAdminTokenChange(event.target.value)} placeholder={t("输入管理员口令")} className="rounded-none font-mono text-sm" />
+                </Box>
+              </Box>
 
-              <Alert class="rounded-none border-border/40 bg-muted/20">
-                <AlertTitle class="text-sm font-semibold">连接状态</AlertTitle>
-                <AlertDescription class="mt-2 text-sm opacity-80">{props.message()}</AlertDescription>
+              <Alert className="rounded-none border-border/40 bg-muted/20">
+                <AlertTitle className="text-sm font-semibold">{t("连接状态")}</AlertTitle>
+                <Typography className="mt-2 text-sm leading-5 text-muted-foreground opacity-80" component="div">{props.message}</Typography>
               </Alert>
 
-              <div class="flex flex-wrap gap-2 pt-2">
-                <Button type="submit" disabled={props.status() === 'loading'} class="w-full sm:w-auto">
-                  {props.status() === 'loading' ? t('CONNECTING...') : t('ENTER CONSOLE')}
+              <Box className="flex flex-wrap gap-2 pt-2">
+                <Button type="submit" disabled={props.status === 'loading'} className="w-full sm:w-auto">
+                  {props.status === 'loading' ? t('CONNECTING...') : t('ENTER CONSOLE')}
                 </Button>
-              </div>
-            </form>
+              </Box>
+            </Box>
           </CardContent>
         </Card>
-      </div>
-    </div>
-  );
+      </Box>
+    </Box>;
 }
-
-function OverviewPage(props: { data: AppDataContext }) {
-  const [overview, setOverview] = createSignal<StatsOverviewResponse | null>(null);
-  const [period, setPeriod] = createSignal<StatsPeriod>('today');
-  const live = () => overview();
-
-  const loadOverview = async () => {
-    const current = props.data.settings();
+function OverviewPage(props: {
+  data: AppDataContext;
+}) {
+  const [overview, setOverview] = useState<StatsOverviewResponse | null>(null);
+  const [period, setPeriod] = useState<StatsPeriod>('today');
+  const live = () => overview;
+  const loadOverview = useCallback(async () => {
+    const current = props.data.settings;
     if (!current.adminToken.trim()) {
       setOverview(null);
       return;
     }
     try {
-      const data = await loadStatsOverview(current, period());
+      const data = await loadStatsOverview(current, period);
       setOverview(data);
     } catch (error) {
-      props.data.onMessage(error instanceof Error ? t('{{message}}；暂时显示当前数据。', { message: error.message }) : '读取总览失败。');
+      props.data.onMessage(error instanceof Error ? t('{{message}}；暂时显示当前数据。', {
+        message: error.message
+      }) : '读取总览失败。');
       setOverview(null);
     }
-  };
-
-  onMount(() => {
+  }, [period, props.data.onMessage, props.data.settings]);
+  useEffect(() => {
     void loadOverview();
-    if (props.data.apiKeys().length === 0) {
+  }, [loadOverview, props.data.refreshKey]);
+  useEffect(() => {
+    if (props.data.apiKeys.length === 0) {
       void props.data.loadApiKeys();
     }
-  });
-
-  createEffect(
-    on(
-      period,
-      () => {
-        void loadOverview();
-      },
-      { defer: true },
-    ),
-  );
-
-  createEffect(
-    on(
-      () => props.data.refreshKey(),
-      () => {
-        void loadOverview();
-      },
-      { defer: true },
-    ),
-  );
-
-  const periodLabel = createMemo(() => OVERVIEW_PERIODS.find((item) => item.value === period())?.label ?? '今天');
-  const tokenUsage = createMemo(() => overview()?.token_usage);
-  const serverStatus = createMemo(() => overview()?.server_status);
-  const apiKeyCount = createMemo(() => props.data.apiKeys().length);
-  const enabledApiKeyCount = createMemo(() => props.data.apiKeys().filter((item) => item.apiKey.enabled).length);
-  const cacheTokens = createMemo(() => (tokenUsage()?.cache_read_input_tokens ?? 0) + (tokenUsage()?.cache_creation_input_tokens ?? 0));
-  const cacheRate = createMemo(() => {
+  }, [props.data.apiKeys.length, props.data.loadApiKeys]);
+  const periodLabel = () => OVERVIEW_PERIODS.find(item => item.value === period)?.label ?? '今天';
+  const tokenUsage = () => overview?.token_usage;
+  const serverStatus = () => overview?.server_status;
+  const apiKeyCount = () => props.data.apiKeys.length;
+  const enabledApiKeyCount = () => props.data.apiKeys.filter(item => item.apiKey.enabled).length;
+  const cacheTokens = () => (tokenUsage()?.cache_read_input_tokens ?? 0) + (tokenUsage()?.cache_creation_input_tokens ?? 0);
+  const cacheRate = () => {
     const total = tokenUsage()?.total_tokens ?? 0;
     if (total <= 0) return 0;
-    return (cacheTokens() / total) * 100;
-  });
-  const overviewPricing = createMemo(() => {
-    const current = overview();
+    return cacheTokens() / total * 100;
+  };
+  const overviewPricing = () => {
+    const current = overview;
     return current ? calculateOverviewPricing(current) : null;
-  });
-  const metrics = createMemo<StatItem[]>(() => {
+  };
+  const metrics = (): StatItem[] => {
     const current = live();
     if (current) {
-      return [
-        {
-          label: '访问密钥',
-          value: formatCompactInteger(apiKeyCount()),
-          hint: t('启用 {{count}}', { count: formatCompactInteger(enabledApiKeyCount()) }),
-        },
-        {
-          label: '请求次数',
-          value: formatCompactInteger(current.kpis.requests),
-          hint: t('失败 {{count}}', { count: formatCompactInteger(current.kpis.failed) }),
-          tone: current.kpis.error_rate > 5 ? 'warning' : 'success',
-        },
-        {
-          label: '消费',
-          value: overviewPricing() && overviewPricing()!.priceableRequests > 0
-            ? formatUsd(overviewPricing()!.totalUsd)
-            : '—',
-          hint: overviewPricing()
-            ? t('已计价 {{priced}} · 未定价 {{unpriced}} · 缺用量 {{missing}} · token 覆盖 {{coverage}}%', {
-                priced: formatCompactInteger(overviewPricing()!.priceableRequests),
-                unpriced: formatCompactInteger(overviewPricing()!.unpricedRequests),
-                missing: formatCompactInteger(overviewPricing()!.usageMissingRequests),
-                coverage: overviewPricing()!.tokenCoveragePercent.toDecimalPlaces(1).toFixed(1),
-              })
-            : t('当前窗口：{{window}}', { window: t(periodLabel()) }),
-          tone: overviewPricing() && (overviewPricing()!.unpricedRequests > 0 || overviewPricing()!.usageMissingRequests > 0)
-            ? 'warning'
-            : 'success',
-        },
-        {
-          label: '用量',
-          value: formatCompactInteger(current.token_usage.total_tokens),
-          hint: t('输入 {{input}} · 输出 {{output}}', {
-            input: formatCompactInteger(current.token_usage.input_tokens),
-            output: formatCompactInteger(current.token_usage.output_tokens),
-          }),
-        },
-        {
-          label: '缓存率',
-          value: `${cacheRate().toFixed(1)}%`,
-          hint: t('读 {{read}} · 写 {{write}}', {
-            read: formatCompactInteger(current.token_usage.cache_read_input_tokens),
-            write: formatCompactInteger(current.token_usage.cache_creation_input_tokens),
-          }),
-          tone: cacheRate() > 0 ? 'success' : 'default',
-        },
-        {
-          label: '平均响应',
-          value: formatMs(current.kpis.avg_latency_ms),
-          hint: t('P95 {{value}}', { value: formatMs(current.kpis.p95_latency_ms) }),
-        },
-      ];
+      return [{
+        label: '访问密钥',
+        value: formatCompactInteger(apiKeyCount()),
+        hint: t('启用 {{count}}', {
+          count: formatCompactInteger(enabledApiKeyCount())
+        })
+      }, {
+        label: '请求次数',
+        value: formatCompactInteger(current.kpis.requests),
+        hint: t('失败 {{count}}', {
+          count: formatCompactInteger(current.kpis.failed)
+        }),
+        tone: current.kpis.error_rate > 5 ? 'warning' : 'success'
+      }, {
+        label: '消费',
+        value: overviewPricing() && overviewPricing()!.priceableRequests > 0 ? formatUsd(overviewPricing()!.totalUsd) : '—',
+        hint: overviewPricing() ? t('已计价 {{priced}} · 未定价 {{unpriced}} · 缺用量 {{missing}} · token 覆盖 {{coverage}}%', {
+          priced: formatCompactInteger(overviewPricing()!.priceableRequests),
+          unpriced: formatCompactInteger(overviewPricing()!.unpricedRequests),
+          missing: formatCompactInteger(overviewPricing()!.usageMissingRequests),
+          coverage: overviewPricing()!.tokenCoveragePercent.toDecimalPlaces(1).toFixed(1)
+        }) : t('当前窗口：{{window}}', {
+          window: t(periodLabel())
+        }),
+        tone: overviewPricing() && (overviewPricing()!.unpricedRequests > 0 || overviewPricing()!.usageMissingRequests > 0) ? 'warning' : 'success'
+      }, {
+        label: '用量',
+        value: formatCompactInteger(current.token_usage.total_tokens),
+        hint: t('输入 {{input}} · 输出 {{output}}', {
+          input: formatCompactInteger(current.token_usage.input_tokens),
+          output: formatCompactInteger(current.token_usage.output_tokens)
+        })
+      }, {
+        label: '缓存率',
+        value: `${cacheRate().toFixed(1)}%`,
+        hint: t('读 {{read}} · 写 {{write}}', {
+          read: formatCompactInteger(current.token_usage.cache_read_input_tokens),
+          write: formatCompactInteger(current.token_usage.cache_creation_input_tokens)
+        }),
+        tone: cacheRate() > 0 ? 'success' : 'default'
+      }, {
+        label: '平均响应',
+        value: formatMs(current.kpis.avg_latency_ms),
+        hint: t('P95 {{value}}', {
+          value: formatMs(current.kpis.p95_latency_ms)
+        })
+      }];
     }
-
-    return [
-      { label: '访问密钥', value: '—', hint: '等待数据' },
-      { label: '请求次数', value: '—', hint: '等待数据' },
-      { label: '消费', value: '—', hint: '等待数据' },
-      { label: '用量', value: '—', hint: '输入 — · 输出 —' },
-      { label: '缓存率', value: '—', hint: '读 — · 写 —' },
-      { label: '平均响应', value: '—', hint: '等待数据' },
-    ];
-  });
-
-  return (
-    <div class="flex flex-col gap-6">
-      <PageHeader
-        title="总览"
-        description="查看请求、用量与响应表现。"
-        actions={
-          <div class="flex w-full flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div class="flex w-fit flex-wrap rounded-none border border-border bg-background p-1">
-              <For each={OVERVIEW_PERIODS}>
-                {(item) => (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={period() === item.value ? 'default' : 'ghost'}
-                    class="h-8 rounded-none px-3 text-[0.72rem]"
-                    onClick={() => setPeriod(item.value)}
-                  >
+    return [{
+      label: '访问密钥',
+      value: '—',
+      hint: '等待数据'
+    }, {
+      label: '请求次数',
+      value: '—',
+      hint: '等待数据'
+    }, {
+      label: '消费',
+      value: '—',
+      hint: '等待数据'
+    }, {
+      label: '用量',
+      value: '—',
+      hint: '输入 — · 输出 —'
+    }, {
+      label: '缓存率',
+      value: '—',
+      hint: '读 — · 写 —'
+    }, {
+      label: '平均响应',
+      value: '—',
+      hint: '等待数据'
+    }];
+  };
+  return <Box className="flex flex-col gap-6">
+      <PageHeader title="总览" description="查看请求、用量与响应表现。" actions={<Box className="flex w-full flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <Box className="flex w-fit flex-wrap rounded-none border border-border bg-background p-1">
+              {OVERVIEW_PERIODS.map(item => <Button key={item.value} type="button" size="sm" variant={period === item.value ? 'default' : 'ghost'} className="h-8 rounded-none px-3 text-[0.72rem]" onClick={() => setPeriod(item.value)}>
                     {t(item.label)}
-                  </Button>
-                )}
-              </For>
-            </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <Button type="button" variant="outline" size="sm" class="rounded-none shrink-0" onClick={() => void copyText(props.data.settings().apiBase, '地址已复制。', props.data.onMessage)}>
-                <Copy class="mr-2 size-3" />
+                  </Button>)}
+            </Box>
+            <Box className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="outline" size="sm" className="rounded-none shrink-0" onClick={() => void copyText(props.data.settings.apiBase, '地址已复制。', props.data.onMessage)}>
+                <Copy className="mr-2 size-3" />
                 {t('COPY URL')}
               </Button>
-              <A href="/keys" class="shrink-0">
-                <Button type="button" size="sm" class="rounded-none">{t('CREATE KEY')}</Button>
-              </A>
-            </div>
-          </div>
-        }
-      />
+              <Button component={Link} to="/keys" type="button" size="sm" className="rounded-none shrink-0">{t('CREATE KEY')}</Button>
+            </Box>
+          </Box>} />
 
       <StatsGrid items={metrics()} />
 
-      <div class="grid gap-6">
-        <Card class="rounded-none border border-border bg-background shadow-none">
-          <CardHeader>
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <CardTitle>服务状态</CardTitle>
-                <CardDescription>{t('健康状态与可用资源。')}</CardDescription>
-              </div>
-              <StatusBadge
-                tone={
-                  (overview()?.service_health.error ?? 0) > 0
-                    ? 'error'
-                    : (overview()?.service_health.warning ?? 0) > 0
-                      ? 'warning'
-                      : 'normal'
-                }
-              >
-                {(overview()?.service_health.error ?? 0) > 0 ? '异常' : (overview()?.service_health.warning ?? 0) > 0 ? '警告' : '正常'}
+      <Box className="grid gap-6">
+        <Card className="rounded-none border border-border bg-background shadow-none">
+          <Box className="flex flex-col gap-3 p-6 pb-5">
+            <Box className="flex items-center justify-between gap-3">
+              <Box>
+                <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t("服务状态")}</Typography>
+                <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t('健康状态与可用资源。')}</Typography>
+              </Box>
+              <StatusBadge tone={(overview?.service_health.error ?? 0) > 0 ? 'error' : (overview?.service_health.warning ?? 0) > 0 ? 'warning' : 'normal'}>
+                {(overview?.service_health.error ?? 0) > 0 ? '异常' : (overview?.service_health.warning ?? 0) > 0 ? '警告' : '正常'}
               </StatusBadge>
-            </div>
-          </CardHeader>
-          <CardContent class="grid gap-4 md:grid-cols-3">
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">上游健康</div>
-              <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
-                {overview()
-                  ? t('{{count}} 正常', { count: overview()?.service_health.healthy ?? 0 })
-                  : t('等待数据')}
-              </div>
-              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">
-                {overview()
-                  ? t('{{warning}} 警告 · {{error}} 异常', {
-                      warning: overview()?.service_health.warning ?? 0,
-                      error: overview()?.service_health.error ?? 0,
-                    })
-                  : t('暂无实时数据')}
-              </p>
-            </div>
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('活跃密钥')}</div>
-              <div class="mt-2 text-2xl font-medium text-foreground tracking-tight">
-                {overview() ? formatCompactInteger(overview()?.service_health.upstream_keys_enabled ?? 0) : '—'}
-              </div>
-              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-80">{t('当前可用密钥。')}</p>
-            </div>
-            <div class="border-l-2 border-primary/20 pl-4 py-1">
-              <div class="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('服务器状态')}</div>
-              <div class="mt-2 grid grid-cols-2 gap-3">
-                <div>
-                  <div class="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">CPU</div>
-                  <div class="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.cpu_usage_percent)}</div>
-                </div>
-                <div>
-                  <div class="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">{t('内存')}</div>
-                  <div class="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.memory_usage_percent)}</div>
-                </div>
-              </div>
-              <p class="mt-2 text-xs leading-5 text-muted-foreground opacity-80">
+            </Box>
+          </Box>
+          <CardContent className="grid gap-4 md:grid-cols-3">
+            <Box className="border-l-2 border-primary/20 pl-4 py-1">
+              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">上游健康</Box>
+              <Box className="mt-2 text-2xl font-medium text-foreground tracking-tight">
+                {overview ? t('{{count}} 正常', {
+                count: overview?.service_health.healthy ?? 0
+              }) : t('等待数据')}
+              </Box>
+              <Box className="mt-1 text-xs leading-5 text-muted-foreground opacity-80" component="p">
+                {overview ? t('{{warning}} 警告 · {{error}} 异常', {
+                warning: overview?.service_health.warning ?? 0,
+                error: overview?.service_health.error ?? 0
+              }) : t('暂无实时数据')}
+              </Box>
+            </Box>
+            <Box className="border-l-2 border-primary/20 pl-4 py-1">
+              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('活跃密钥')}</Box>
+              <Box className="mt-2 text-2xl font-medium text-foreground tracking-tight">
+                {overview ? formatCompactInteger(overview?.service_health.upstream_keys_enabled ?? 0) : '—'}
+              </Box>
+              <Box className="mt-1 text-xs leading-5 text-muted-foreground opacity-80" component="p">{t('当前可用密钥。')}</Box>
+            </Box>
+            <Box className="border-l-2 border-primary/20 pl-4 py-1">
+              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('服务器状态')}</Box>
+              <Box className="mt-2 grid grid-cols-2 gap-3">
+                <Box>
+                  <Box className="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">CPU</Box>
+                  <Box className="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.cpu_usage_percent)}</Box>
+                </Box>
+                <Box>
+                  <Box className="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">{t('内存')}</Box>
+                  <Box className="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.memory_usage_percent)}</Box>
+                </Box>
+              </Box>
+              <Box className="mt-2 text-xs leading-5 text-muted-foreground opacity-80" component="p">
                 {`${formatServerMemory(serverStatus())} · ${formatServerScope(serverStatus()?.scope, serverStatus()?.memory_limited)}`}
-              </p>
-              <p class="mt-1 text-xs leading-5 text-muted-foreground opacity-70">{formatCpuCapacity(serverStatus()?.cpu_capacity_cores)}</p>
-            </div>
-            <div class="md:col-span-3 pt-2">
-              <A href="/upstreams">
-                <Button type="button" variant="ghost" class="w-full justify-start pl-0 hover:bg-transparent hover:text-primary shrink-0">
-                  {`[ ${t('查看上游详情')} ]`}
-                </Button>
-              </A>
-            </div>
+              </Box>
+              <Box className="mt-1 text-xs leading-5 text-muted-foreground opacity-70" component="p">{formatCpuCapacity(serverStatus()?.cpu_capacity_cores)}</Box>
+            </Box>
+            <Box className="md:col-span-3 pt-2">
+              <Button component={Link} to="/upstreams" type="button" variant="ghost" className="w-full justify-start pl-0 hover:bg-transparent hover:text-primary shrink-0">
+                {`[ ${t('查看上游详情')} ]`}
+              </Button>
+            </Box>
           </CardContent>
         </Card>
-      </div>
-    </div>
-  );
+      </Box>
+    </Box>;
 }
-
-function UpstreamsPage(props: { data: AppDataContext }) {
-  onMount(() => {
-    if (props.data.providers().length === 0) {
+function UpstreamsPage(props: {
+  data: AppDataContext;
+}) {
+  useEffect(() => {
+    if (props.data.providers.length === 0) {
       void props.data.loadProviders();
     }
-    if (props.data.modelAliases().length === 0) {
+    if (props.data.modelAliases.length === 0) {
       void props.data.loadModelAliases();
     }
-  });
-
-  return (
-    <div class="section-stack">
+  }, [props.data.loadModelAliases, props.data.loadProviders, props.data.modelAliases.length, props.data.providers.length]);
+  return <Box className="section-stack">
       <PageHeader title="上游" description="查看连接目标与健康状态。" />
-      <ProvidersPage
-        settings={props.data.settings()}
-        items={props.data.providers()}
-        aliases={props.data.modelAliases()}
-        onRefresh={async (successMessage?: string) => {
-          await Promise.all([
-            props.data.loadProviders(),
-            props.data.loadModelAliases(successMessage),
-          ]);
-        }}
-        onMessage={props.data.onMessage}
-      />
-    </div>
-  );
+      <ProvidersPage settings={props.data.settings} items={props.data.providers} aliases={props.data.modelAliases} onRefresh={async (successMessage?: string) => {
+      await Promise.all([props.data.loadProviders(), props.data.loadModelAliases(successMessage)]);
+    }} onMessage={props.data.onMessage} />
+    </Box>;
 }
-
-function KeysRoutePage(props: { data: AppDataContext }) {
-  onMount(() => {
-    if (props.data.apiKeys().length === 0) {
+function KeysRoutePage(props: {
+  data: AppDataContext;
+}) {
+  useEffect(() => {
+    if (props.data.apiKeys.length === 0) {
       void props.data.loadApiKeys();
     }
-  });
-
-  return (
-    <ApiKeysPage
-      settings={props.data.settings()}
-      items={props.data.apiKeys()}
-      onRefresh={props.data.loadApiKeys}
-      onMessage={props.data.onMessage}
-    />
-  );
+  }, [props.data.apiKeys.length, props.data.loadApiKeys]);
+  return <ApiKeysPage settings={props.data.settings} items={props.data.apiKeys} onRefresh={props.data.loadApiKeys} onMessage={props.data.onMessage} />;
 }
-
-function LogsRoutePage(props: { data: AppDataContext }) {
-  onMount(() => {
-    if (props.data.providers().length === 0) {
+function LogsRoutePage(props: {
+  data: AppDataContext;
+}) {
+  useEffect(() => {
+    if (props.data.providers.length === 0) {
       void props.data.loadProviders();
     }
-    if (props.data.apiKeys().length === 0) {
+    if (props.data.apiKeys.length === 0) {
       void props.data.loadApiKeys();
     }
-  });
-
-  return (
-    <LogsPage
-      settings={props.data.settings()}
-      providers={props.data.providers()}
-      apiKeys={props.data.apiKeys()}
-      refreshKey={props.data.refreshKey()}
-      onMessage={props.data.onMessage}
-    />
-  );
+  }, [props.data.apiKeys.length, props.data.loadApiKeys, props.data.loadProviders, props.data.providers.length]);
+  return <LogsPage settings={props.data.settings} providers={props.data.providers} apiKeys={props.data.apiKeys} refreshKey={props.data.refreshKey} onMessage={props.data.onMessage} />;
 }
-
-function SettingsRoutePage(props: { data: AppDataContext }) {
-  onMount(() => {
+function SettingsRoutePage(props: {
+  data: AppDataContext;
+}) {
+  useEffect(() => {
     void props.data.loadPricesAndConfig();
-    if (props.data.providers().length === 0) {
+    if (props.data.providers.length === 0) {
       void props.data.loadProviders();
     }
-  });
-
-  return (
-    <SettingsPage
-      settings={props.data.settings()}
-      systemConfig={props.data.systemConfig()}
-      runtimeSettings={props.data.runtimeSettings()}
-      runtimeEnvPreview={props.data.runtimeEnvPreview()}
-      prices={props.data.prices()}
-      providers={props.data.providers()}
-      onApiBaseChange={props.data.onApiBaseChange}
-      onAdminTokenChange={props.data.onAdminTokenChange}
-      onRefresh={props.data.loadPricesAndConfig}
-      onMessage={props.data.onMessage}
-    />
-  );
+  }, [props.data.loadPricesAndConfig, props.data.loadProviders, props.data.providers.length]);
+  return <SettingsPage settings={props.data.settings} systemConfig={props.data.systemConfig} runtimeSettings={props.data.runtimeSettings} runtimeEnvPreview={props.data.runtimeEnvPreview} prices={props.data.prices} providers={props.data.providers} onApiBaseChange={props.data.onApiBaseChange} onAdminTokenChange={props.data.onAdminTokenChange} onRefresh={props.data.loadPricesAndConfig} onMessage={props.data.onMessage} />;
 }
-
 function Root() {
-  installLocaleEffect();
-  const [settings, setSettings] = createSignal<ConnectionSettings>(readSettings());
-  const [providers, setProviders] = createSignal<ProviderWorkspace[]>([]);
-  const [modelAliases, setModelAliases] = createSignal<ModelAlias[]>([]);
-  const [apiKeys, setApiKeys] = createSignal<ApiKeyWorkspace[]>([]);
-  const [prices, setPrices] = createSignal<ModelPrice[]>([]);
-  const [systemConfig, setSystemConfig] = createSignal<SystemConfigResponse | null>(null);
-  const [runtimeSettings, setRuntimeSettings] = createSignal<RuntimeSettingsResponse | null>(null);
-  const [runtimeEnvPreview, setRuntimeEnvPreview] = createSignal<RuntimeEnvPreviewResponse | null>(null);
-  const [status, setStatus] = createSignal<LoadState>('idle');
-  const [message, setMessage] = createSignal(t('未连接后台。'));
-  const [refreshKey, setRefreshKey] = createSignal(0);
-  const [consoleMode, setConsoleMode] = createSignal<ConsoleMode>(
-    settings().adminToken.trim() ? 'console' : 'connect',
-  );
-
-  const clearWorkspace = () => {
+  useI18n();
+  const [settings, setSettings] = useState<ConnectionSettings>(readSettings);
+  const [providers, setProviders] = useState<ProviderWorkspace[]>([]);
+  const [modelAliases, setModelAliases] = useState<ModelAlias[]>([]);
+  const [apiKeys, setApiKeys] = useState<ApiKeyWorkspace[]>([]);
+  const [prices, setPrices] = useState<ModelPrice[]>([]);
+  const [systemConfig, setSystemConfig] = useState<SystemConfigResponse | null>(null);
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettingsResponse | null>(null);
+  const [runtimeEnvPreview, setRuntimeEnvPreview] = useState<RuntimeEnvPreviewResponse | null>(null);
+  const [status, setStatus] = useState<LoadState>('idle');
+  const [message, setMessage] = useState(t('未连接后台。'));
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [consoleMode, setConsoleMode] = useState<ConsoleMode>(settings.adminToken.trim() ? 'console' : 'connect');
+  const clearWorkspace = useCallback(() => {
     setProviders([]);
     setModelAliases([]);
     setApiKeys([]);
@@ -773,10 +640,9 @@ function Root() {
     setSystemConfig(null);
     setRuntimeSettings(null);
     setRuntimeEnvPreview(null);
-  };
-
-  const loadProviders = async (successMessage?: string) => {
-    const current = settings();
+  }, []);
+  const loadProviders = useCallback(async (successMessage?: string) => {
+    const current = settings;
     if (!current.adminToken.trim()) {
       setProviders([]);
       return;
@@ -792,10 +658,9 @@ function Root() {
     } finally {
       setStatus('ready');
     }
-  };
-
-  const loadModelAliasesForState = async (successMessage?: string) => {
-    const current = settings();
+  }, [settings]);
+  const loadModelAliasesForState = useCallback(async (successMessage?: string) => {
+    const current = settings;
     if (!current.adminToken.trim()) {
       setModelAliases([]);
       return;
@@ -811,10 +676,9 @@ function Root() {
     } finally {
       setStatus('ready');
     }
-  };
-
-  const loadApiKeys = async (successMessage?: string) => {
-    const current = settings();
+  }, [settings]);
+  const loadApiKeys = useCallback(async (successMessage?: string) => {
+    const current = settings;
     if (!current.adminToken.trim()) {
       setApiKeys([]);
       return;
@@ -830,10 +694,9 @@ function Root() {
     } finally {
       setStatus('ready');
     }
-  };
-
-  const loadPricesAndConfig = async (successMessage?: string) => {
-    const current = settings();
+  }, [settings]);
+  const loadPricesAndConfig = useCallback(async (successMessage?: string) => {
+    const current = settings;
     if (!current.adminToken.trim()) {
       setPrices([]);
       setSystemConfig(null);
@@ -843,12 +706,7 @@ function Root() {
     }
     setStatus('loading');
     try {
-      const [priceItems, config, runtime, envPreview] = await Promise.all([
-        loadPrices(current),
-        loadSystemConfig(current).catch(() => null),
-        loadRuntimeSettings(current).catch(() => null),
-        previewRuntimeEnv(current).catch(() => null),
-      ]);
+      const [priceItems, config, runtime, envPreview] = await Promise.all([loadPrices(current), loadSystemConfig(current).catch(() => null), loadRuntimeSettings(current).catch(() => null), previewRuntimeEnv(current).catch(() => null)]);
       setPrices(priceItems);
       setSystemConfig(config);
       setRuntimeSettings(runtime);
@@ -863,53 +721,61 @@ function Root() {
     } finally {
       setStatus('ready');
     }
-  };
-
-  const refreshData = async (successMessage?: string) => {
-    const current = settings();
+  }, [settings]);
+  const refreshData = useCallback(async (successMessage?: string) => {
+    const current = settings;
     persistSettings(current);
     setStatus('loading');
-
     if (!current.adminToken.trim()) {
       clearWorkspace();
       setMessage(t('请输入管理员口令。'));
       setConsoleMode('connect');
-      setRefreshKey((value) => value + 1);
+      setRefreshKey(value => value + 1);
       setStatus('ready');
       return;
     }
-
     try {
       const config = await loadSystemConfig(current).catch(() => null);
       setSystemConfig(config);
-      setRefreshKey((value) => value + 1);
+      setRefreshKey(value => value + 1);
       setMessage(successMessage ? t(successMessage) : t('已连接。'));
       setConsoleMode('console');
     } catch (error) {
       console.error('Failed to load admin console data', error);
       clearWorkspace();
-      setMessage(error instanceof Error ? t('{{message}}；请检查服务地址和管理员口令。', { message: error.message }) : t('连接失败；请检查服务地址和管理员口令。'));
+      setMessage(error instanceof Error ? t('{{message}}；请检查服务地址和管理员口令。', {
+        message: error.message
+      }) : t('连接失败；请检查服务地址和管理员口令。'));
       setConsoleMode('connect');
     } finally {
       setStatus('ready');
     }
-  };
-
-  const logout = () => {
-    const nextSettings = { ...settings(), adminToken: '' };
+  }, [clearWorkspace, settings]);
+  const logout = useCallback(() => {
+    const nextSettings = {
+      ...settings,
+      adminToken: ''
+    };
     setSettings(nextSettings);
     persistSettings(nextSettings);
     clearWorkspace();
     setMessage(t('已退出。'));
     setConsoleMode('connect');
-    setRefreshKey((value) => value + 1);
-  };
-
-  onMount(() => {
+    setRefreshKey(value => value + 1);
+  }, [clearWorkspace, settings]);
+  const onApiBaseChange = useCallback((value: string) => setSettings(current => ({
+    ...current,
+    apiBase: value
+  })), []);
+  const onAdminTokenChange = useCallback((value: string) => setSettings(current => ({
+    ...current,
+    adminToken: value
+  })), []);
+  const onMessage = useCallback((nextMessage: string) => setMessage(t(nextMessage)), []);
+  useEffect(() => {
     void refreshData();
-  });
-
-  const data: AppDataContext = {
+  }, []);
+  const data = useMemo<AppDataContext>(() => ({
     settings,
     providers,
     modelAliases,
@@ -925,40 +791,58 @@ function Root() {
     loadModelAliases: loadModelAliasesForState,
     loadApiKeys,
     loadPricesAndConfig,
-    onApiBaseChange: (value) => setSettings((current) => ({ ...current, apiBase: value })),
-    onAdminTokenChange: (value) => setSettings((current) => ({ ...current, adminToken: value })),
+    onApiBaseChange,
+    onAdminTokenChange,
     onRefresh: refreshData,
     onLogout: logout,
-    onMessage: (message) => setMessage(t(message)),
-  };
-
-  return (
-    <Show
-      when={consoleMode() === 'console'}
-      fallback={
-        <ConnectionGate
-          settings={settings}
-          status={status}
-          message={message}
-          onApiBaseChange={(value) => setSettings((current) => ({ ...current, apiBase: value }))}
-          onAdminTokenChange={(value) => setSettings((current) => ({ ...current, adminToken: value }))}
-          onRefresh={refreshData}
-        />
-      }
-    >
-      <Router root={(props) => <TopShell data={data}>{props.children}</TopShell>}>
-        <Route path="/" component={() => <Navigate href="/overview" />} />
-        <Route path="/overview" component={() => <OverviewPage data={data} />} />
-        <Route path="/keys" component={() => <KeysRoutePage data={data} />} />
-        <Route path="/logs" component={() => <LogsRoutePage data={data} />} />
-        <Route path="/upstreams" component={() => <UpstreamsPage data={data} />} />
-        <Route path="/settings" component={() => <SettingsRoutePage data={data} />} />
-        <Route path="/usage" component={() => <Navigate href="/overview" />} />
-        <Route path="/prices" component={() => <Navigate href="/overview" />} />
-        <Route path="*" component={() => <Navigate href="/overview" />} />
-      </Router>
-    </Show>
+    onMessage
+  }), [
+    apiKeys,
+    loadApiKeys,
+    loadModelAliasesForState,
+    loadPricesAndConfig,
+    loadProviders,
+    logout,
+    message,
+    modelAliases,
+    onAdminTokenChange,
+    onApiBaseChange,
+    onMessage,
+    prices,
+    providers,
+    refreshData,
+    refreshKey,
+    runtimeEnvPreview,
+    runtimeSettings,
+    settings,
+    status,
+    systemConfig
+  ]);
+  return consoleMode === 'console' ? (
+    <BrowserRouter>
+      <TopShell data={data}>
+        <Routes>
+          <Route path="/" element={<Navigate to="/overview" replace />} />
+          <Route path="/overview" element={<OverviewPage data={data} />} />
+          <Route path="/keys" element={<KeysRoutePage data={data} />} />
+          <Route path="/logs" element={<LogsRoutePage data={data} />} />
+          <Route path="/upstreams" element={<UpstreamsPage data={data} />} />
+          <Route path="/settings" element={<SettingsRoutePage data={data} />} />
+          <Route path="/usage" element={<Navigate to="/overview" replace />} />
+          <Route path="/prices" element={<Navigate to="/overview" replace />} />
+          <Route path="*" element={<Navigate to="/overview" replace />} />
+        </Routes>
+      </TopShell>
+    </BrowserRouter>
+  ) : (
+    <ConnectionGate
+      settings={settings}
+      status={status}
+      message={message}
+      onApiBaseChange={onApiBaseChange}
+      onAdminTokenChange={onAdminTokenChange}
+      onRefresh={refreshData}
+    />
   );
 }
-
 export default Root;

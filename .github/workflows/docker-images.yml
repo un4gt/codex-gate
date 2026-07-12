@@ -10,8 +10,13 @@ permissions:
   packages: write
 
 jobs:
+  verify:
+    name: Verify Release Gate
+    uses: ./.github/workflows/quality-gate.yml
+
   docker:
     name: Build And Publish
+    needs: verify
     runs-on: ubuntu-latest
 
     steps:

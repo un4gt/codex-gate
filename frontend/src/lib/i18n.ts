@@ -1,5 +1,4 @@
-import { createEffect, createSignal, useTransition, type JSX } from 'solid-js';
-import { resolveTemplate, translator } from '@solid-primitives/i18n';
+import { useSyncExternalStore, useTransition } from 'react';
 import { dict as en } from '@/i18n/en';
 import { dict as zh } from '@/i18n/zh';
 
@@ -16,6 +15,9 @@ const INTL_LOCALES: Record<Locale, string> = {
   zh: 'zh-CN',
   en: 'en-US',
 };
+
+let currentLocale: Locale = DEFAULT_LOCALE;
+const listeners = new Set<() => void>();
 
 function normalizeLocale(value?: string | null): Locale {
   const normalized = value?.trim().toLowerCase();
@@ -38,58 +40,59 @@ function syncDocumentLocale(value: Locale) {
   document.documentElement.lang = INTL_LOCALES[value];
 }
 
-const [locale, setLocaleSignal] = createSignal<Locale>(readStoredLocale());
-const translate = translator(() => DICTIONARIES[locale()], resolveTemplate);
-
-export function initializeI18n() {
-  const current = readStoredLocale();
-  setLocaleSignal(current);
-  syncDocumentLocale(current);
-}
-
-export function installLocaleEffect() {
-  createEffect(() => {
-    syncDocumentLocale(locale());
+function resolveTemplate(template: string, params?: TranslationParams) {
+  if (!params) return template;
+  return template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (match, key: string) => {
+    const value = params[key];
+    return value === undefined ? match : String(value);
   });
 }
 
+function emitLocaleChange() {
+  for (const listener of listeners) listener();
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export function initializeI18n() {
+  currentLocale = readStoredLocale();
+  syncDocumentLocale(currentLocale);
+}
+
 export function getLocale() {
-  return locale();
+  return currentLocale;
 }
 
 export function getIntlLocale() {
-  return INTL_LOCALES[locale()];
+  return INTL_LOCALES[currentLocale];
 }
 
 export function setLocale(next: Locale) {
-  if (next === locale()) return;
+  if (next === currentLocale) return;
   persistLocale(next);
-  setLocaleSignal(next);
+  currentLocale = next;
+  syncDocumentLocale(next);
+  emitLocaleChange();
 }
 
 export function t(key: string, params?: TranslationParams) {
-  const translated = translate(key, params);
-  if (translated !== undefined) return translated;
-  return params ? resolveTemplate(key, params) : key;
-}
-
-export function translateJsx(node: JSX.Element): JSX.Element {
-  if (typeof node === 'string') return t(node);
-  if (Array.isArray(node)) {
-    return node.map((item) => translateJsx(item as JSX.Element)) as unknown as JSX.Element;
-  }
-  return node;
+  const template = DICTIONARIES[currentLocale][key] ?? key;
+  return resolveTemplate(template, params);
 }
 
 export function useI18n() {
-  const [isSwitching, startTransition] = useTransition();
+  const locale = useSyncExternalStore(subscribe, getLocale, getLocale);
+  const [isSwitching, beginTransition] = useTransition();
 
   return {
     locale,
     t,
     isSwitching,
     setLocale(next: Locale) {
-      startTransition(() => setLocale(next));
+      beginTransition(() => setLocale(next));
     },
   };
 }

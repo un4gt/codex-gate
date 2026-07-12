@@ -13,36 +13,22 @@ else
   exit 1
 fi
 
+PREK_VERSION="${PREK_VERSION:-0.3.9}"
+ACTUAL_PREK_VERSION="$("$PREK_BIN" --version)"
+if [[ "$ACTUAL_PREK_VERSION" != "prek ${PREK_VERSION}" ]]; then
+  echo "prek 版本不匹配：当前 ${ACTUAL_PREK_VERSION}，要求 prek ${PREK_VERSION}。" >&2
+  exit 1
+fi
+
 PROJECT_SLUG="$(basename "$ROOT_DIR")"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/${PROJECT_SLUG}-prek-cache}"
 export PREK_HOME="${PREK_HOME:-/tmp/${PROJECT_SLUG}-prek-home}"
-mkdir -p "$XDG_CACHE_HOME" "$PREK_HOME" "$ROOT_DIR/.git/hooks"
+mkdir -p "$XDG_CACHE_HOME" "$PREK_HOME"
 
-"$PREK_BIN" install -c prek.toml --hook-type pre-commit --hook-type pre-push --overwrite >/dev/null
+"$PREK_BIN" install -c prek.toml --overwrite --prepare-hooks
 
-write_hook() {
-  local hook_type="$1"
-  cat >"$ROOT_DIR/.git/hooks/$hook_type" <<EOF
-#!/bin/sh
-HERE="\$(cd "\$(dirname "\$0")" && pwd)"
-PREK="$PREK_BIN"
-export XDG_CACHE_HOME="$XDG_CACHE_HOME"
-export PREK_HOME="$PREK_HOME"
-mkdir -p "\$XDG_CACHE_HOME" "\$PREK_HOME"
-
-if [ ! -x "\$PREK" ]; then
-    PREK="prek"
-fi
-
-exec "\$PREK" hook-impl --hook-dir "\$HERE" --script-version 4 --hook-type=$hook_type --config="prek.toml" -- "\$@"
-EOF
-
-  chmod +x "$ROOT_DIR/.git/hooks/$hook_type"
-}
-
-write_hook pre-commit
-write_hook pre-push
+HOOKS_DIR="$(git rev-parse --git-path hooks)"
 
 echo "Installed prek hooks:"
-echo "  - .git/hooks/pre-commit"
-echo "  - .git/hooks/pre-push"
+echo "  - ${HOOKS_DIR}/pre-commit"
+echo "  - ${HOOKS_DIR}/pre-push"

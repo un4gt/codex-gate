@@ -9,11 +9,10 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "preserve",
-    "jsxImportSource": "solid-js",
+    "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
-    "types": ["vite/client"],
+    "types": ["@rsbuild/core/types"],
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]

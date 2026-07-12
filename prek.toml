@@ -6,30 +6,33 @@ default_install_hook_types = ["pre-commit", "pre-push"]
 repo = "local"
 
 [[repos.hooks]]
-id = "frontend-solid-init-order"
-name = "frontend solid init order"
-entry = "node scripts/check_frontend_solid_init_order.mjs"
-language = "system"
-pass_filenames = false
-always_run = true
-stages = ["pre-commit", "pre-push"]
-
-[[repos.hooks]]
 id = "frontend-build"
 name = "frontend build"
 entry = "npm --prefix frontend run build"
 language = "system"
 pass_filenames = false
 always_run = true
+priority = 10
 stages = ["pre-commit", "pre-push"]
 
 [[repos.hooks]]
-id = "backend-build"
-name = "backend build"
-entry = "cargo build --manifest-path backend/Cargo.toml"
+id = "frontend-test"
+name = "frontend test"
+entry = "npm --prefix frontend test"
 language = "system"
 pass_filenames = false
 always_run = true
+priority = 20
+stages = ["pre-commit", "pre-push"]
+
+[[repos.hooks]]
+id = "backend-test"
+name = "backend test"
+entry = "cargo test --manifest-path backend/Cargo.toml --locked"
+language = "system"
+pass_filenames = false
+always_run = true
+priority = 30
 stages = ["pre-push"]
 
 [[repos.hooks]]
@@ -39,4 +42,5 @@ entry = "bash scripts/prek-compose-up-check.sh"
 language = "system"
 pass_filenames = false
 always_run = true
+priority = 40
 stages = ["manual"]

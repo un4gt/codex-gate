@@ -1,37 +1,31 @@
-import { For, type JSX } from 'solid-js';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { type JSX } from "react";
 import { t } from '@/lib/i18n';
-
+import Box from "@mui/material/Box";
+import Card from "@mui/material/Card";
+import CardContent from "@mui/material/CardContent";
+import Typography from "@mui/material/Typography";
 interface QuickActionItem {
   title: string;
   description: string;
   action: JSX.Element;
 }
-
 interface QuickActionsProps {
   title?: string;
   items: QuickActionItem[];
 }
-
 export function QuickActions(props: QuickActionsProps) {
-  return (
-    <Card class="rounded-none border border-border bg-background shadow-none">
-      <CardHeader class="pb-4">
-        <CardTitle class="text-xl font-medium tracking-tight">{t(props.title ?? '快捷操作')}</CardTitle>
-      </CardHeader>
-      <CardContent class="grid gap-0">
-        <For each={props.items}>
-          {(item) => (
-            <div class="flex items-center justify-between gap-4 border-b border-border/40 py-4 last:border-0 last:pb-0 first:pt-0 overflow-hidden">
-              <div class="flex min-w-0 flex-col gap-1">
-                <strong class="text-sm font-medium text-foreground truncate">{t(item.title)}</strong>
-                <span class="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-wider truncate">{t(item.description)}</span>
-              </div>
-              <div class="shrink-0">{item.action}</div>
-            </div>
-          )}
-        </For>
+  return <Card className="rounded-none border border-border bg-background shadow-none">
+      <Box className="flex flex-col gap-3 p-6 pb-4">
+        <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t(props.title ?? '快捷操作')}</Typography>
+      </Box>
+      <CardContent className="grid gap-0">
+        {props.items.map(item => <Box key={item.title} className="flex items-center justify-between gap-4 border-b border-border/40 py-4 last:border-0 last:pb-0 first:pt-0 overflow-hidden">
+              <Box className="flex min-w-0 flex-col gap-1">
+                <Box className="text-sm font-medium text-foreground truncate" component="strong">{t(item.title)}</Box>
+                <Box className="font-mono text-xs text-muted-foreground opacity-70 uppercase tracking-wider truncate" component="span">{t(item.description)}</Box>
+              </Box>
+              <Box className="shrink-0">{item.action}</Box>
+            </Box>)}
       </CardContent>
-    </Card>
-  );
+    </Card>;
 }

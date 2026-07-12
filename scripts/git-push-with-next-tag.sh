@@ -4,23 +4,22 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/git-push-with-next-tag.sh [--remote origin] [--allow-dirty]
+  bash scripts/git-push-with-next-tag.sh [--remote origin]
 
 Behavior:
-  1. Push current branch to remote
-  2. Find latest tag matching vX.Y.Z
-  3. Create next patch tag (for example v0.0.23 -> v0.0.24)
-  4. Push tags to remote
+  1. Require a clean working tree
+  2. Run the complete prek pre-push release gate
+  3. Find latest tag matching vX.Y.Z
+  4. Create next patch tag (for example v0.0.23 -> v0.0.24)
+  5. Push the current branch and new tag together
 
 Options:
   --remote <name>   Remote name, default: origin
-  --allow-dirty     Skip working tree clean check
   -h, --help        Show this help
 EOF
 }
 
 remote_name="origin"
-allow_dirty="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,10 +30,6 @@ while [[ $# -gt 0 ]]; do
       fi
       remote_name="$2"
       shift 2
-      ;;
-    --allow-dirty)
-      allow_dirty="true"
-      shift
       ;;
     -h|--help)
       usage
@@ -58,8 +53,8 @@ if ! git remote get-url "$remote_name" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ "$allow_dirty" != "true" ]] && [[ -n "$(git status --porcelain)" ]]; then
-  echo "working tree is not clean; commit or stash changes first, or use --allow-dirty" >&2
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "working tree is not clean; commit or stash changes before creating a release tag" >&2
   exit 1
 fi
 
@@ -101,13 +96,13 @@ echo "branch: ${current_branch}"
 echo "latest tag: ${latest_tag:-<none>}"
 echo "next tag: ${next_tag}"
 
-echo "==> pushing branch"
-git push "$remote_name" "$current_branch"
+echo "==> running prek pre-push release gate"
+bash scripts/run-prek-checks.sh pre-push
 
 echo "==> creating tag ${next_tag}"
 git tag "$next_tag"
 
-echo "==> pushing tags"
-git push "$remote_name" --tags
+echo "==> pushing branch and tag"
+git push --atomic "$remote_name" "$current_branch" "$next_tag"
 
 echo "done: ${next_tag}"

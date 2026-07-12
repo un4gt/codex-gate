@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@rstest/core';
 import type { PriceCardV2, StatsOverviewResponse } from '@/lib/types';
 import {
   calculateOverviewPricing,

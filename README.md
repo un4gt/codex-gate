@@ -107,10 +107,13 @@ docker compose down -v
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
+npm --prefix frontend ci
+bash scripts/docker-compose-up.sh -d --build
 ```
 
-这种方式会使用仓库内的 `Dockerfile` 本地构建镜像，更适合开发调试或自定义修改后的部署。
+这条脚本会显式运行 `manual` stage，先执行前端 smoke tests、前端生产构建和 Rust tests，再调用 Docker Compose。`manual` stage 不会被 Git 自动触发，不能用普通的 `git commit` 或 `git push` 代替。
+
+仓库内的 `Dockerfile` 还会在 Node 24 builder 中重新执行 `npm ci`、前端测试和生产构建；任一步失败都会终止镜像构建。因此即使直接执行 `docker compose up -d --build`，有问题的前端产物也不会进入运行时镜像。
 
 ---
 
@@ -192,11 +195,13 @@ Linux 生产环境可参考发布包中的 `little-gate.service` 配置 systemd�
 
 ### 4) 从源码构建二进制（开发/自托管）
 
+前端要求 Node.js `>=22.22.0`，CI 和 Docker 统一使用 Node 24。`frontend/.npmrc` 已启用 `engine-strict`，Node 版本不满足时 `npm ci` 会直接失败，而不是只打印告警。构建机还需要 Rust stable，以及 `prek 0.3.9` 或可执行 `uvx` 的 uv 安装。
+
 Linux/macOS：
 
 ```bash
 npm --prefix frontend ci
-npm --prefix frontend run build
+bash scripts/run-prek-checks.sh pre-push
 cargo build --release --locked --manifest-path backend/Cargo.toml
 mkdir -p dist/little-gate-local/static
 cp backend/target/release/backend dist/little-gate-local/little-gate
@@ -209,7 +214,7 @@ Windows：
 
 ```powershell
 npm --prefix frontend ci
-npm --prefix frontend run build
+uvx --from "prek==0.3.9" prek run --stage pre-push --all-files --show-diff-on-failure --fail-fast
 cargo build --release --locked --manifest-path backend/Cargo.toml
 New-Item -ItemType Directory -Force -Path dist\little-gate-local\static | Out-Null
 Copy-Item backend\target\release\backend.exe dist\little-gate-local\little-gate.exe
@@ -219,6 +224,26 @@ Copy-Item deploy\windows\run-little-gate.ps1 dist\little-gate-local\
 ```
 
 复制 `.env.example` 为 `.env`，设置 `ADMIN_TOKEN` 和 `MASTER_KEY` 后，按上面的 Linux/Windows 启动方式运行。
+
+### 发布门禁
+
+安装本地 Git hooks（需要 PATH 中已有 `prek`）：
+
+```bash
+bash scripts/install-prek-hooks.sh
+```
+
+安装脚本调用官方 `prek install --overwrite --prepare-hooks`，并尊重 Git 的有效 `core.hooksPath`。`default_install_hook_types` 只负责默认安装 `pre-commit` 和 `pre-push` shim；每个检查是否运行仍由 `prek.toml` 中的 `stages` 决定。
+
+发布、创建 tag 或人工构建发布包时必须显式运行完整门禁：
+
+```bash
+bash scripts/run-prek-checks.sh pre-push
+```
+
+不要用未指定 stage 的 `prek run --all-files` 代替；它默认只运行 `pre-commit` stage，可能遗漏 Rust tests。`manual` stage 也永远不会自动运行，只能通过 `bash scripts/docker-compose-up.sh ...` 或显式指定 `--stage manual` 调用。
+
+本地 hooks 可以被跳过，因此不是发布安全边界。二进制与 Docker tag workflow 都必须先通过 `.github/workflows/quality-gate.yml` 才能构建或发布；`scripts/git-push-with-next-tag.sh` 也会在创建 tag 前要求 clean worktree 并执行同一个 pre-push 门禁。
 
 ## 环境变量说明
 

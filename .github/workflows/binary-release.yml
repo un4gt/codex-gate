@@ -10,8 +10,13 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    name: Verify Release Gate
+    uses: ./.github/workflows/quality-gate.yml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -33,7 +38,7 @@ jobs:
       - name: Set Up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -54,6 +59,7 @@ jobs:
       - name: Build Frontend
         run: |
           npm --prefix frontend ci
+          npm --prefix frontend test
           npm --prefix frontend run build
 
       - name: Test Backend
