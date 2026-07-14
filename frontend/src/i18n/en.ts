@@ -75,6 +75,7 @@ export const dict: Record<string, string> = {
   '{{message}}；暂时显示当前数据。': '{{message}}; showing current data for now.',
   '读取总览失败。': 'Failed to load overview.',
   '调整导航顺序': 'Reorder navigation',
+  '拖动任意导航项可调整顺序。键盘操作：按空格开始，使用上下方向键移动，再按空格完成。': 'Drag any navigation item to reorder it. Keyboard: press Space to start, use Arrow Up or Arrow Down to move, then press Space to finish.',
   '退出': 'Log out',
   '已退出。': 'Logged out.',
   '今天': 'Today',

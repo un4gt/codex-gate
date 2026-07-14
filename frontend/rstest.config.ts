@@ -5,6 +5,7 @@ export default defineConfig({
   root: import.meta.dirname,
   plugins: [pluginReact()],
   include: ['src/**/*.test.{ts,tsx}'],
+  setupFiles: ['./src/test/setup.ts'],
   testEnvironment: 'jsdom',
   resolve: {
     alias: {

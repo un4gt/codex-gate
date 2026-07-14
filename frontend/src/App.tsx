@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { RestrictToVerticalAxis } from '@dnd-kit/abstract/modifiers';
+import { KeyboardSensor, PointerActivationConstraints, PointerSensor } from '@dnd-kit/dom';
+import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
+import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router';
-import { Activity, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal } from "lucide-react";
+import { Activity, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
@@ -22,6 +26,7 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import InputBase from "@mui/material/InputBase";
 import Typography from "@mui/material/Typography";
+import useMediaQuery from '@mui/material/useMediaQuery';
 type LoadState = 'idle' | 'loading' | 'ready';
 type ConsoleMode = 'connect' | 'console';
 interface AppDataContext {
@@ -78,6 +83,51 @@ const NAV_ITEMS_BY_KEY = {
 } as const;
 type NavKey = keyof typeof NAV_ITEMS_BY_KEY;
 const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'logs', 'keys', 'settings'];
+const NAVIGATION_SORTABLE_TYPE = 'primary-navigation';
+const NAVIGATION_SORT_INSTRUCTIONS_ID = 'primary-nav-sort-instructions';
+const NAVIGATION_SORT_TRANSITION = {
+  duration: 180,
+  easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  idle: true
+};
+const NAVIGATION_DROP_ANIMATION = {
+  duration: 160,
+  easing: 'cubic-bezier(0.22, 1, 0.36, 1)'
+};
+const NAVIGATION_DRAG_SENSORS = [PointerSensor.configure({
+  activationConstraints(event) {
+    if (event.pointerType === 'touch') {
+      return [new PointerActivationConstraints.Delay({
+        value: 180,
+        tolerance: 8
+      })];
+    }
+    return [new PointerActivationConstraints.Distance({
+      value: 6
+    })];
+  }
+}), KeyboardSensor.configure({
+  keyboardCodes: {
+    start: ['Space'],
+    cancel: ['Escape'],
+    end: ['Space', 'Enter', 'Tab'],
+    up: ['ArrowUp'],
+    down: ['ArrowDown'],
+    left: ['ArrowLeft'],
+    right: ['ArrowRight']
+  },
+  offset: {
+    x: 0,
+    y: 52
+  }
+})];
+const NAVIGATION_DRAG_MODIFIERS = [RestrictToVerticalAxis];
+interface NavigationItemView {
+  key: NavKey;
+  to: string;
+  label: string;
+  icon: LucideIcon;
+}
 const OVERVIEW_PERIODS: {
   value: StatsPeriod;
   label: string;
@@ -153,15 +203,70 @@ function persistNavOrder(order: NavKey[]) {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(NAV_ORDER_KEY, JSON.stringify(order));
 }
-function moveNavKey(order: NavKey[], from: NavKey, to: NavKey): NavKey[] {
-  if (from === to) return order;
+function moveNavKey(order: NavKey[], from: NavKey, toIndex: number): NavKey[] {
   const next = [...order];
   const fromIndex = next.indexOf(from);
-  const toIndex = next.indexOf(to);
-  if (fromIndex < 0 || toIndex < 0) return order;
+  const boundedIndex = Math.max(0, Math.min(toIndex, next.length - 1));
+  if (fromIndex < 0 || fromIndex === boundedIndex) return order;
   const [item] = next.splice(fromIndex, 1);
-  next.splice(toIndex, 0, item);
+  next.splice(boundedIndex, 0, item);
   return next;
+}
+function NavigationItemContent(props: {
+  item: NavigationItemView;
+  index: number;
+  active: boolean;
+  overlay?: boolean;
+}) {
+  const Icon = props.item.icon;
+  return <>
+      {props.active ? <Box className="absolute inset-y-2 left-0 w-0.5 bg-primary" aria-hidden="true" component="span" /> : null}
+      <Box className={`relative z-10 flex size-8 shrink-0 items-center justify-center ${props.active || props.overlay ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground'}`} aria-hidden="true" component="span">
+        <Icon className="size-4" />
+      </Box>
+      <Box className="relative z-10 min-w-0 flex-1 truncate" component="span">{t(props.item.label)}</Box>
+      <Box className="relative z-10 font-mono text-[0.6rem] text-muted-foreground opacity-45" aria-hidden="true" component="span">{String(props.index + 1).padStart(2, '0')}</Box>
+      <Box className={`relative z-10 flex size-8 shrink-0 items-center justify-center transition-[color,opacity] duration-150 motion-reduce:transition-none ${props.overlay ? 'text-primary opacity-100' : 'text-muted-foreground opacity-45 group-hover:opacity-90'}`} aria-hidden="true" component="span">
+        <GripVertical className="size-4" />
+      </Box>
+    </>;
+}
+function SortableNavigationItem(props: {
+  item: NavigationItemView;
+  index: number;
+  active: boolean;
+  reducedMotion: boolean;
+}) {
+  const { ref, isDragSource, isDropTarget, isDropping } = useSortable({
+    id: props.item.key,
+    index: props.index,
+    group: NAVIGATION_SORTABLE_TYPE,
+    type: NAVIGATION_SORTABLE_TYPE,
+    accept: NAVIGATION_SORTABLE_TYPE,
+    transition: props.reducedMotion ? null : NAVIGATION_SORT_TRANSITION
+  });
+  const stateClass = isDragSource ? 'border-primary/45 bg-primary/10 text-primary opacity-[0.32]' : isDropTarget ? 'border-primary/45 bg-primary/10 text-primary' : props.active ? 'border-primary/20 bg-primary/[0.06] font-semibold text-primary' : 'border-transparent border-b-border/40 text-muted-foreground hover:border-border/70 hover:bg-muted/35 hover:text-foreground';
+  return <Box ref={ref} component={Link} to={props.item.to} aria-current={props.active ? 'page' : undefined} aria-describedby={NAVIGATION_SORT_INSTRUCTIONS_ID} aria-keyshortcuts="Space ArrowUp ArrowDown" className={`nav-sortable-item group relative flex min-h-[3.25rem] w-full cursor-grab select-none items-center gap-2 border px-2 py-2 text-sm font-medium outline-none transition-[background-color,border-color,color,box-shadow,opacity] duration-150 ease-out active:cursor-grabbing motion-reduce:transition-none ${stateClass} ${isDropping ? 'pointer-events-none' : ''}`} data-nav-key={props.item.key} data-nav-sortable="true" data-nav-dragging={isDragSource ? 'true' : undefined} data-nav-drop-target={isDropTarget ? 'true' : undefined} sx={{
+    WebkitTapHighlightColor: 'transparent',
+    '&:focus-visible': {
+      outline: '2px solid var(--primary)',
+      outlineOffset: '-2px'
+    }
+  }}>
+      <NavigationItemContent item={props.item} index={props.index} active={props.active} />
+    </Box>;
+}
+function NavigationDragPreview(props: {
+  item: NavigationItemView;
+  index: number;
+  active: boolean;
+}) {
+  return <Box className="flex min-h-[3.25rem] w-full items-center gap-2 border border-primary/50 bg-popover px-2 py-2 text-sm font-semibold text-primary" aria-hidden="true" sx={{
+    boxShadow: '0 18px 38px -24px rgb(0 0 0 / 0.42), 0 8px 18px -14px rgb(0 0 0 / 0.28)',
+    transform: 'scale(1.015)'
+  }}>
+      <NavigationItemContent item={props.item} index={props.index} active={props.active} overlay />
+    </Box>;
 }
 async function copyText(value: string, success: string, onMessage: (message: string) => void) {
   if (!navigator?.clipboard) {
@@ -204,11 +309,13 @@ function TopShell(props: {
 }) {
   const location = useLocation();
   const [navOrder, setNavOrder] = useState<NavKey[]>(readNavOrder());
-  const [draggingKey, setDraggingKey] = useState<NavKey | null>(null);
-  const navItems = navOrder.map(key => ({
+  const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)', {
+    noSsr: true
+  });
+  const navItems = useMemo<NavigationItemView[]>(() => navOrder.map(key => ({
     key,
     ...NAV_ITEMS_BY_KEY[key]
-  }));
+  })), [navOrder]);
   const currentItem = navItems.find(item => location.pathname.startsWith(item.to)) ?? NAV_ITEMS_BY_KEY.overview;
   const serviceVersion = formatVersionLabel(props.data.systemConfig?.build?.version);
   const serviceCommit = formatCommitShort(props.data.systemConfig?.build?.commit);
@@ -216,16 +323,21 @@ function TopShell(props: {
     const commit = props.data.systemConfig?.build?.commit?.trim();
     return commit && commit !== 'unknown' ? commit : undefined;
   })();
-  const reorderNav = (target: NavKey) => {
-    const source = draggingKey;
-    if (!source) return;
+  const reorderNav = useCallback((event: DragEndEvent) => {
+    if (event.canceled) return;
+    const source = event.operation.source;
+    if (!isSortable(source)) return;
+    const sourceKey = String(source.id);
+    if (!isNavKey(sourceKey)) return;
+    const targetIndex = source.index;
+    if (source.initialIndex === targetIndex) return;
     setNavOrder(current => {
-      const next = moveNavKey(current, source, target);
+      const next = moveNavKey(current, sourceKey, targetIndex);
+      if (next === current) return current;
       persistNavOrder(next);
       return next;
     });
-    setDraggingKey(null);
-  };
+  }, []);
   return <Box className="min-h-screen bg-background">
       <Box className="app-shell">
         <Box className="app-sidebar" component="aside">
@@ -237,23 +349,23 @@ function TopShell(props: {
               <Box className="text-[0.95rem] font-bold tracking-[0.08em] text-foreground uppercase" component="p">LITTLE GATE</Box>
             </Box>
           </Box>
-          <Box className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1" aria-label="Primary" component="nav">
-            {navItems.map((item, index) => {
-            const active = location.pathname.startsWith(item.to);
-            const Icon = item.icon;
-            return <Box key={item.key} className={`group relative flex items-center border-b border-border/40 ${active ? 'text-primary font-bold' : 'text-muted-foreground hover:text-foreground'}`} onDragOver={event => event.preventDefault()} onDrop={() => reorderNav(item.key)}>
-                    <Link to={item.to} className="relative z-10 flex min-h-12 flex-1 items-center gap-3 px-3 py-3 text-sm font-medium transition-colors">
-                      <Icon className="size-4 opacity-70" />
-                      <Box component="span">{t(item.label)}</Box>
-                    </Link>
-                    <Box className="relative z-10 font-mono text-[0.6rem] text-muted-foreground opacity-40" component="span">{String(index + 1).padStart(2, '0')}</Box>
-                    <Button type="button" className="relative z-10 ml-2 flex size-10 cursor-grab items-center justify-center text-muted-foreground opacity-60 transition-colors hover:text-foreground hover:opacity-100 active:cursor-grabbing" aria-label={t('调整导航顺序')} title={t('调整导航顺序')} draggable onDragStart={() => setDraggingKey(item.key)} onDragEnd={() => setDraggingKey(null)} variant="ghost">
-                      <GripVertical className="size-4" />
-                    </Button>
-                    {active ? <Box className="absolute inset-y-0 left-0 w-1 bg-primary/20" component="span" /> : null}
-                  </Box>;
-          })}
-          </Box>
+          <DragDropProvider sensors={NAVIGATION_DRAG_SENSORS} modifiers={NAVIGATION_DRAG_MODIFIERS} onDragEnd={reorderNav}>
+            <Box className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1" aria-label="Primary" component="nav">
+              <Box id={NAVIGATION_SORT_INSTRUCTIONS_ID} className="sr-only">
+                {t('拖动任意导航项可调整顺序。键盘操作：按空格开始，使用上下方向键移动，再按空格完成。')}
+              </Box>
+              {navItems.map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} />)}
+            </Box>
+            <DragOverlay className="pointer-events-none z-[120]" dropAnimation={reducedMotion ? null : NAVIGATION_DROP_ANIMATION}>
+              {source => {
+              const key = String(source.id);
+              if (!isNavKey(key)) return null;
+              const item = navItems.find(candidate => candidate.key === key);
+              if (!item) return null;
+              return <NavigationDragPreview item={item} index={navOrder.indexOf(key)} active={location.pathname.startsWith(item.to)} />;
+            }}
+            </DragOverlay>
+          </DragDropProvider>
           <Box className="mt-auto flex flex-col gap-3 border-t border-border/40 px-3 pt-7">
             <Box className="flex items-center justify-between">
               <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('SYSTEM STATUS')}</Box>
