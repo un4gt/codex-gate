@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
 import { createTheme } from '@mui/material/styles';
+import { ChevronDown } from 'lucide-react';
 
 const interactiveTransition = 'color 150ms ease, background-color 150ms ease, border-color 150ms ease, opacity 150ms ease';
 
@@ -286,11 +287,36 @@ export const theme = createTheme({
     },
     MuiSelect: {
       defaultProps: {
+        IconComponent: ChevronDown,
+        MenuProps: {
+          anchorOrigin: {
+            horizontal: 'left',
+            vertical: 'bottom',
+          },
+          elevation: 0,
+          marginThreshold: 12,
+          transformOrigin: {
+            horizontal: 'left',
+            vertical: 'top',
+          },
+          transitionDuration: {
+            enter: 160,
+            exit: 110,
+          },
+        },
         variant: 'standard',
       },
       styleOverrides: {
         root: {
+          backgroundColor: 'var(--background)',
+          cursor: 'pointer',
           marginTop: '0 !important',
+          '&:hover:not(.Mui-disabled):not(.Mui-focused)': {
+            borderColor: 'color-mix(in oklab, var(--border) 65%, var(--foreground))',
+          },
+          '&.Mui-disabled': {
+            cursor: 'not-allowed',
+          },
           '&::before, &::after': {
             display: 'none',
           },
@@ -298,14 +324,107 @@ export const theme = createTheme({
         select: {
           alignItems: 'center',
           boxSizing: 'border-box',
+          cursor: 'inherit',
           display: 'flex',
+          fontWeight: 500,
           height: '100%',
+          lineHeight: 1.5,
           minHeight: '0 !important',
           padding: '0 2.5rem 0 0 !important',
+          '&:focus': {
+            backgroundColor: 'transparent',
+          },
         },
         icon: {
           color: 'var(--muted-foreground)',
-          right: '0.5rem',
+          height: '1rem',
+          pointerEvents: 'none',
+          right: '0.75rem',
+          strokeWidth: 1.75,
+          transition: 'color 150ms ease, transform 180ms ease-out',
+          width: '1rem',
+          '@media (prefers-reduced-motion: reduce)': {
+            transition: 'none',
+          },
+        },
+        iconOpen: {
+          color: 'var(--primary)',
+          transform: 'rotate(180deg)',
+        },
+      },
+    },
+    MuiMenu: {
+      styleOverrides: {
+        paper: {
+          backgroundColor: 'var(--popover)',
+          backgroundImage: 'none',
+          border: '1px solid var(--border)',
+          borderRadius: 0,
+          boxShadow: '0 18px 38px -24px rgb(0 0 0 / 0.42), 0 8px 18px -14px rgb(0 0 0 / 0.28)',
+          color: 'var(--popover-foreground)',
+          marginTop: '0.375rem',
+          maxHeight: 'min(22rem, calc(100dvh - 2rem))',
+          maxWidth: 'calc(100vw - 1.5rem)',
+          scrollbarColor: 'color-mix(in oklab, var(--muted-foreground) 35%, transparent) transparent',
+          scrollbarWidth: 'thin',
+          '@media (prefers-reduced-motion: reduce)': {
+            transition: 'none !important',
+          },
+        },
+        list: {
+          display: 'grid',
+          gap: '0.125rem',
+          padding: '0.375rem',
+        },
+      },
+    },
+    MuiMenuItem: {
+      defaultProps: {
+        disableRipple: true,
+      },
+      styleOverrides: {
+        root: {
+          borderLeft: '2px solid transparent',
+          color: 'var(--popover-foreground)',
+          fontFamily: 'var(--font-ui)',
+          fontSize: '0.875rem',
+          fontWeight: 500,
+          gap: '0.625rem',
+          letterSpacing: '0.01em',
+          lineHeight: 1.5,
+          minHeight: '2.75rem !important',
+          overflowWrap: 'anywhere',
+          padding: '0.625rem 0.875rem',
+          transition: interactiveTransition,
+          whiteSpace: 'normal',
+          '&:hover': {
+            backgroundColor: 'color-mix(in oklab, var(--muted) 72%, transparent)',
+            color: 'var(--foreground)',
+          },
+          '&:active': {
+            backgroundColor: 'color-mix(in oklab, var(--primary) 16%, var(--popover))',
+          },
+          '&.Mui-selected': {
+            backgroundColor: 'color-mix(in oklab, var(--primary) 10%, var(--popover))',
+            borderLeftColor: 'var(--primary)',
+            color: 'var(--foreground)',
+            fontWeight: 600,
+          },
+          '&.Mui-selected:hover': {
+            backgroundColor: 'color-mix(in oklab, var(--primary) 14%, var(--popover))',
+          },
+          '&.Mui-focusVisible': {
+            backgroundColor: 'color-mix(in oklab, var(--primary) 12%, var(--popover))',
+            outline: '2px solid var(--primary)',
+            outlineOffset: '-2px',
+          },
+          '&.Mui-disabled': {
+            color: 'var(--muted-foreground)',
+            opacity: 0.45,
+          },
+          '@media (prefers-reduced-motion: reduce)': {
+            transition: 'none',
+          },
         },
       },
     },
