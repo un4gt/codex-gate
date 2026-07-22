@@ -10,9 +10,10 @@ use crate::crypto;
 use crate::pricing::{PriceCard, PriceVersion};
 use crate::types::{
     ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelRoute,
-    PricingUsageGroupRow, ProviderModel, RequestLogRow, RuntimeSettingRow, StatsDailyRow,
-    StatsEventRow, StatsHourlyRow, StatsOverviewAggRow, UpstreamEndpoint, UpstreamKey,
-    UpstreamKeyMeta, UpstreamKeyModel, UpstreamProvider,
+    PricingUsageGroupRow, ProviderGroup, ProviderGroupMembership, ProviderGroupRef, ProviderModel,
+    RequestLogRow, RuntimeSettingRow, StatsDailyRow, StatsEventRow, StatsHourlyRow,
+    StatsOverviewAggRow, UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta, UpstreamKeyModel,
+    UpstreamProvider,
 };
 
 const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
@@ -23,6 +24,7 @@ const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
   request_logs.price_version_id, request_logs.price_tier_index,
   request_logs.t_stream_ms, request_logs.t_first_byte_ms, request_logs.t_first_token_ms, request_logs.duration_ms,
   request_logs.span_kind, request_logs.transport, request_logs.parent_id, request_logs.ws_session_id,
+  request_logs.routing_trace_json,
   request_logs.created_at_ms
 "#;
 
@@ -173,7 +175,7 @@ impl Database {
         &self,
         key_hash: &str,
     ) -> Result<Option<ApiKeyAuth>, DbError> {
-        match self {
+        let mut item = match self {
             Database::Sqlite(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -191,13 +193,14 @@ LIMIT 1
                     return Ok(None);
                 };
 
-                Ok(Some(ApiKeyAuth {
+                Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
                     enabled: row.get::<i64, _>("enabled") != 0,
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<i64, _>("log_enabled") != 0,
                     name: row.get::<String, _>("name"),
-                }))
+                    provider_groups: Vec::new(),
+                })
             }
             Database::Postgres(pool) => {
                 let row = sqlx::query(
@@ -216,15 +219,20 @@ LIMIT 1
                     return Ok(None);
                 };
 
-                Ok(Some(ApiKeyAuth {
+                Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
                     enabled: row.get::<bool, _>("enabled"),
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<bool, _>("log_enabled"),
                     name: row.get::<String, _>("name"),
-                }))
+                    provider_groups: Vec::new(),
+                })
             }
+        };
+        if let Some(value) = item.as_mut() {
+            value.provider_groups = self.list_api_key_provider_groups(value.id).await?;
         }
+        Ok(item)
     }
 
     pub async fn insert_api_key(
@@ -278,7 +286,7 @@ RETURNING id
     }
 
     pub async fn list_api_keys(&self) -> Result<Vec<ApiKeyAuth>, DbError> {
-        match self {
+        let mut items: Vec<ApiKeyAuth> = match self {
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -289,16 +297,16 @@ ORDER BY id DESC
                 )
                 .fetch_all(pool)
                 .await?;
-                Ok(rows
-                    .into_iter()
+                rows.into_iter()
                     .map(|row| ApiKeyAuth {
                         id: row.get::<i64, _>("id"),
                         enabled: row.get::<i64, _>("enabled") != 0,
                         expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                         log_enabled: row.get::<i64, _>("log_enabled") != 0,
                         name: row.get::<String, _>("name"),
+                        provider_groups: Vec::new(),
                     })
-                    .collect())
+                    .collect()
             }
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -310,22 +318,27 @@ ORDER BY id DESC
                 )
                 .fetch_all(pool)
                 .await?;
-                Ok(rows
-                    .into_iter()
+                rows.into_iter()
                     .map(|row| ApiKeyAuth {
                         id: row.get::<i64, _>("id"),
                         enabled: row.get::<bool, _>("enabled"),
                         expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                         log_enabled: row.get::<bool, _>("log_enabled"),
                         name: row.get::<String, _>("name"),
+                        provider_groups: Vec::new(),
                     })
-                    .collect())
+                    .collect()
             }
+        };
+        let groups_by_key = self.list_all_api_key_provider_groups().await?;
+        for item in &mut items {
+            item.provider_groups = groups_by_key.get(&item.id).cloned().unwrap_or_default();
         }
+        Ok(items)
     }
 
     pub async fn find_api_key_by_id(&self, id: i64) -> Result<Option<ApiKeyAuth>, DbError> {
-        match self {
+        let mut item = match self {
             Database::Sqlite(pool) => {
                 let row = sqlx::query(
                     r#"
@@ -341,13 +354,14 @@ LIMIT 1
                 let Some(row) = row else {
                     return Ok(None);
                 };
-                Ok(Some(ApiKeyAuth {
+                Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
                     enabled: row.get::<i64, _>("enabled") != 0,
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<i64, _>("log_enabled") != 0,
                     name: row.get::<String, _>("name"),
-                }))
+                    provider_groups: Vec::new(),
+                })
             }
             Database::Postgres(pool) => {
                 let row = sqlx::query(
@@ -364,15 +378,20 @@ LIMIT 1
                 let Some(row) = row else {
                     return Ok(None);
                 };
-                Ok(Some(ApiKeyAuth {
+                Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
                     enabled: row.get::<bool, _>("enabled"),
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<bool, _>("log_enabled"),
                     name: row.get::<String, _>("name"),
-                }))
+                    provider_groups: Vec::new(),
+                })
             }
+        };
+        if let Some(value) = item.as_mut() {
+            value.provider_groups = self.list_api_key_provider_groups(value.id).await?;
         }
+        Ok(item)
     }
 
     pub async fn update_api_key(
@@ -468,14 +487,25 @@ WHERE id = $1
         websocket_enabled: bool,
         beta_features: &[String],
         key_selection_strategy: &str,
+        max_attempts: i32,
+        max_concurrency: Option<i32>,
+        circuit_breaker_enabled: bool,
+        circuit_breaker_failure_threshold: i32,
+        circuit_breaker_open_ms: i64,
+        circuit_breaker_half_open_success_threshold: i32,
         now_ms: i64,
     ) -> Result<i64, DbError> {
         match self {
             Database::Sqlite(pool) => {
                 let res = sqlx::query(
                     r#"
-INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, created_at_ms, updated_at_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO upstream_providers (
+  name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled,
+  beta_features, key_selection_strategy, max_attempts, max_concurrency,
+  circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms,
+  circuit_breaker_half_open_success_threshold, created_at_ms, updated_at_ms
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
                 )
                 .bind(name)
@@ -487,6 +517,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 .bind(if websocket_enabled { 1_i64 } else { 0_i64 })
                 .bind(beta_features_to_json(beta_features))
                 .bind(key_selection_strategy)
+                .bind(max_attempts as i64)
+                .bind(max_concurrency.map(i64::from))
+                .bind(if circuit_breaker_enabled {
+                    1_i64
+                } else {
+                    0_i64
+                })
+                .bind(circuit_breaker_failure_threshold as i64)
+                .bind(circuit_breaker_open_ms)
+                .bind(circuit_breaker_half_open_success_threshold as i64)
                 .bind(now_ms)
                 .bind(now_ms)
                 .execute(pool)
@@ -496,8 +536,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             Database::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-INSERT INTO upstream_providers (name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, created_at_ms, updated_at_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO upstream_providers (
+  name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled,
+  beta_features, key_selection_strategy, max_attempts, max_concurrency,
+  circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms,
+  circuit_breaker_half_open_success_threshold, created_at_ms, updated_at_ms
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING id
 "#,
                 )
@@ -510,6 +555,12 @@ RETURNING id
                 .bind(websocket_enabled)
                 .bind(beta_features_to_json(beta_features))
                 .bind(key_selection_strategy)
+                .bind(max_attempts)
+                .bind(max_concurrency)
+                .bind(circuit_breaker_enabled)
+                .bind(circuit_breaker_failure_threshold)
+                .bind(circuit_breaker_open_ms)
+                .bind(circuit_breaker_half_open_success_threshold)
                 .bind(now_ms)
                 .bind(now_ms)
                 .fetch_one(pool)
@@ -529,7 +580,7 @@ RETURNING id
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, websocket_enabled = ?, beta_features = ?, key_selection_strategy = ?, updated_at_ms = ?
+SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, websocket_enabled = ?, beta_features = ?, key_selection_strategy = ?, max_attempts = ?, max_concurrency = ?, circuit_breaker_enabled = ?, circuit_breaker_failure_threshold = ?, circuit_breaker_open_ms = ?, circuit_breaker_half_open_success_threshold = ?, updated_at_ms = ?
 WHERE id = ?
 "#,
                 )
@@ -542,6 +593,16 @@ WHERE id = ?
                 .bind(if provider.websocket_enabled { 1_i64 } else { 0_i64 })
                 .bind(beta_features_to_json(&provider.beta_features))
                 .bind(&provider.key_selection_strategy)
+                .bind(provider.max_attempts as i64)
+                .bind(provider.max_concurrency.map(i64::from))
+                .bind(if provider.circuit_breaker_enabled {
+                    1_i64
+                } else {
+                    0_i64
+                })
+                .bind(provider.circuit_breaker_failure_threshold as i64)
+                .bind(provider.circuit_breaker_open_ms)
+                .bind(provider.circuit_breaker_half_open_success_threshold as i64)
                 .bind(now_ms)
                 .bind(provider.id)
                 .execute(pool)
@@ -552,8 +613,8 @@ WHERE id = ?
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, websocket_enabled = $7, beta_features = $8, key_selection_strategy = $9, updated_at_ms = $10
-WHERE id = $11
+SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, websocket_enabled = $7, beta_features = $8, key_selection_strategy = $9, max_attempts = $10, max_concurrency = $11, circuit_breaker_enabled = $12, circuit_breaker_failure_threshold = $13, circuit_breaker_open_ms = $14, circuit_breaker_half_open_success_threshold = $15, updated_at_ms = $16
+WHERE id = $17
 "#,
                 )
                 .bind(&provider.name)
@@ -565,6 +626,12 @@ WHERE id = $11
                 .bind(provider.websocket_enabled)
                 .bind(beta_features_to_json(&provider.beta_features))
                 .bind(&provider.key_selection_strategy)
+                .bind(provider.max_attempts)
+                .bind(provider.max_concurrency)
+                .bind(provider.circuit_breaker_enabled)
+                .bind(provider.circuit_breaker_failure_threshold)
+                .bind(provider.circuit_breaker_open_ms)
+                .bind(provider.circuit_breaker_half_open_success_threshold)
                 .bind(now_ms)
                 .bind(provider.id)
                 .execute(pool)
@@ -572,6 +639,423 @@ WHERE id = $11
                 Ok(())
             }
         }
+    }
+
+    pub async fn delete_upstream_provider(&self, id: i64) -> Result<bool, DbError> {
+        let rows_affected = match self {
+            Database::Sqlite(pool) => sqlx::query("DELETE FROM upstream_providers WHERE id = ?")
+                .bind(id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+            Database::Postgres(pool) => sqlx::query("DELETE FROM upstream_providers WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+        };
+
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn list_provider_groups(&self) -> Result<Vec<ProviderGroup>, DbError> {
+        let rows = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    r#"
+SELECT provider_groups.id, provider_groups.name, provider_groups.normalized_name,
+       provider_groups.is_default, provider_groups.created_at_ms, provider_groups.updated_at_ms,
+       (SELECT COUNT(*) FROM provider_group_providers membership WHERE membership.group_id = provider_groups.id) AS provider_count,
+       (SELECT COUNT(*) FROM provider_group_api_keys membership WHERE membership.group_id = provider_groups.id) AS api_key_count
+FROM provider_groups
+ORDER BY provider_groups.is_default DESC, provider_groups.name ASC, provider_groups.id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .map(|row| ProviderGroup {
+                    id: row.get::<i64, _>("id"),
+                    name: row.get::<String, _>("name"),
+                    normalized_name: row.get::<String, _>("normalized_name"),
+                    is_default: row.get::<i64, _>("is_default") != 0,
+                    provider_count: row.get::<i64, _>("provider_count"),
+                    api_key_count: row.get::<i64, _>("api_key_count"),
+                    created_at_ms: row.get::<i64, _>("created_at_ms"),
+                    updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                })
+                .collect()
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+SELECT provider_groups.id, provider_groups.name, provider_groups.normalized_name,
+       provider_groups.is_default, provider_groups.created_at_ms, provider_groups.updated_at_ms,
+       (SELECT COUNT(*) FROM provider_group_providers membership WHERE membership.group_id = provider_groups.id) AS provider_count,
+       (SELECT COUNT(*) FROM provider_group_api_keys membership WHERE membership.group_id = provider_groups.id) AS api_key_count
+FROM provider_groups
+ORDER BY provider_groups.is_default DESC, provider_groups.name ASC, provider_groups.id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .map(|row| ProviderGroup {
+                    id: row.get::<i64, _>("id"),
+                    name: row.get::<String, _>("name"),
+                    normalized_name: row.get::<String, _>("normalized_name"),
+                    is_default: row.get::<bool, _>("is_default"),
+                    provider_count: row.get::<i64, _>("provider_count"),
+                    api_key_count: row.get::<i64, _>("api_key_count"),
+                    created_at_ms: row.get::<i64, _>("created_at_ms"),
+                    updated_at_ms: row.get::<i64, _>("updated_at_ms"),
+                })
+                .collect()
+            }
+        };
+        Ok(rows)
+    }
+
+    pub async fn insert_provider_group(
+        &self,
+        name: &str,
+        normalized_name: &str,
+        now_ms: i64,
+    ) -> Result<i64, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let result = sqlx::query(
+                    "INSERT INTO provider_groups (name, normalized_name, is_default, created_at_ms, updated_at_ms) VALUES (?, ?, 0, ?, ?)",
+                )
+                .bind(name)
+                .bind(normalized_name)
+                .bind(now_ms)
+                .bind(now_ms)
+                .execute(pool)
+                .await?;
+                Ok(result.last_insert_rowid())
+            }
+            Database::Postgres(pool) => {
+                let row = sqlx::query(
+                    "INSERT INTO provider_groups (name, normalized_name, is_default, created_at_ms, updated_at_ms) VALUES ($1, $2, FALSE, $3, $4) RETURNING id",
+                )
+                .bind(name)
+                .bind(normalized_name)
+                .bind(now_ms)
+                .bind(now_ms)
+                .fetch_one(pool)
+                .await?;
+                Ok(row.get::<i64, _>("id"))
+            }
+        }
+    }
+
+    pub async fn update_provider_group(
+        &self,
+        id: i64,
+        name: &str,
+        normalized_name: &str,
+        now_ms: i64,
+    ) -> Result<bool, DbError> {
+        let affected = match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE provider_groups SET name = ?, normalized_name = ?, updated_at_ms = ? WHERE id = ? AND is_default = 0",
+                )
+                .bind(name)
+                .bind(normalized_name)
+                .bind(now_ms)
+                .bind(id)
+                .execute(pool)
+                .await?
+                .rows_affected()
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE provider_groups SET name = $1, normalized_name = $2, updated_at_ms = $3 WHERE id = $4 AND is_default = FALSE",
+                )
+                .bind(name)
+                .bind(normalized_name)
+                .bind(now_ms)
+                .bind(id)
+                .execute(pool)
+                .await?
+                .rows_affected()
+            }
+        };
+        Ok(affected > 0)
+    }
+
+    pub async fn delete_provider_group(&self, id: i64) -> Result<bool, DbError> {
+        let affected = match self {
+            Database::Sqlite(pool) => sqlx::query(
+                "DELETE FROM provider_groups WHERE id = ? AND is_default = 0 AND NOT EXISTS (SELECT 1 FROM provider_group_providers WHERE group_id = ?) AND NOT EXISTS (SELECT 1 FROM provider_group_api_keys WHERE group_id = ?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+            Database::Postgres(pool) => sqlx::query(
+                "DELETE FROM provider_groups WHERE id = $1 AND is_default = FALSE AND NOT EXISTS (SELECT 1 FROM provider_group_providers WHERE group_id = $1) AND NOT EXISTS (SELECT 1 FROM provider_group_api_keys WHERE group_id = $1)",
+            )
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+        };
+        Ok(affected > 0)
+    }
+
+    pub async fn list_provider_group_memberships(
+        &self,
+    ) -> Result<HashMap<i64, Vec<ProviderGroupMembership>>, DbError> {
+        let mut out: HashMap<i64, Vec<ProviderGroupMembership>> = HashMap::new();
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT membership.provider_id, membership.group_id, provider_groups.name AS group_name, membership.priority_override
+FROM provider_group_providers membership
+JOIN provider_groups ON provider_groups.id = membership.group_id
+ORDER BY membership.provider_id ASC, provider_groups.name ASC, membership.group_id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                for row in rows {
+                    out.entry(row.get::<i64, _>("provider_id"))
+                        .or_default()
+                        .push(ProviderGroupMembership {
+                            group_id: row.get::<i64, _>("group_id"),
+                            group_name: row.get::<String, _>("group_name"),
+                            priority_override: row
+                                .get::<Option<i64>, _>("priority_override")
+                                .map(|value| value as i32),
+                        });
+                }
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT membership.provider_id, membership.group_id, provider_groups.name AS group_name, membership.priority_override
+FROM provider_group_providers membership
+JOIN provider_groups ON provider_groups.id = membership.group_id
+ORDER BY membership.provider_id ASC, provider_groups.name ASC, membership.group_id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                for row in rows {
+                    out.entry(row.get::<i64, _>("provider_id"))
+                        .or_default()
+                        .push(ProviderGroupMembership {
+                            group_id: row.get::<i64, _>("group_id"),
+                            group_name: row.get::<String, _>("group_name"),
+                            priority_override: row.get::<Option<i32>, _>("priority_override"),
+                        });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn replace_provider_group_memberships(
+        &self,
+        provider_id: i64,
+        groups: &[(i64, Option<i32>)],
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("DELETE FROM provider_group_providers WHERE provider_id = ?")
+                    .bind(provider_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for (group_id, priority_override) in groups {
+                    sqlx::query(
+                        "INSERT INTO provider_group_providers (group_id, provider_id, priority_override, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?)",
+                    )
+                    .bind(group_id)
+                    .bind(provider_id)
+                    .bind(priority_override)
+                    .bind(now_ms)
+                    .bind(now_ms)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+            }
+            Database::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("DELETE FROM provider_group_providers WHERE provider_id = $1")
+                    .bind(provider_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for (group_id, priority_override) in groups {
+                    sqlx::query(
+                        "INSERT INTO provider_group_providers (group_id, provider_id, priority_override, created_at_ms, updated_at_ms) VALUES ($1, $2, $3, $4, $5)",
+                    )
+                    .bind(group_id)
+                    .bind(provider_id)
+                    .bind(priority_override)
+                    .bind(now_ms)
+                    .bind(now_ms)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn replace_api_key_provider_groups(
+        &self,
+        api_key_id: i64,
+        group_ids: &[i64],
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("DELETE FROM provider_group_api_keys WHERE api_key_id = ?")
+                    .bind(api_key_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for group_id in group_ids {
+                    sqlx::query(
+                        "INSERT INTO provider_group_api_keys (group_id, api_key_id, created_at_ms) VALUES (?, ?, ?)",
+                    )
+                    .bind(group_id)
+                    .bind(api_key_id)
+                    .bind(now_ms)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+            }
+            Database::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("DELETE FROM provider_group_api_keys WHERE api_key_id = $1")
+                    .bind(api_key_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for group_id in group_ids {
+                    sqlx::query(
+                        "INSERT INTO provider_group_api_keys (group_id, api_key_id, created_at_ms) VALUES ($1, $2, $3)",
+                    )
+                    .bind(group_id)
+                    .bind(api_key_id)
+                    .bind(now_ms)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_api_key_provider_groups(
+        &self,
+        api_key_id: i64,
+    ) -> Result<Vec<ProviderGroupRef>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT provider_groups.id AS group_id, provider_groups.name AS group_name
+FROM provider_group_api_keys membership
+JOIN provider_groups ON provider_groups.id = membership.group_id
+WHERE membership.api_key_id = ?
+ORDER BY provider_groups.name ASC, provider_groups.id ASC
+"#,
+                )
+                .bind(api_key_id)
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ProviderGroupRef {
+                        id: row.get::<i64, _>("group_id"),
+                        name: row.get::<String, _>("group_name"),
+                    })
+                    .collect())
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT provider_groups.id AS group_id, provider_groups.name AS group_name
+FROM provider_group_api_keys membership
+JOIN provider_groups ON provider_groups.id = membership.group_id
+WHERE membership.api_key_id = $1
+ORDER BY provider_groups.name ASC, provider_groups.id ASC
+"#,
+                )
+                .bind(api_key_id)
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ProviderGroupRef {
+                        id: row.get::<i64, _>("group_id"),
+                        name: row.get::<String, _>("group_name"),
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    async fn list_all_api_key_provider_groups(
+        &self,
+    ) -> Result<HashMap<i64, Vec<ProviderGroupRef>>, DbError> {
+        let mut out: HashMap<i64, Vec<ProviderGroupRef>> = HashMap::new();
+        match self {
+            Database::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT membership.api_key_id, provider_groups.id AS group_id, provider_groups.name AS group_name
+FROM provider_group_api_keys membership
+JOIN provider_groups ON provider_groups.id = membership.group_id
+ORDER BY membership.api_key_id ASC, provider_groups.name ASC, provider_groups.id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                for row in rows {
+                    out.entry(row.get::<i64, _>("api_key_id"))
+                        .or_default()
+                        .push(ProviderGroupRef {
+                            id: row.get::<i64, _>("group_id"),
+                            name: row.get::<String, _>("group_name"),
+                        });
+                }
+            }
+            Database::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+SELECT membership.api_key_id, provider_groups.id AS group_id, provider_groups.name AS group_name
+FROM provider_group_api_keys membership
+JOIN provider_groups ON provider_groups.id = membership.group_id
+ORDER BY membership.api_key_id ASC, provider_groups.name ASC, provider_groups.id ASC
+"#,
+                )
+                .fetch_all(pool)
+                .await?;
+                for row in rows {
+                    out.entry(row.get::<i64, _>("api_key_id"))
+                        .or_default()
+                        .push(ProviderGroupRef {
+                            id: row.get::<i64, _>("group_id"),
+                            name: row.get::<String, _>("group_name"),
+                        });
+                }
+            }
+        }
+        Ok(out)
     }
 
     #[expect(
@@ -1208,7 +1692,7 @@ RETURNING id
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, max_attempts, max_concurrency, circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms, circuit_breaker_half_open_success_threshold
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1231,13 +1715,25 @@ ORDER BY priority ASC, id ASC
                             &row.get::<String, _>("beta_features"),
                         ),
                         key_selection_strategy: row.get::<String, _>("key_selection_strategy"),
+                        max_attempts: row.get::<i64, _>("max_attempts") as i32,
+                        max_concurrency: row
+                            .get::<Option<i64>, _>("max_concurrency")
+                            .map(|value| value as i32),
+                        circuit_breaker_enabled: row.get::<i64, _>("circuit_breaker_enabled") != 0,
+                        circuit_breaker_failure_threshold: row
+                            .get::<i64, _>("circuit_breaker_failure_threshold")
+                            as i32,
+                        circuit_breaker_open_ms: row.get::<i64, _>("circuit_breaker_open_ms"),
+                        circuit_breaker_half_open_success_threshold: row
+                            .get::<i64, _>("circuit_breaker_half_open_success_threshold")
+                            as i32,
                     })
                     .collect())
             }
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, max_attempts, max_concurrency, circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms, circuit_breaker_half_open_success_threshold
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1260,6 +1756,14 @@ ORDER BY priority ASC, id ASC
                             &row.get::<String, _>("beta_features"),
                         ),
                         key_selection_strategy: row.get::<String, _>("key_selection_strategy"),
+                        max_attempts: row.get::<i32, _>("max_attempts"),
+                        max_concurrency: row.get::<Option<i32>, _>("max_concurrency"),
+                        circuit_breaker_enabled: row.get::<bool, _>("circuit_breaker_enabled"),
+                        circuit_breaker_failure_threshold: row
+                            .get::<i32, _>("circuit_breaker_failure_threshold"),
+                        circuit_breaker_open_ms: row.get::<i64, _>("circuit_breaker_open_ms"),
+                        circuit_breaker_half_open_success_threshold: row
+                            .get::<i32, _>("circuit_breaker_half_open_success_threshold"),
                     })
                     .collect())
             }
@@ -2686,7 +3190,7 @@ INSERT INTO request_logs (
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
-  span_kind, transport, parent_id, ws_session_id,
+  span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   created_at_ms
 ) VALUES (
   ?, ?, ?, ?, ?, ?,
@@ -2695,7 +3199,7 @@ INSERT INTO request_logs (
   ?, ?,
   ?, ?,
   ?, ?, ?, ?,
-  ?, ?, ?, ?,
+  ?, ?, ?, ?, ?,
   ?
 )
 "#,
@@ -2727,6 +3231,11 @@ INSERT INTO request_logs (
         .bind(&r.transport)
         .bind(&r.parent_id)
         .bind(&r.ws_session_id)
+        .bind(
+            r.routing_trace
+                .as_ref()
+                .and_then(|value| serde_json::to_string(value).ok()),
+        )
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -2753,7 +3262,7 @@ INSERT INTO request_logs (
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
-  span_kind, transport, parent_id, ws_session_id,
+  span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   created_at_ms
 ) VALUES (
   $1, $2, $3, $4, $5, $6,
@@ -2762,8 +3271,8 @@ INSERT INTO request_logs (
   $16, $17,
   $18, $19,
   $20, $21, $22, $23,
-  $24, $25, $26, $27,
-  $28
+  $24, $25, $26, $27, $28,
+  $29
 )
 "#,
         )
@@ -2794,6 +3303,11 @@ INSERT INTO request_logs (
         .bind(&r.transport)
         .bind(&r.parent_id)
         .bind(&r.ws_session_id)
+        .bind(
+            r.routing_trace
+                .as_ref()
+                .and_then(|value| serde_json::to_string(value).ok()),
+        )
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -3110,7 +3624,7 @@ SELECT
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
-  span_kind, transport, parent_id, ws_session_id,
+  span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < ?
@@ -3185,7 +3699,7 @@ SELECT
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
-  span_kind, transport, parent_id, ws_session_id,
+  span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < $1
@@ -3728,6 +4242,9 @@ fn row_to_request_log_sqlite(row: sqlx::sqlite::SqliteRow) -> RequestLogRow {
         transport: row.get::<String, _>("transport"),
         parent_id: row.get::<Option<String>, _>("parent_id"),
         ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
+        routing_trace: row
+            .get::<Option<String>, _>("routing_trace_json")
+            .and_then(|value| serde_json::from_str(&value).ok()),
         input_tokens: row.get::<i64, _>("input_tokens"),
         output_tokens: row.get::<i64, _>("output_tokens"),
         cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
@@ -3761,6 +4278,9 @@ fn row_to_request_log_postgres(row: sqlx::postgres::PgRow) -> RequestLogRow {
         transport: row.get::<String, _>("transport"),
         parent_id: row.get::<Option<String>, _>("parent_id"),
         ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
+        routing_trace: row
+            .get::<Option<String>, _>("routing_trace_json")
+            .and_then(|value| serde_json::from_str(&value).ok()),
         input_tokens: row.get::<i64, _>("input_tokens"),
         output_tokens: row.get::<i64, _>("output_tokens"),
         cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
@@ -4138,9 +4658,50 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   websocket_enabled INTEGER NOT NULL DEFAULT 0,
   beta_features TEXT NOT NULL DEFAULT '[]',
   key_selection_strategy TEXT NOT NULL DEFAULT 'round_robin',
+  max_attempts INTEGER NOT NULL DEFAULT 2,
+  max_concurrency INTEGER,
+  circuit_breaker_enabled INTEGER NOT NULL DEFAULT 1,
+  circuit_breaker_failure_threshold INTEGER NOT NULL DEFAULT 3,
+  circuit_breaker_open_ms INTEGER NOT NULL DEFAULT 30000,
+  circuit_breaker_half_open_success_threshold INTEGER NOT NULL DEFAULT 2,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS provider_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL UNIQUE,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_group_providers (
+  group_id INTEGER NOT NULL,
+  provider_id INTEGER NOT NULL,
+  priority_override INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(group_id, provider_id),
+  FOREIGN KEY(group_id) REFERENCES provider_groups(id) ON DELETE CASCADE,
+  FOREIGN KEY(provider_id) REFERENCES upstream_providers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_provider_group_providers_provider ON provider_group_providers(provider_id);
+CREATE TABLE IF NOT EXISTS provider_group_api_keys (
+  group_id INTEGER NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(group_id, api_key_id),
+  FOREIGN KEY(group_id) REFERENCES provider_groups(id) ON DELETE CASCADE,
+  FOREIGN KEY(api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_provider_group_api_keys_api_key ON provider_group_api_keys(api_key_id);
 "#,
     )
     .execute(pool)
@@ -4409,6 +4970,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   transport TEXT NOT NULL DEFAULT 'http',
   parent_id TEXT,
   ws_session_id TEXT,
+  routing_trace_json TEXT,
   created_at_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_time ON request_logs(time_ms DESC);
@@ -4452,6 +5014,8 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_sqlite_upstream_providers_websocket_enabled(pool).await?;
     ensure_sqlite_upstream_providers_beta_features(pool).await?;
     ensure_sqlite_upstream_providers_key_selection_strategy(pool).await?;
+    ensure_sqlite_upstream_providers_resilience(pool).await?;
+    ensure_sqlite_default_provider_group(pool).await?;
     ensure_sqlite_request_log_span_columns(pool).await?;
     ensure_sqlite_model_prices_provider_scope(pool).await?;
     migrate_sqlite_provider_model_aliases(pool).await?;
@@ -4491,9 +5055,46 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   websocket_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   beta_features TEXT NOT NULL DEFAULT '[]',
   key_selection_strategy TEXT NOT NULL DEFAULT 'round_robin',
+  max_attempts INTEGER NOT NULL DEFAULT 2,
+  max_concurrency INTEGER,
+  circuit_breaker_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  circuit_breaker_failure_threshold INTEGER NOT NULL DEFAULT 3,
+  circuit_breaker_open_ms BIGINT NOT NULL DEFAULT 30000,
+  circuit_breaker_half_open_success_threshold INTEGER NOT NULL DEFAULT 2,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL
 );
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+CREATE TABLE IF NOT EXISTS provider_groups (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL UNIQUE,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_group_providers (
+  group_id BIGINT NOT NULL REFERENCES provider_groups(id) ON DELETE CASCADE,
+  provider_id BIGINT NOT NULL REFERENCES upstream_providers(id) ON DELETE CASCADE,
+  priority_override INTEGER,
+  created_at_ms BIGINT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  PRIMARY KEY(group_id, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_group_providers_provider ON provider_group_providers(provider_id);
+CREATE TABLE IF NOT EXISTS provider_group_api_keys (
+  group_id BIGINT NOT NULL REFERENCES provider_groups(id) ON DELETE CASCADE,
+  api_key_id BIGINT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  created_at_ms BIGINT NOT NULL,
+  PRIMARY KEY(group_id, api_key_id)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_group_api_keys_api_key ON provider_group_api_keys(api_key_id);
 "#,
     )
     .execute(pool)
@@ -4754,6 +5355,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   transport TEXT NOT NULL DEFAULT 'http',
   parent_id TEXT,
   ws_session_id TEXT,
+  routing_trace_json TEXT,
   created_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_time ON request_logs(time_ms DESC);
@@ -4797,6 +5399,8 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_postgres_upstream_providers_websocket_enabled(pool).await?;
     ensure_postgres_upstream_providers_beta_features(pool).await?;
     ensure_postgres_upstream_providers_key_selection_strategy(pool).await?;
+    ensure_postgres_upstream_providers_resilience(pool).await?;
+    ensure_postgres_default_provider_group(pool).await?;
     ensure_postgres_request_log_span_columns(pool).await?;
     ensure_postgres_model_prices_provider_scope(pool).await?;
     migrate_postgres_provider_model_aliases(pool).await?;
@@ -4864,6 +5468,86 @@ async fn ensure_sqlite_upstream_providers_key_selection_strategy(
         .execute(pool)
         .await?;
     }
+    Ok(())
+}
+
+async fn ensure_sqlite_upstream_providers_resilience(pool: &SqlitePool) -> Result<(), DbError> {
+    let columns = [
+        (
+            "max_attempts",
+            "ALTER TABLE upstream_providers ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 2",
+        ),
+        (
+            "max_concurrency",
+            "ALTER TABLE upstream_providers ADD COLUMN max_concurrency INTEGER",
+        ),
+        (
+            "circuit_breaker_enabled",
+            "ALTER TABLE upstream_providers ADD COLUMN circuit_breaker_enabled INTEGER NOT NULL DEFAULT 1",
+        ),
+        (
+            "circuit_breaker_failure_threshold",
+            "ALTER TABLE upstream_providers ADD COLUMN circuit_breaker_failure_threshold INTEGER NOT NULL DEFAULT 3",
+        ),
+        (
+            "circuit_breaker_open_ms",
+            "ALTER TABLE upstream_providers ADD COLUMN circuit_breaker_open_ms INTEGER NOT NULL DEFAULT 30000",
+        ),
+        (
+            "circuit_breaker_half_open_success_threshold",
+            "ALTER TABLE upstream_providers ADD COLUMN circuit_breaker_half_open_success_threshold INTEGER NOT NULL DEFAULT 2",
+        ),
+    ];
+
+    for (column, statement) in columns {
+        if !sqlite_column_exists(pool, "upstream_providers", column).await? {
+            sqlx::query(statement).execute(pool).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_sqlite_default_provider_group(pool: &SqlitePool) -> Result<(), DbError> {
+    sqlx::query(
+        r#"
+INSERT INTO provider_groups (name, normalized_name, is_default, created_at_ms, updated_at_ms)
+SELECT 'default', 'default', 1, 0, 0
+WHERE NOT EXISTS (SELECT 1 FROM provider_groups WHERE normalized_name = 'default')
+"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE provider_groups SET is_default = 1 WHERE normalized_name = 'default'")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        r#"
+INSERT OR IGNORE INTO provider_group_providers (group_id, provider_id, priority_override, created_at_ms, updated_at_ms)
+SELECT group_row.id, provider.id, NULL, 0, 0
+FROM provider_groups group_row
+CROSS JOIN upstream_providers provider
+WHERE group_row.normalized_name = 'default'
+  AND NOT EXISTS (
+    SELECT 1 FROM provider_group_providers membership WHERE membership.provider_id = provider.id
+  )
+"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT OR IGNORE INTO provider_group_api_keys (group_id, api_key_id, created_at_ms)
+SELECT group_row.id, api_key.id, 0
+FROM provider_groups group_row
+CROSS JOIN api_keys api_key
+WHERE group_row.normalized_name = 'default'
+  AND NOT EXISTS (
+    SELECT 1 FROM provider_group_api_keys membership WHERE membership.api_key_id = api_key.id
+  )
+"#,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -4981,6 +5665,11 @@ async fn ensure_sqlite_request_log_span_columns(pool: &SqlitePool) -> Result<(),
             .execute(pool)
             .await?;
     }
+    if !sqlite_column_exists(pool, "request_logs", "routing_trace_json").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN routing_trace_json TEXT")
+            .execute(pool)
+            .await?;
+    }
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC)",
     )
@@ -5026,6 +5715,65 @@ async fn ensure_postgres_upstream_providers_key_selection_strategy(
 ) -> Result<(), DbError> {
     sqlx::query(
         "ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS key_selection_strategy TEXT NOT NULL DEFAULT 'round_robin'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_postgres_upstream_providers_resilience(pool: &PgPool) -> Result<(), DbError> {
+    sqlx::query(
+        r#"
+ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 2;
+ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER;
+ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS circuit_breaker_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS circuit_breaker_failure_threshold INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS circuit_breaker_open_ms BIGINT NOT NULL DEFAULT 30000;
+ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS circuit_breaker_half_open_success_threshold INTEGER NOT NULL DEFAULT 2;
+"#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_postgres_default_provider_group(pool: &PgPool) -> Result<(), DbError> {
+    sqlx::query(
+        r#"
+INSERT INTO provider_groups (name, normalized_name, is_default, created_at_ms, updated_at_ms)
+VALUES ('default', 'default', TRUE, 0, 0)
+ON CONFLICT(normalized_name) DO UPDATE SET is_default = TRUE
+"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT INTO provider_group_providers (group_id, provider_id, priority_override, created_at_ms, updated_at_ms)
+SELECT group_row.id, provider.id, NULL, 0, 0
+FROM provider_groups group_row
+CROSS JOIN upstream_providers provider
+WHERE group_row.normalized_name = 'default'
+  AND NOT EXISTS (
+    SELECT 1 FROM provider_group_providers membership WHERE membership.provider_id = provider.id
+  )
+ON CONFLICT(group_id, provider_id) DO NOTHING
+"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT INTO provider_group_api_keys (group_id, api_key_id, created_at_ms)
+SELECT group_row.id, api_key.id, 0
+FROM provider_groups group_row
+CROSS JOIN api_keys api_key
+WHERE group_row.normalized_name = 'default'
+  AND NOT EXISTS (
+    SELECT 1 FROM provider_group_api_keys membership WHERE membership.api_key_id = api_key.id
+  )
+ON CONFLICT(group_id, api_key_id) DO NOTHING
+"#,
     )
     .execute(pool)
     .await?;
@@ -5670,6 +6418,9 @@ async fn ensure_postgres_request_log_span_columns(pool: &PgPool) -> Result<(), D
     sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS ws_session_id TEXT")
         .execute(pool)
         .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS routing_trace_json TEXT")
+        .execute(pool)
+        .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_request_logs_parent_time ON request_logs(parent_id, time_ms ASC)",
     )
@@ -6087,6 +6838,187 @@ CREATE TABLE stats_events (
     }
 
     #[tokio::test]
+    async fn provider_groups_should_assign_defaults_and_protect_non_empty_groups() {
+        let db = sqlite_memory_db().await;
+        let provider_id = db
+            .insert_upstream_provider(
+                "provider-a",
+                "openai",
+                true,
+                100,
+                1,
+                true,
+                false,
+                &[],
+                "round_robin",
+                2,
+                None,
+                true,
+                3,
+                30_000,
+                2,
+                1,
+            )
+            .await
+            .expect("insert provider");
+        let api_key_id = db
+            .insert_api_key("hash-a", "key-a", true, None, true, 1)
+            .await
+            .expect("insert api key");
+
+        db.migrate().await.expect("rerun default-group migration");
+        let groups = db.list_provider_groups().await.expect("list groups");
+        let default_group = groups
+            .iter()
+            .find(|group| group.is_default)
+            .expect("default group");
+        assert_eq!(default_group.provider_count, 1);
+        assert_eq!(default_group.api_key_count, 1);
+        assert!(
+            !db.delete_provider_group(default_group.id)
+                .await
+                .expect("protect default group")
+        );
+
+        let custom_id = db
+            .insert_provider_group("Production", "production", 2)
+            .await
+            .expect("insert custom group");
+        assert!(
+            db.update_provider_group(custom_id, "Primary", "primary", 3)
+                .await
+                .expect("rename custom group")
+        );
+        db.replace_provider_group_memberships(provider_id, &[(custom_id, Some(5))], 4)
+            .await
+            .expect("assign provider group");
+        db.replace_api_key_provider_groups(api_key_id, &[custom_id], 4)
+            .await
+            .expect("assign api key group");
+        assert!(
+            !db.delete_provider_group(custom_id)
+                .await
+                .expect("protect used custom group")
+        );
+
+        let memberships = db
+            .list_provider_group_memberships()
+            .await
+            .expect("list memberships");
+        assert_eq!(memberships[&provider_id][0].priority_override, Some(5));
+        let auth = db
+            .find_api_key_by_hash("hash-a")
+            .await
+            .expect("find api key")
+            .expect("api key");
+        assert_eq!(auth.provider_groups[0].id, custom_id);
+    }
+
+    #[tokio::test]
+    async fn api_key_lookup_should_load_only_the_target_keys_provider_groups() {
+        let db = sqlite_memory_db().await;
+        let key_a = db
+            .insert_api_key("hash-a", "key-a", true, None, true, 1)
+            .await
+            .expect("insert key a");
+        let key_b = db
+            .insert_api_key("hash-b", "key-b", true, None, true, 1)
+            .await
+            .expect("insert key b");
+        let group_a = db
+            .insert_provider_group("Group A", "group-a", 1)
+            .await
+            .expect("insert group a");
+        let group_b = db
+            .insert_provider_group("Group B", "group-b", 1)
+            .await
+            .expect("insert group b");
+        db.replace_api_key_provider_groups(key_a, &[group_a], 2)
+            .await
+            .expect("assign group a");
+        db.replace_api_key_provider_groups(key_b, &[group_b], 2)
+            .await
+            .expect("assign group b");
+
+        let by_hash = db
+            .find_api_key_by_hash("hash-a")
+            .await
+            .expect("find key a")
+            .expect("key a");
+        let by_id = db
+            .find_api_key_by_id(key_b)
+            .await
+            .expect("find key b")
+            .expect("key b");
+
+        assert_eq!(
+            by_hash
+                .provider_groups
+                .iter()
+                .map(|group| group.id)
+                .collect::<Vec<_>>(),
+            vec![group_a],
+        );
+        assert_eq!(
+            by_id
+                .provider_groups
+                .iter()
+                .map(|group| group.id)
+                .collect::<Vec<_>>(),
+            vec![group_b],
+        );
+    }
+
+    #[tokio::test]
+    async fn request_logs_should_round_trip_routing_trace() {
+        let db = sqlite_memory_db().await;
+        let trace = serde_json::json!({
+            "provider_switches": 1,
+            "attempts": [{"provider_id": 7, "status": 502}]
+        });
+        db.insert_request_logs(&[RequestLogRow {
+            id: "trace-log".to_string(),
+            time_ms: 1,
+            api_key_id: 1,
+            provider_id: Some(7),
+            endpoint_id: Some(8),
+            upstream_key_id: Some(9),
+            api_format: "responses".to_string(),
+            model: Some("model-a".to_string()),
+            http_status: Some(200),
+            error_type: None,
+            error_message: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            usage_observed: false,
+            price_version_id: None,
+            price_tier_index: None,
+            t_stream_ms: Some(1),
+            t_first_byte_ms: Some(2),
+            t_first_token_ms: Some(3),
+            duration_ms: Some(4),
+            span_kind: "request".to_string(),
+            transport: "http".to_string(),
+            parent_id: None,
+            ws_session_id: None,
+            routing_trace: Some(trace.clone()),
+            created_at_ms: 1,
+        }])
+        .await
+        .expect("insert request log");
+
+        let rows = db
+            .list_request_logs_before(2, 10)
+            .await
+            .expect("list request logs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].routing_trace, Some(trace));
+    }
+
+    #[tokio::test]
     async fn provider_deletion_should_not_delete_price_versions() {
         let db = sqlite_memory_db().await;
         let provider_id = db
@@ -6100,6 +7032,12 @@ CREATE TABLE stats_events (
                 false,
                 &[],
                 "round_robin",
+                2,
+                None,
+                true,
+                3,
+                30_000,
+                2,
                 1,
             )
             .await
@@ -6118,12 +7056,7 @@ CREATE TABLE stats_events (
             )
             .await
             .expect("insert price version");
-        let Database::Sqlite(pool) = &db else {
-            panic!("expected sqlite db");
-        };
-        sqlx::query("DELETE FROM upstream_providers WHERE id = ?")
-            .bind(provider_id)
-            .execute(pool)
+        db.delete_upstream_provider(provider_id)
             .await
             .expect("delete provider");
 
@@ -6134,6 +7067,139 @@ CREATE TABLE stats_events (
 
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].id, price_id);
+    }
+
+    #[tokio::test]
+    async fn provider_deletion_should_report_missing_provider() {
+        let db = sqlite_memory_db().await;
+
+        let deleted = db
+            .delete_upstream_provider(404)
+            .await
+            .expect("delete missing provider");
+
+        assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn provider_deletion_should_cascade_operational_relations() {
+        let db = sqlite_memory_db().await;
+        let provider_id = db
+            .insert_upstream_provider(
+                "provider-a",
+                "openai",
+                true,
+                100,
+                1,
+                true,
+                false,
+                &[],
+                "round_robin",
+                2,
+                None,
+                true,
+                3,
+                30_000,
+                2,
+                1,
+            )
+            .await
+            .expect("insert provider");
+        let Database::Sqlite(pool) = &db else {
+            panic!("expected sqlite db");
+        };
+        sqlx::query(
+            "INSERT INTO upstream_endpoints (provider_id, name, base_url, enabled, priority, weight, created_at_ms, updated_at_ms) VALUES (?, 'endpoint-a', 'https://example.com', 1, 100, 1, 1, 1)",
+        )
+        .bind(provider_id)
+        .execute(pool)
+        .await
+        .expect("insert endpoint");
+        let key_id = sqlx::query(
+            "INSERT INTO upstream_keys (provider_id, name, secret_enc, enabled, priority, weight, created_at_ms, updated_at_ms) VALUES (?, 'key-a', 'encrypted', 1, 100, 1, 1, 1) RETURNING id",
+        )
+        .bind(provider_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert key")
+        .get::<i64, _>("id");
+        sqlx::query(
+            "INSERT INTO upstream_key_models (upstream_key_id, model_name, enabled, created_at_ms, updated_at_ms) VALUES (?, 'model-a', 1, 1, 1)",
+        )
+        .bind(key_id)
+        .execute(pool)
+        .await
+        .expect("insert key model");
+        sqlx::query(
+            "INSERT INTO provider_models (provider_id, upstream_model, enabled, created_at_ms, updated_at_ms) VALUES (?, 'model-a', 1, 1, 1)",
+        )
+        .bind(provider_id)
+        .execute(pool)
+        .await
+        .expect("insert provider model");
+        let route_id = sqlx::query(
+            "INSERT INTO model_routes (model_name, enabled, created_at_ms, updated_at_ms) VALUES ('route-a', 1, 1, 1) RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("insert route")
+        .get::<i64, _>("id");
+        sqlx::query("INSERT INTO model_route_providers (route_id, provider_id) VALUES (?, ?)")
+            .bind(route_id)
+            .bind(provider_id)
+            .execute(pool)
+            .await
+            .expect("insert route provider");
+        let alias_id = sqlx::query(
+            "INSERT INTO model_aliases (name, enabled, mode, created_at_ms, updated_at_ms) VALUES ('alias-a', 1, 'ordered', 1, 1) RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("insert alias")
+        .get::<i64, _>("id");
+        sqlx::query(
+            "INSERT INTO model_alias_targets (alias_id, provider_id, upstream_model, enabled, priority, weight, created_at_ms, updated_at_ms) VALUES (?, ?, 'model-a', 1, 100, 1, 1, 1)",
+        )
+        .bind(alias_id)
+        .bind(provider_id)
+        .execute(pool)
+        .await
+        .expect("insert alias target");
+
+        db.delete_upstream_provider(provider_id)
+            .await
+            .expect("delete provider");
+
+        let row = sqlx::query(
+            r#"
+SELECT
+  (SELECT COUNT(*) FROM upstream_providers) AS providers,
+  (SELECT COUNT(*) FROM upstream_endpoints) AS endpoints,
+  (SELECT COUNT(*) FROM upstream_keys) AS keys,
+  (SELECT COUNT(*) FROM upstream_key_models) AS key_models,
+  (SELECT COUNT(*) FROM provider_models) AS provider_models,
+  (SELECT COUNT(*) FROM model_route_providers) AS route_providers,
+  (SELECT COUNT(*) FROM model_alias_targets) AS alias_targets,
+  (SELECT COUNT(*) FROM model_routes) AS routes,
+  (SELECT COUNT(*) FROM model_aliases) AS aliases
+"#,
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read cascade counts");
+        let counts = [
+            row.get::<i64, _>("providers"),
+            row.get::<i64, _>("endpoints"),
+            row.get::<i64, _>("keys"),
+            row.get::<i64, _>("key_models"),
+            row.get::<i64, _>("provider_models"),
+            row.get::<i64, _>("route_providers"),
+            row.get::<i64, _>("alias_targets"),
+            row.get::<i64, _>("routes"),
+            row.get::<i64, _>("aliases"),
+        ];
+
+        assert_eq!(counts, [0, 0, 0, 0, 0, 0, 0, 1, 1]);
     }
 }
 

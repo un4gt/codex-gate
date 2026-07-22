@@ -1,21 +1,26 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { AlertCircle, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from "lucide-react";
+import { AlertCircle, ChevronRight, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from "lucide-react";
 import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
-import { addUpstreamKeyModels, createEndpoint, createModelAlias, createModelAliasTarget, createProvider, createProviderKey, deleteEndpoint, deleteModelAlias, deleteModelAliasTarget, deleteProviderKey, deleteUpstreamKeyModel, deleteProviderModel, loadGatewayModelPolicies, loadProviderModels, loadUpstreamKeyModels, syncUpstreamKeyModels, syncProviderModels, testEndpointConnection, updateGatewayModelPolicy, updateEndpoint, updateProvider, updateModelAlias, updateModelAliasTarget, updateUpstreamKeyModel, updateProviderModel, updateProviderKey } from '../lib/api';
+import { addUpstreamKeyModels, createEndpoint, createModelAlias, createModelAliasTarget, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteModelAlias, deleteModelAliasTarget, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, deleteProviderModel, loadGatewayModelPolicies, loadProviderModels, loadUpstreamKeyModels, resetProviderCircuit, syncUpstreamKeyModels, syncProviderModels, testEndpointConnection, updateGatewayModelPolicy, updateEndpoint, updateProvider, updateProviderGroup, updateModelAlias, updateModelAliasTarget, updateUpstreamKeyModel, updateProviderModel, updateProviderKey } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
-import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, GatewayModelPolicy, ModelAlias, ProviderModel, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpstreamKeyModel, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
+import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, GatewayModelPolicy, ModelAlias, ProviderGroup, ProviderModel, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpstreamKeyModel, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import ButtonBase from "@mui/material/ButtonBase";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Checkbox from "@mui/material/Checkbox";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
 import FormControl from "@mui/material/FormControl";
 import FormHelperText from "@mui/material/FormHelperText";
 import FormLabel from "@mui/material/FormLabel";
@@ -29,10 +34,13 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import TableContainer from "@mui/material/TableContainer";
 import Typography from "@mui/material/Typography";
+import useMediaQuery from "@mui/material/useMediaQuery";
+import { useTheme } from "@mui/material/styles";
 interface ProvidersPageProps {
   settings: ConnectionSettings;
   items: ProviderWorkspace[];
   aliases: ModelAlias[];
+  groups?: ProviderGroup[];
   onRefresh: (successMessage?: string) => Promise<void>;
   onMessage: (message: string) => void;
 }
@@ -40,6 +48,8 @@ interface DraftInputRow {
   id: string;
   value: string;
 }
+const MAX_PROVIDER_ROUTING_VALUE = 2_147_483_647;
+const NON_NEGATIVE_INTEGER_PATTERN = /^\d+$/;
 let draftInputSeq = 0;
 function createDraftInputRow(prefix: string): DraftInputRow {
   draftInputSeq += 1;
@@ -58,6 +68,13 @@ function readInt(formData: FormData, key: string, fallback: number): number {
 }
 function readBool(formData: FormData, key: string): boolean {
   return formData.get(key) === 'on';
+}
+function parseProviderRoutingValue(raw: string, minimum: number): number | null {
+  const value = raw.trim();
+  if (!NON_NEGATIVE_INTEGER_PATTERN.test(value)) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > MAX_PROVIDER_ROUTING_VALUE) return null;
+  return parsed;
 }
 function parseModelList(raw: string): string[] {
   const items = raw.split(/[\s,]+/g).map(value => value.trim()).filter(value => value.length > 0);
@@ -100,14 +117,27 @@ function providerHasBetaFeature(item: ProviderWorkspace, feature: string) {
   return item.provider.beta_features?.includes(feature) ?? false;
 }
 export function ProvidersPage(props: ProvidersPageProps) {
+  const theme = useTheme();
+  const showProviderTable = useMediaQuery(theme.breakpoints.up('sm'));
+  const providerGroups = props.groups ?? [];
   const [busy, setBusy] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
+  const [createPriority, setCreatePriority] = useState('100');
+  const [createWeight, setCreateWeight] = useState('1');
+  const [createGroupIds, setCreateGroupIds] = useState<number[]>([]);
   const [createBaseUrls, setCreateBaseUrls] = useState<DraftInputRow[]>([createDraftInputRow('url')]);
   const [createApiKeys, setCreateApiKeys] = useState<DraftInputRow[]>([createDraftInputRow('key')]);
   const [createSubmitError, setCreateSubmitError] = useState<string | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
   const [providerTypeDraft, setProviderTypeDraft] = useState('');
+  const [providerPriorityDraft, setProviderPriorityDraft] = useState('');
+  const [providerWeightDraft, setProviderWeightDraft] = useState('');
+  const [providerGroupPriorities, setProviderGroupPriorities] = useState<Record<number, string>>({});
+  const [providerSubmitError, setProviderSubmitError] = useState<string | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteProviderError, setDeleteProviderError] = useState<string | null>(null);
+  const deleteCancelButtonRef = useRef<HTMLButtonElement>(null);
   const [draggingEndpointId, setDraggingEndpointId] = useState<number | null>(null);
   const [draggingKeyId, setDraggingKeyId] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<{
@@ -118,6 +148,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
   } | null>(null);
   const selected = props.items.find(item => item.provider.id === selectedProviderId) ?? null;
   const [createProviderType, setCreateProviderType] = useState<string>('openai');
+  const createPriorityValue = parseProviderRoutingValue(createPriority, 0);
+  const createWeightValue = parseProviderRoutingValue(createWeight, 1);
+  const providerPriorityValue = parseProviderRoutingValue(providerPriorityDraft, 0);
+  const providerWeightValue = parseProviderRoutingValue(providerWeightDraft, 1);
   const ensureLive = () => {
     if (!props.settings.adminToken.trim()) {
       props.onMessage('请先填写管理员口令。');
@@ -129,6 +163,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const resetCreateForm = () => {
     setCreateProviderType('openai');
     setCreateName('');
+    setCreatePriority('100');
+    setCreateWeight('1');
+    setCreateGroupIds(providerGroups.filter(group => group.is_default).map(group => group.id));
     setCreateBaseUrls([createDraftInputRow('url')]);
     setCreateApiKeys([createDraftInputRow('key')]);
     setCreateSubmitError(null);
@@ -178,6 +215,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }
     if (createApiKeyValues().length === 0) {
       missing.push('API 密钥');
+    }
+    if (createPriorityValue === null) {
+      missing.push('优先级');
+    }
+    if (createWeightValue === null) {
+      missing.push('权重');
+    }
+    if (providerGroups.length > 0 && createGroupIds.length === 0) {
+      missing.push('调度组');
     }
     return missing;
   };
@@ -237,16 +283,36 @@ export function ProvidersPage(props: ProvidersPageProps) {
     event.preventDefault();
     if (!ensureLive()) return;
     const formData = new FormData(event.currentTarget);
+    if (createPriorityValue === null || createWeightValue === null) {
+      const message = createPriorityValue === null
+        ? '优先级必须是 0 到 2147483647 之间的整数。'
+        : '权重必须是 1 到 2147483647 之间的整数。';
+      setCreateSubmitError(message);
+      props.onMessage(message);
+      return;
+    }
     const payload: CreateProviderInput = {
       name: createName.trim(),
       provider_type: createProviderType || readString(formData, 'provider_type') || 'openai',
       enabled: readBool(formData, 'enabled'),
-      priority: 100,
-      weight: 1,
+      priority: createPriorityValue,
+      weight: createWeightValue,
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'websocket_enabled'),
       beta_features: readBool(formData, 'responses_http_to_ws') ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS] : [],
-      key_selection_strategy: 'round_robin'
+      key_selection_strategy: 'round_robin',
+      groups: createGroupIds.length > 0
+        ? createGroupIds.map(groupId => ({
+            group_id: groupId,
+            priority_override: null
+          }))
+        : undefined,
+      max_attempts: 2,
+      max_concurrency: null,
+      circuit_breaker_enabled: true,
+      circuit_breaker_failure_threshold: 3,
+      circuit_breaker_open_ms: 30_000,
+      circuit_breaker_half_open_success_threshold: 2
     };
     setCreateSubmitError(null);
     if (!payload.name) {
@@ -313,18 +379,65 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const submitProviderUpdate = async (event: FormEvent<HTMLFormElement>, item: ProviderWorkspace) => {
     event.preventDefault();
     if (!ensureLive()) return;
+    if (providerPriorityValue === null || providerWeightValue === null) {
+      const message = providerPriorityValue === null
+        ? '优先级必须是 0 到 2147483647 之间的整数。'
+        : '权重必须是 1 到 2147483647 之间的整数。';
+      setProviderSubmitError(message);
+      props.onMessage(message);
+      return;
+    }
     const formData = new FormData(event.currentTarget);
+    const groups = Object.entries(providerGroupPriorities).map(([groupId, rawPriority]) => {
+      const trimmed = rawPriority.trim();
+      return {
+        group_id: Number(groupId),
+        priority_override: trimmed ? parseProviderRoutingValue(trimmed, 0) : null
+      };
+    });
+    if ((providerGroups.length > 0 && groups.length === 0) || groups.some(group => group.priority_override === null
+      && providerGroupPriorities[group.group_id]?.trim())) {
+      const message = groups.length === 0
+        ? '请至少选择一个调度组。'
+        : '分组优先级覆盖必须是非负整数。';
+      setProviderSubmitError(message);
+      props.onMessage(message);
+      return;
+    }
+    const maxConcurrencyRaw = readString(formData, 'provider_max_concurrency');
     const payload: UpdateProviderInput = {
       name: readString(formData, 'provider_name'),
       provider_type: readString(formData, 'provider_type') || item.provider.provider_type,
       enabled: readBool(formData, 'provider_enabled'),
-      priority: item.provider.priority,
-      weight: item.provider.weight,
+      priority: providerPriorityValue,
+      weight: providerWeightValue,
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'provider_websocket_enabled'),
       beta_features: readBool(formData, 'provider_responses_http_to_ws') ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS] : [],
-      key_selection_strategy: item.provider.key_selection_strategy || 'round_robin'
+      key_selection_strategy: item.provider.key_selection_strategy || 'round_robin',
+      groups: providerGroups.length > 0 ? groups : undefined,
+      max_attempts: readInt(formData, 'provider_max_attempts', item.provider.max_attempts),
+      max_concurrency: maxConcurrencyRaw
+        ? readInt(formData, 'provider_max_concurrency', item.provider.max_concurrency ?? 1)
+        : null,
+      circuit_breaker_enabled: readBool(formData, 'provider_circuit_breaker_enabled'),
+      circuit_breaker_failure_threshold: readInt(
+        formData,
+        'provider_circuit_breaker_failure_threshold',
+        item.provider.circuit_breaker_failure_threshold,
+      ),
+      circuit_breaker_open_ms: readInt(
+        formData,
+        'provider_circuit_breaker_open_ms',
+        item.provider.circuit_breaker_open_ms,
+      ),
+      circuit_breaker_half_open_success_threshold: readInt(
+        formData,
+        'provider_circuit_breaker_half_open_success_threshold',
+        item.provider.circuit_breaker_half_open_success_threshold,
+      )
     };
+    setProviderSubmitError(null);
     setBusy(`provider-${item.provider.id}`);
     try {
       await updateProvider(props.settings, item.provider.id, payload);
@@ -332,7 +445,35 @@ export function ProvidersPage(props: ProvidersPageProps) {
         name: payload.name ?? item.provider.name
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新上游失败。');
+      const message = error instanceof Error ? error.message : '更新上游失败。';
+      setProviderSubmitError(message);
+      props.onMessage(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const closeDeleteProviderDialog = () => {
+    if (selected && busy === `provider-delete-${selected.provider.id}`) return;
+    setDeleteConfirmOpen(false);
+    setDeleteProviderError(null);
+  };
+  const removeProvider = async (item: ProviderWorkspace) => {
+    if (!ensureLive()) return;
+    const providerName = item.provider.name;
+    setBusy(`provider-delete-${item.provider.id}`);
+    setDeleteProviderError(null);
+    try {
+      await deleteProvider(props.settings, item.provider.id);
+      setDeleteConfirmOpen(false);
+      setSelectedProviderId(null);
+      setTestResult(null);
+      await props.onRefresh(t('上游 {{name}} 已删除。', {
+        name: providerName
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '删除上游失败。';
+      setDeleteProviderError(message);
+      props.onMessage(message);
     } finally {
       setBusy(null);
     }
@@ -554,7 +695,18 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setUpstreamKeyModelsError(null);
     setUpstreamKeyModelsDraft('');
     setProviderTypeDraft('');
-  }, [selectedProviderId]);
+    setProviderPriorityDraft(selected ? String(selected.provider.priority) : '');
+    setProviderWeightDraft(selected ? String(selected.provider.weight) : '');
+    setProviderGroupPriorities(selected
+      ? Object.fromEntries(selected.provider.groups.map(group => [
+          group.group_id,
+          group.priority_override === null ? '' : String(group.priority_override)
+        ]))
+      : {});
+    setProviderSubmitError(null);
+    setDeleteConfirmOpen(false);
+    setDeleteProviderError(null);
+  }, [selectedProviderId, selected?.provider.priority, selected?.provider.weight, selected?.provider.groups]);
   useEffect(() => {
     const item = selected;
     if (!item) return;
@@ -949,6 +1101,68 @@ export function ProvidersPage(props: ProvidersPageProps) {
       setBusy(null);
     }
   };
+  const submitGroupCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!ensureLive()) return;
+    const name = readString(new FormData(event.currentTarget), 'provider_group_name');
+    if (!name) {
+      props.onMessage('调度组名称不能为空。');
+      return;
+    }
+    setBusy('provider-group-create');
+    try {
+      await createProviderGroup(props.settings, name);
+      event.currentTarget.reset();
+      await props.onRefresh(`调度组 ${name} 已创建。`);
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '创建调度组失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+  const saveGroup = async (event: FormEvent<HTMLFormElement>, group: ProviderGroup) => {
+    event.preventDefault();
+    if (!ensureLive() || group.is_default) return;
+    const name = readString(new FormData(event.currentTarget), `provider_group_name_${group.id}`);
+    if (!name) {
+      props.onMessage('调度组名称不能为空。');
+      return;
+    }
+    setBusy(`provider-group-${group.id}`);
+    try {
+      await updateProviderGroup(props.settings, group.id, name);
+      await props.onRefresh(`调度组 ${name} 已更新。`);
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '更新调度组失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+  const removeGroup = async (group: ProviderGroup) => {
+    if (!ensureLive() || group.is_default) return;
+    if (!window.confirm(`确认删除调度组“${group.name}”？`)) return;
+    setBusy(`provider-group-${group.id}`);
+    try {
+      await deleteProviderGroup(props.settings, group.id);
+      await props.onRefresh(`调度组 ${group.name} 已删除。`);
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '删除调度组失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
+  const resetCircuit = async (providerId: number) => {
+    if (!ensureLive()) return;
+    setBusy(`provider-circuit-${providerId}`);
+    try {
+      await resetProviderCircuit(props.settings, providerId);
+      await props.onRefresh('上游熔断状态已重置。');
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '重置熔断失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
   return <Box className="section-stack">
       <PageHeader title="上游" description="查看连接目标、流量去向与健康状态。" actions={<Button type="button" disabled={!isLive()} className="rounded-none text-xs tracking-wider" onClick={() => {
       resetCreateForm();
@@ -958,7 +1172,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
             {t('CREATE PROVIDER')}
           </Button>} />
 
-      <StatsGrid items={stats()} />
+      <StatsGrid ariaLabel="上游摘要" items={stats()} variant="compact" />
 
       {!isLive() ? <Alert className="rounded-none border-border/40 bg-muted/20">
           <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t("未连接后台")}</AlertTitle>
@@ -966,16 +1180,16 @@ export function ProvidersPage(props: ProvidersPageProps) {
         </Alert> : null}
 
       <Card>
-        <Box className="flex flex-col gap-3 p-6 pb-6">
-          <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("上游列表")}</Typography>
-          <Typography className="mt-1 font-mono text-xs uppercase tracking-wider text-muted-foreground" component="div">{t('查看目标与健康状态。')}</Typography>
+        <Box className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 p-4">
+          <Typography className="text-base font-medium text-foreground" component="div">{t("上游列表")}</Typography>
+          <Typography className="font-mono text-xs uppercase tracking-wider text-muted-foreground" component="div">{t('查看目标与健康状态。')}</Typography>
         </Box>
         <CardContent className="p-0 border-t border-border/40">
-          {props.items.length > 0 ? <TableContainer><Table>
+          {props.items.length > 0 ? <>{showProviderTable ? <TableContainer><Table>
               <TableHead>
                 <TableRow className="border-b border-border hover:bg-transparent">
                   <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("上游")}</TableCell>
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("状态")}</TableCell>
+                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("运行状态")}</TableCell>
                   <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("目标")}</TableCell>
                   <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("密钥")}</TableCell>
                   <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("优先级 / 权重")}</TableCell>
@@ -985,23 +1199,33 @@ export function ProvidersPage(props: ProvidersPageProps) {
               </TableHead>
               <TableBody>
                 {props.items.map(item => {
-              const health = healthStatus(item.provider.health?.state, item.provider.health?.available);
+              const health = healthStatus(
+                item.provider.runtime?.state ?? item.provider.health?.state,
+                item.provider.runtime?.available ?? item.provider.health?.available,
+              );
               return <TableRow key={item.provider.id} className="cursor-pointer border-b border-border/40 hover:bg-muted/30 transition-colors" onClick={() => setSelectedProviderId(item.provider.id)}>
                         <TableCell>
                           <Box className="flex flex-col gap-1">
                             <Box className="text-sm font-medium text-foreground truncate max-w-[150px]" component="strong">{item.provider.name}</Box>
-                            <Box className="font-mono text-[0.65rem] leading-[1.428571] uppercase tracking-widest text-muted-foreground opacity-70 truncate max-w-[150px]" component="span">{item.provider.provider_type}</Box>
+                            <Box className="font-mono text-[0.65rem] leading-[1.428571] text-muted-foreground opacity-70 truncate max-w-[220px]" component="span">
+                              {item.provider.provider_type} · {item.provider.groups.map(group => group.group_name).join(', ') || '—'}
+                            </Box>
                           </Box>
                         </TableCell>
                         <TableCell>
-                          <StatusBadge tone={health.tone}>{health.label}</StatusBadge>
+                          <Box className="flex min-w-[9rem] items-center gap-2">
+                            <StatusBadge tone={health.tone}>{t(health.label)}</StatusBadge>
+                            <Box className="font-mono text-[0.65rem] text-muted-foreground" component="span">
+                              {item.provider.runtime?.in_flight ?? 0}/{item.provider.max_concurrency ?? '∞'} · {item.provider.runtime?.latency_ewma_ms == null ? '—' : formatMs(item.provider.runtime.latency_ewma_ms)}
+                            </Box>
+                          </Box>
                         </TableCell>
                         <TableCell className="font-mono text-xs">{item.endpoints.length}</TableCell>
                         <TableCell className="font-mono text-xs">{item.keys.length}</TableCell>
                         <TableCell className="font-mono text-xs">
                           P{item.provider.priority} / W{item.provider.weight}
                         </TableCell>
-                        <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest opacity-80">{item.provider.health?.last_error_type ?? '—'}</TableCell>
+                        <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest opacity-80">{item.provider.runtime?.last_error_type ?? item.provider.health?.last_error_type ?? '—'}</TableCell>
                         <TableCell className="text-right">
                           <Button type="button" size="sm" variant="ghost" className="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={event => {
                     event.stopPropagation();
@@ -1011,12 +1235,98 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       </TableRow>;
             })}
               </TableBody>
-            </Table></TableContainer> : <EmptyState title="NO PROVIDERS" description="先连接一个可用目标，再逐步补充更多目标和密钥。" action={<Button type="button" disabled={!isLive()} variant="ghost" onClick={() => {
+            </Table></TableContainer> : <Box className="divide-y divide-border/40">
+              {props.items.map(item => {
+                const health = healthStatus(
+                  item.provider.runtime?.state ?? item.provider.health?.state,
+                  item.provider.runtime?.available ?? item.provider.health?.available,
+                );
+                const lastError = item.provider.runtime?.last_error_type ?? item.provider.health?.last_error_type;
+                return <ButtonBase
+                  key={item.provider.id}
+                  component="button"
+                  type="button"
+                  aria-label={t('查看上游 {{name}} 详情', { name: item.provider.name })}
+                  className="w-full touch-manipulation items-stretch px-4 py-3 text-left"
+                  onClick={() => setSelectedProviderId(item.provider.id)}
+                >
+                  <Box className="flex min-w-0 flex-1 flex-col gap-2">
+                    <Box className="flex min-w-0 items-center gap-2">
+                      <Box className="min-w-0 flex-1 truncate text-sm font-medium text-foreground" component="strong">{item.provider.name}</Box>
+                      <StatusBadge tone={health.tone}>{t(health.label)}</StatusBadge>
+                      <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+                    </Box>
+                    <Box className="truncate font-mono text-[0.7rem] text-muted-foreground" component="span">
+                      {item.provider.provider_type} · {item.provider.groups.map(group => group.group_name).join(', ') || '—'}
+                    </Box>
+                    <Box className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[0.7rem] text-muted-foreground" component="span">
+                      <Box component="span">P{item.provider.priority} / W{item.provider.weight}</Box>
+                      <Box component="span">{t('目标')} {item.endpoints.length} · {t('密钥')} {item.keys.length}</Box>
+                      <Box component="span">
+                        {t('并发')} {item.provider.runtime?.in_flight ?? 0}/{item.provider.max_concurrency ?? '∞'} · {item.provider.runtime?.latency_ewma_ms == null ? '—' : formatMs(item.provider.runtime.latency_ewma_ms)}
+                      </Box>
+                      {lastError ? <Box className="text-destructive" component="span">{lastError}</Box> : null}
+                    </Box>
+                  </Box>
+                </ButtonBase>;
+              })}
+            </Box>}</> : <EmptyState title="NO PROVIDERS" description="先连接一个可用目标，再逐步补充更多目标和密钥。" action={<Button type="button" disabled={!isLive()} variant="ghost" onClick={() => {
           resetCreateForm();
           setCreateOpen(true);
         }}>
                     {t('CREATE PROVIDER')}
                   </Button>} />}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <Box className="flex flex-col gap-3 p-5 pb-4">
+          <Typography className="text-base font-medium text-foreground" component="div">{t('调度组')}</Typography>
+          <Typography className="text-xs text-muted-foreground" component="div">{t('访问密钥只会使用与其调度组相交的上游。')}</Typography>
+        </Box>
+        <CardContent className="border-t border-border/40 p-0">
+          <TableContainer>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>{t('名称')}</TableCell>
+                  <TableCell>{t('上游')}</TableCell>
+                  <TableCell>{t('访问密钥')}</TableCell>
+                  <TableCell className="text-right">{t('操作')}</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {providerGroups.map(group => <TableRow key={group.id}>
+                    <TableCell>
+                      {group.is_default ? <Box className="font-mono text-xs">{group.name}</Box> : <Box className="flex items-center gap-2" component="form" onSubmit={event => void saveGroup(event, group)}>
+                          <InputBase name={`provider_group_name_${group.id}`} defaultValue={group.name} className="h-8 max-w-64 bg-background text-sm" />
+                          <Button type="submit" size="icon" variant="ghost" aria-label={t('保存调度组')} disabled={busy === `provider-group-${group.id}`}>
+                            <Save className="size-3.5" />
+                          </Button>
+                        </Box>}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs">{group.provider_count}</TableCell>
+                    <TableCell className="font-mono text-xs">{group.api_key_count}</TableCell>
+                    <TableCell className="text-right">
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('删除调度组')} disabled={group.is_default || busy === `provider-group-${group.id}`} onClick={() => void removeGroup(group)}>
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>)}
+                <TableRow>
+                  <TableCell colSpan={4}>
+                    <Box className="flex max-w-lg items-center gap-2" component="form" onSubmit={event => void submitGroupCreate(event)}>
+                      <InputBase name="provider_group_name" placeholder={t('新调度组名称')} className="h-9 bg-background text-sm" />
+                      <Button type="submit" size="sm" disabled={busy === 'provider-group-create'}>
+                        <Plus className="size-3.5" />
+                        {t('添加')}
+                      </Button>
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </TableContainer>
         </CardContent>
       </Card>
 
@@ -1029,15 +1339,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
           <Box className="grid gap-4 xl:grid-cols-[minmax(160px,1fr)_150px_120px_120px]" onSubmit={event => void submitAliasCreate(event)} component="form">
             <InputBase name="alias_name" placeholder={t("gpt-5")} className="bg-background" />
             <Select name="alias_mode" defaultValue="ordered">
-              <MenuItem value="ordered">按顺序</MenuItem>
-              <MenuItem value="weighted">按权重</MenuItem>
+              <MenuItem value="ordered">{t('按顺序')}</MenuItem>
+              <MenuItem value="weighted">{t('按权重')}</MenuItem>
             </Select>
             <Box className="flex min-h-10 items-center gap-3 border border-border/40 px-3 text-sm text-muted-foreground" component="label">
               <Checkbox name="alias_enabled" defaultChecked />
               <Box component="span">{t('启用')}</Box>
             </Box>
             <Button type="submit" disabled={busy === 'alias-create'}>
-              {busy === 'alias-create' ? '创建中…' : '新增模型'}
+              {t(busy === 'alias-create' ? '创建中…' : '新增模型')}
             </Button>
           </Box>
 
@@ -1046,8 +1356,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <Box className="grid gap-4 xl:grid-cols-[minmax(160px,1fr)_150px_120px_160px]" onSubmit={event => void submitAliasUpdate(event, alias)} component="form">
                       <InputBase name={`alias_name_${alias.id}`} defaultValue={alias.name} className="bg-background" />
                       <Select name={`alias_mode_${alias.id}`} defaultValue={alias.mode}>
-                        <MenuItem value="ordered">按顺序</MenuItem>
-                        <MenuItem value="weighted">按权重</MenuItem>
+                        <MenuItem value="ordered">{t('按顺序')}</MenuItem>
+                        <MenuItem value="weighted">{t('按权重')}</MenuItem>
                       </Select>
                       <Box className="check-row min-h-10 py-2" component="label">
                         <Checkbox name={`alias_enabled_${alias.id}`} defaultChecked={alias.enabled} />
@@ -1080,7 +1390,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                                   <TableCell className="font-mono text-xs">{target.priority}</TableCell>
                                   <TableCell className="font-mono text-xs">{target.weight}</TableCell>
                                   <TableCell>
-                                    <StatusBadge tone={target.enabled ? 'normal' : 'warning'}>{target.enabled ? '启用' : '停用'}</StatusBadge>
+                                    <StatusBadge tone={target.enabled ? 'normal' : 'warning'}>{t(target.enabled ? '启用' : '停用')}</StatusBadge>
                                   </TableCell>
                                   <TableCell className="text-right">
                                     <Box className="flex justify-end gap-2">
@@ -1103,7 +1413,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
 
                     <Box className="mt-4 grid gap-4 xl:grid-cols-[180px_minmax(160px,1fr)_110px_110px_120px]" onSubmit={event => void submitAliasTargetCreate(event, alias)} component="form">
                       <Select displayEmpty name={`alias_target_provider_${alias.id}`} defaultValue="">
-                        <MenuItem value="">选择上游</MenuItem>
+                        <MenuItem value="">{t('选择上游')}</MenuItem>
                         {props.items.map(item => <MenuItem key={item.provider.id} value={item.provider.id}>{item.provider.name}</MenuItem>)}
                       </Select>
                       <InputBase name={`alias_target_model_${alias.id}`} placeholder={t("上游模型名称")} className="bg-background" />
@@ -1112,7 +1422,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <Button type="submit" disabled={busy === `alias-target-create-${alias.id}`}>{t("添加目标")}</Button>
                     </Box>
                   </Box>)}
-            </Box> : <EmptyState title="暂无模型配置" description="新增一个模型名称后，再为它添加上游目标。" />}
+            </Box> : <EmptyState title={t('暂无模型配置')} description={t('新增一个模型名称后，再为它添加上游目标。')} />}
         </CardContent>
       </Card>
 
@@ -1131,7 +1441,78 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <Select name="provider_type" value={createProviderType} onChange={event => setCreateProviderType(event.target.value)}>
                 {PROVIDER_TYPE_OPTIONS.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
               </Select>
-              <FormHelperText className="mt-2">{providerTypeDescription(createProviderType)}</FormHelperText>
+              <FormHelperText className="mt-2">{t(providerTypeDescription(createProviderType))}</FormHelperText>
+            </FormControl>
+            <FormControl error={createPriorityValue === null}>
+              <FormLabel htmlFor="create-provider-priority">{t('优先级')}</FormLabel>
+              <InputBase
+                id="create-provider-priority"
+                name="priority"
+                type="number"
+                value={createPriority}
+                slotProps={{
+                  input: {
+                    inputMode: 'numeric',
+                    max: MAX_PROVIDER_ROUTING_VALUE,
+                    min: 0,
+                    step: 1
+                  }
+                }}
+                className="bg-background font-mono"
+                onChange={event => {
+                  setCreatePriority(event.target.value);
+                  setCreateSubmitError(null);
+                }}
+              />
+              <FormHelperText>{t(createPriorityValue === null ? '优先级必须是 0 到 2147483647 之间的整数。' : '数值越小，路由优先级越高。')}</FormHelperText>
+            </FormControl>
+            <FormControl error={createWeightValue === null}>
+              <FormLabel htmlFor="create-provider-weight">{t('权重')}</FormLabel>
+              <InputBase
+                id="create-provider-weight"
+                name="weight"
+                type="number"
+                value={createWeight}
+                slotProps={{
+                  input: {
+                    inputMode: 'numeric',
+                    max: MAX_PROVIDER_ROUTING_VALUE,
+                    min: 1,
+                    step: 1
+                  }
+                }}
+                className="bg-background font-mono"
+                onChange={event => {
+                  setCreateWeight(event.target.value);
+                  setCreateSubmitError(null);
+                }}
+              />
+              <FormHelperText>{t(createWeightValue === null ? '权重必须是 1 到 2147483647 之间的整数。' : '仅在相同优先级的健康上游之间决定相对流量比例。')}</FormHelperText>
+            </FormControl>
+            <FormControl className="md:col-span-2">
+              <FormLabel>{t('调度组')}</FormLabel>
+              <Select
+                multiple
+                value={createGroupIds}
+                onChange={event => {
+                  const value = event.target.value;
+                  setCreateGroupIds(
+                    (typeof value === 'string' ? value.split(',') : value)
+                      .map(Number)
+                      .filter(Number.isFinite),
+                  );
+                  setCreateSubmitError(null);
+                }}
+                renderValue={selectedIds => providerGroups
+                  .filter(group => selectedIds.includes(group.id))
+                  .map(group => group.name)
+                  .join(', ')}
+              >
+                {providerGroups.map(group => <MenuItem key={group.id} value={group.id}>
+                    <Checkbox checked={createGroupIds.includes(group.id)} />
+                    <Box component="span">{group.name}</Box>
+                  </MenuItem>)}
+              </Select>
             </FormControl>
           </Box>
           <Box className="grid gap-6">
@@ -1209,7 +1590,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }}>
         {selected ? (itemSignal => {
         const item = itemSignal;
-        const health = healthStatus(item.provider.health?.state, item.provider.health?.available);
+        const health = healthStatus(
+          item.provider.runtime?.state ?? item.provider.health?.state,
+          item.provider.runtime?.available ?? item.provider.health?.available,
+        );
         return <Box className="flex flex-col gap-8">
                 <Box className="grid gap-6 md:grid-cols-4 border-b border-border/40 pb-8">
                   <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary">
@@ -1219,17 +1603,17 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       </Box>
                   </Box>
                   <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('目标')}</Box>
-                      <Box className="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.endpoints.length}</Box>
+                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('并发')}</Box>
+                      <Box className="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.provider.runtime?.in_flight ?? 0}/{item.provider.max_concurrency ?? '∞'}</Box>
                   </Box>
                   <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('上游密钥')}</Box>
-                      <Box className="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.keys.length}</Box>
+                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('EWMA')}</Box>
+                      <Box className="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.provider.runtime?.latency_ewma_ms == null ? '—' : formatMs(item.provider.runtime.latency_ewma_ms)}</Box>
                   </Box>
                   <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('最近成功')}</Box>
+                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('亲和会话')}</Box>
                       <Box className="mt-2 font-mono text-sm tracking-tight pt-1 text-muted-foreground">
-                        {item.provider.health?.last_success_at_ms ? formatDateTime(item.provider.health.last_success_at_ms) : '—'}
+                        {item.provider.affinity_sessions ?? 0}
                       </Box>
                   </Box>
                 </Box>
@@ -1250,9 +1634,94 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         {PROVIDER_TYPE_OPTIONS.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
                         {!PROVIDER_TYPE_OPTIONS.some(option => option.value === item.provider.provider_type) ? <MenuItem value={item.provider.provider_type}>{item.provider.provider_type}</MenuItem> : null}
                       </Select>
-                      <FormHelperText>{providerTypeDescription(providerTypeDraft || item.provider.provider_type)}</FormHelperText>
+                      <FormHelperText>{t(providerTypeDescription(providerTypeDraft || item.provider.provider_type))}</FormHelperText>
+                    </FormControl>
+                    <FormControl error={providerPriorityValue === null}>
+                      <FormLabel htmlFor="provider-priority">{t('优先级')}</FormLabel>
+                      <InputBase
+                        id="provider-priority"
+                        name="provider_priority"
+                        type="number"
+                        value={providerPriorityDraft}
+                        slotProps={{
+                          input: {
+                            inputMode: 'numeric',
+                            max: MAX_PROVIDER_ROUTING_VALUE,
+                            min: 0,
+                            step: 1
+                          }
+                        }}
+                        className="bg-background font-mono"
+                        onChange={event => {
+                          setProviderPriorityDraft(event.target.value);
+                          setProviderSubmitError(null);
+                        }}
+                      />
+                      <FormHelperText>{t(providerPriorityValue === null ? '优先级必须是 0 到 2147483647 之间的整数。' : '数值越小，路由优先级越高。')}</FormHelperText>
+                    </FormControl>
+                    <FormControl error={providerWeightValue === null}>
+                      <FormLabel htmlFor="provider-weight">{t('权重')}</FormLabel>
+                      <InputBase
+                        id="provider-weight"
+                        name="provider_weight"
+                        type="number"
+                        value={providerWeightDraft}
+                        slotProps={{
+                          input: {
+                            inputMode: 'numeric',
+                            max: MAX_PROVIDER_ROUTING_VALUE,
+                            min: 1,
+                            step: 1
+                          }
+                        }}
+                        className="bg-background font-mono"
+                        onChange={event => {
+                          setProviderWeightDraft(event.target.value);
+                          setProviderSubmitError(null);
+                        }}
+                      />
+                      <FormHelperText>{t(providerWeightValue === null ? '权重必须是 1 到 2147483647 之间的整数。' : '仅在相同优先级的健康上游之间决定相对流量比例。')}</FormHelperText>
                     </FormControl>
                   </Box>
+                  <FormControl>
+                    <FormLabel>{t('调度组与优先级覆盖')}</FormLabel>
+                    <Box className="grid gap-2 md:grid-cols-2">
+                      {providerGroups.map(group => {
+                        const selected = Object.prototype.hasOwnProperty.call(providerGroupPriorities, group.id);
+                        return <Box key={group.id} className="grid min-h-10 grid-cols-[2rem_minmax(0,1fr)_8rem] items-center gap-2 border border-border/40 px-3">
+                            <Checkbox
+                              checked={selected}
+                              onChange={event => setProviderGroupPriorities(current => {
+                                if (event.currentTarget.checked) {
+                                  return {
+                                    ...current,
+                                    [group.id]: ''
+                                  };
+                                }
+                                const next = {
+                                  ...current
+                                };
+                                delete next[group.id];
+                                return next;
+                              })}
+                            />
+                            <Box className="truncate text-sm" component="span">{group.name}</Box>
+                            <InputBase
+                              type="number"
+                              value={providerGroupPriorities[group.id] ?? ''}
+                              disabled={!selected}
+                              placeholder={t('沿用全局')}
+                              slotProps={{ input: { min: 0, step: 1 } }}
+                              className="h-8 bg-background font-mono text-xs"
+                              onChange={event => setProviderGroupPriorities(current => ({
+                                ...current,
+                                [group.id]: event.target.value
+                              }))}
+                            />
+                          </Box>;
+                      })}
+                    </Box>
+                  </FormControl>
                   <Box className="grid gap-4 md:grid-cols-4">
                     <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
                       <Checkbox name="provider_enabled" defaultChecked={item.provider.enabled} />
@@ -1271,8 +1740,49 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <Box component="span">{t('HTTP→WS Beta')}</Box>
                     </Box>
                   </Box>
+                  <Box className="border border-border/40" component="details">
+                    <Box className="cursor-pointer px-4 py-3 text-sm font-medium" component="summary">
+                      {t('韧性与故障转移')}
+                    </Box>
+                    <Box className="grid gap-4 border-t border-border/40 p-4 md:grid-cols-2">
+                      <FormControl>
+                        <FormLabel>{t('每个上游尝试次数')}</FormLabel>
+                        <InputBase name="provider_max_attempts" type="number" defaultValue={item.provider.max_attempts} slotProps={{ input: { min: 1, max: 10, step: 1 } }} className="bg-background font-mono" />
+                      </FormControl>
+                      <FormControl>
+                        <FormLabel>{t('最大并发')}</FormLabel>
+                        <InputBase name="provider_max_concurrency" type="number" defaultValue={item.provider.max_concurrency ?? ''} placeholder={t('不限制')} slotProps={{ input: { min: 1, max: 100000, step: 1 } }} className="bg-background font-mono" />
+                      </FormControl>
+                      <FormControl>
+                        <FormLabel>{t('熔断失败阈值')}</FormLabel>
+                        <InputBase name="provider_circuit_breaker_failure_threshold" type="number" defaultValue={item.provider.circuit_breaker_failure_threshold} slotProps={{ input: { min: 1, max: 100, step: 1 } }} className="bg-background font-mono" />
+                      </FormControl>
+                      <FormControl>
+                        <FormLabel>{t('熔断时长（毫秒）')}</FormLabel>
+                        <InputBase name="provider_circuit_breaker_open_ms" type="number" defaultValue={item.provider.circuit_breaker_open_ms} slotProps={{ input: { min: 1000, max: 86400000, step: 1000 } }} className="bg-background font-mono" />
+                      </FormControl>
+                      <FormControl>
+                        <FormLabel>{t('半开恢复成功次数')}</FormLabel>
+                        <InputBase name="provider_circuit_breaker_half_open_success_threshold" type="number" defaultValue={item.provider.circuit_breaker_half_open_success_threshold} slotProps={{ input: { min: 1, max: 20, step: 1 } }} className="bg-background font-mono" />
+                      </FormControl>
+                      <Box className="flex items-end gap-2">
+                        <Box className="check-row h-10 flex-1" component="label">
+                          <Checkbox name="provider_circuit_breaker_enabled" defaultChecked={item.provider.circuit_breaker_enabled} />
+                          <Box component="span">{t('启用 Provider 熔断')}</Box>
+                        </Box>
+                        <Button type="button" variant="outline" size="sm" disabled={busy === `provider-circuit-${item.provider.id}`} onClick={() => void resetCircuit(item.provider.id)}>
+                          <RefreshCw className="size-3.5" />
+                          {t('重置')}
+                        </Button>
+                      </Box>
+                    </Box>
+                  </Box>
+                  {providerSubmitError ? <Alert className="rounded-none border-border/40 bg-muted/20" severity="error" variant="outlined">
+                      <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t('保存失败')}</AlertTitle>
+                      <Typography className="mt-2 text-[0.8rem] leading-relaxed text-muted-foreground opacity-80" component="div">{providerSubmitError}</Typography>
+                    </Alert> : null}
                   <Box className="flex justify-end pt-4 border-t border-border/40 mt-2">
-                    <Button type="submit" disabled={busy === `provider-${item.provider.id}`}>
+                    <Button type="submit" disabled={busy === `provider-${item.provider.id}` || providerPriorityValue === null || providerWeightValue === null}>
                       {busy === `provider-${item.provider.id}` ? '保存中…' : t('SAVE PROVIDER')}
                     </Button>
                   </Box>
@@ -1339,7 +1849,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </Box>
                   <Box className="grid gap-3">
                     {item.keys.map((key, index) => {
-                const keyHealth = healthStatus(key.health?.state, key.health?.available);
+                const quotaCooling = (key.quota?.cooldown_until_ms ?? 0) > Date.now();
+                const keyHealth = quotaCooling
+                  ? { label: '限流冷却', tone: 'warning' as const }
+                  : healthStatus(key.health?.state, key.health?.available);
                 return <Box key={key.id} className="grid gap-3 border border-border/40 bg-muted/5 p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_10rem]" onSubmit={event => void submitKeyUpdate(event, key.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderKeys(item, key.id)} component="form">
                             <Button type="button" className="flex size-10 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing" aria-label={t('调整 API 密钥顺序')} title={t('调整 API 密钥顺序')} draggable onDragStart={() => setDraggingKeyId(key.id)} onDragEnd={() => setDraggingKeyId(null)} variant="ghost">
                               <GripVertical className="size-4" />
@@ -1588,8 +2101,73 @@ export function ProvidersPage(props: ProvidersPageProps) {
                 })}</Box>
                       </CardContent>
                     </Card>)(testResult) : null}
+
+                <Box className="mt-8 border border-destructive/40 bg-destructive/5 p-6" component="section">
+                  <Box className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+                    <Box className="min-w-0">
+                      <Typography className="text-base font-semibold tracking-tight text-destructive" component="h3">{t('危险操作')}</Typography>
+                      <Typography className="mt-2 text-sm leading-6 text-muted-foreground" component="p">{t('永久删除此上游及其运行配置。历史数据会保留。')}</Typography>
+                    </Box>
+                    <Button type="button" variant="destructive" className="shrink-0" disabled={busy === `provider-delete-${item.provider.id}`} onClick={() => {
+                      setDeleteProviderError(null);
+                      setDeleteConfirmOpen(true);
+                    }}>
+                      <Trash2 className="size-4" />
+                      {t('删除整个上游')}
+                    </Button>
+                  </Box>
+                </Box>
               </Box>;
       })(selected) : null}
       </DetailDrawer>
+
+      <Dialog
+        aria-describedby="delete-provider-description"
+        aria-labelledby="delete-provider-title"
+        fullWidth
+        maxWidth="sm"
+        open={deleteConfirmOpen && selected !== null}
+        onClose={closeDeleteProviderDialog}
+        slotProps={{
+          paper: {
+            className: 'border border-destructive/40 bg-card shadow-none'
+          },
+          transition: {
+            onEntered: () => deleteCancelButtonRef.current?.focus()
+          }
+        }}
+      >
+        <DialogTitle id="delete-provider-title" className="border-b border-border/40 px-6 py-5 text-xl font-semibold tracking-tight text-foreground">
+          {t('删除上游“{{name}}”？', {
+            name: selected?.provider.name ?? ''
+          })}
+        </DialogTitle>
+        <DialogContent className="px-6 py-5">
+          <Typography id="delete-provider-description" className="text-sm leading-6 text-muted-foreground" component="p">
+            {t('此操作不可撤销。以下运行配置将被永久删除：')}
+          </Typography>
+          <Box className="mt-4 grid list-disc gap-2 border border-border/50 bg-muted/10 py-3 pl-8 pr-4 text-sm text-foreground" component="ul">
+            <Box component="li">{t('{{count}} 个服务地址', {
+              count: selected?.endpoints.length ?? 0
+            })}</Box>
+            <Box component="li">{t('{{count}} 个上游密钥及其模型', {
+              count: selected?.keys.length ?? 0
+            })}</Box>
+            <Box component="li">{t('Provider 模型、模型路由关联与别名目标')}</Box>
+          </Box>
+          <Typography className="mt-4 text-sm leading-6 text-muted-foreground" component="p">{t('请求日志、统计与价格历史将保留。')}</Typography>
+          {deleteProviderError ? <Alert className="mt-4 rounded-none border-border/40 bg-muted/20" severity="error" variant="outlined">
+              <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t('删除失败')}</AlertTitle>
+              <Typography className="mt-2 text-[0.8rem] leading-relaxed text-muted-foreground opacity-80" component="div">{deleteProviderError}</Typography>
+            </Alert> : null}
+        </DialogContent>
+        <DialogActions className="gap-3 border-t border-border/40 px-6 py-4">
+          <Button ref={deleteCancelButtonRef} autoFocus type="button" variant="outline" disabled={selected ? busy === `provider-delete-${selected.provider.id}` : false} onClick={closeDeleteProviderDialog}>{t('取消')}</Button>
+          <Button type="button" variant="destructive" disabled={!selected || busy === `provider-delete-${selected?.provider.id ?? 0}`} onClick={() => selected ? void removeProvider(selected) : undefined}>
+            <Trash2 className="size-4" />
+            {selected && busy === `provider-delete-${selected.provider.id}` ? t('删除中…') : t('确认删除')}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>;
 }

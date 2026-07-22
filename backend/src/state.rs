@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use crate::affinity::AffinityBook;
 use crate::cache::Caches;
 use crate::config::Config;
 use crate::db::Database;
 use crate::health::{EndpointHealthBook, UpstreamKeyHealthBook};
 use crate::key_rotation::KeyRotationBook;
 use crate::metrics::Metrics;
+use crate::provider_runtime::{ProviderRuntimeBook, QuotaBook};
 use crate::runtime_settings::RuntimeSettings;
 use crate::system_status::SystemStatusMonitor;
 use crate::telemetry::Telemetry;
@@ -20,6 +22,9 @@ pub struct AppState {
     pub endpoint_health: Arc<EndpointHealthBook>,
     pub upstream_key_health: Arc<UpstreamKeyHealthBook>,
     pub key_rotation: Arc<KeyRotationBook>,
+    pub affinity: Arc<AffinityBook>,
+    pub provider_runtime: Arc<ProviderRuntimeBook>,
+    pub quota: Arc<QuotaBook>,
     pub metrics: Arc<Metrics>,
     pub system_status: SystemStatusMonitor,
     pub runtime_settings: RuntimeSettings,

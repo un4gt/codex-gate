@@ -22,6 +22,7 @@ import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
 import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
+import TableContainer from "@mui/material/TableContainer";
 import Typography from "@mui/material/Typography";
 interface LogsPageProps {
   settings: ConnectionSettings;
@@ -434,6 +435,50 @@ export function LogsPage(props: LogsPageProps) {
                     </Box>
                   </CardContent>
                 </Card>
+
+                {row.routing_trace ? <Card className="rounded-none border border-border bg-background shadow-none">
+                    <Box className="flex items-center justify-between gap-4 p-6 pb-4">
+                      <Typography className="text-lg font-medium tracking-tight text-foreground" component="div">{t('路由决策')}</Typography>
+                      <Box className="font-mono text-xs text-muted-foreground" component="span">
+                        {t('{{count}} 次 Provider 切换', { count: row.routing_trace.provider_switches })}
+                      </Box>
+                    </Box>
+                    <CardContent className="border-t border-border/40 p-0">
+                      <Box className="grid gap-2 border-b border-border/40 px-6 py-4 text-xs text-muted-foreground md:grid-cols-2">
+                        <Box>{t('授权组：{{groups}}', {
+                          groups: row.routing_trace.authorized_groups.map(group => group.name).join(', ') || '—'
+                        })}</Box>
+                        <Box>{row.routing_trace.affinity
+                          ? t('亲和：{{state}} · {{hash}}', {
+                              state: row.routing_trace.affinity.hit ? '命中' : '新建',
+                              hash: row.routing_trace.affinity.hash
+                            })
+                          : t('亲和：无会话标识')}</Box>
+                      </Box>
+                      <TableContainer>
+                        <Table size="small">
+                          <TableHead>
+                            <TableRow>
+                              <TableCell>{t('序号')}</TableCell>
+                              <TableCell>{t('上游')}</TableCell>
+                              <TableCell>{t('目标 / 密钥')}</TableCell>
+                              <TableCell>{t('结果')}</TableCell>
+                              <TableCell className="text-right">{t('耗时')}</TableCell>
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {row.routing_trace.attempts.map((attempt, index) => <TableRow key={`${attempt.provider_id}-${attempt.endpoint_id}-${attempt.upstream_key_id}-${index}`}>
+                                <TableCell className="font-mono text-xs">{index + 1}</TableCell>
+                                <TableCell className="text-xs">{providerNameMap.get(attempt.provider_id) ?? `#${attempt.provider_id}`}</TableCell>
+                                <TableCell className="font-mono text-xs">#{attempt.endpoint_id} / #{attempt.upstream_key_id}</TableCell>
+                                <TableCell className="font-mono text-xs">{attempt.status ?? '—'} {attempt.error_type ?? ''}</TableCell>
+                                <TableCell className="text-right font-mono text-xs">{formatMaybeMs(attempt.duration_ms)}</TableCell>
+                              </TableRow>)}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    </CardContent>
+                  </Card> : null}
 
                 <Card className="rounded-none border border-border bg-background shadow-none">
                   <Box className="flex flex-col gap-3 p-6 pb-4">

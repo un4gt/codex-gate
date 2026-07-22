@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -54,8 +55,11 @@ impl Default for RuntimeHealthView {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct RuntimeHealthState {
+    generation: u64,
+    next_probe_id: u64,
+    probe_owner: Option<u64>,
     consecutive_failures: u32,
     success_count: u64,
     failure_count: u64,
@@ -67,7 +71,33 @@ struct RuntimeHealthState {
     last_success_at_ms: Option<i64>,
     last_failure_at_ms: Option<i64>,
     updated_at_ms: Option<i64>,
-    half_open_probe_in_flight: bool,
+}
+
+impl Default for RuntimeHealthState {
+    fn default() -> Self {
+        Self {
+            generation: 1,
+            next_probe_id: 0,
+            probe_owner: None,
+            consecutive_failures: 0,
+            success_count: 0,
+            failure_count: 0,
+            last_status: None,
+            last_error_type: None,
+            last_error_message: None,
+            latency_ewma_ms: None,
+            open_until_ms: None,
+            last_success_at_ms: None,
+            last_failure_at_ms: None,
+            updated_at_ms: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RuntimeHealthAttemptToken {
+    generation: u64,
+    probe_id: Option<u64>,
 }
 
 pub struct RuntimeHealthBook {
@@ -98,41 +128,51 @@ impl RuntimeHealthBook {
         Self::to_view(state, now_ms)
     }
 
-    pub fn try_acquire(&self, id: i64, now_ms: i64) -> bool {
+    pub fn try_begin_attempt(
+        self: &Arc<Self>,
+        id: i64,
+        now_ms: i64,
+    ) -> Option<RuntimeHealthAttemptGuard> {
         let mut guard = self.by_id.write();
-        let Some(state) = guard.get_mut(&id) else {
-            return true;
-        };
-
-        match Self::state_kind(state, now_ms) {
-            CircuitState::Closed => true,
-            CircuitState::Open => false,
+        let state = guard.entry(id).or_default();
+        let probe_id = match Self::state_kind(state, now_ms) {
+            CircuitState::Closed => None,
+            CircuitState::Open => return None,
             CircuitState::HalfOpen => {
-                if state.half_open_probe_in_flight {
-                    return false;
+                if state.probe_owner.is_some() {
+                    return None;
                 }
-                state.half_open_probe_in_flight = true;
+                state.next_probe_id = state.next_probe_id.wrapping_add(1).max(1);
+                state.probe_owner = Some(state.next_probe_id);
                 state.updated_at_ms = Some(now_ms);
-                true
+                Some(state.next_probe_id)
             }
-        }
+        };
+        Some(RuntimeHealthAttemptGuard {
+            book: self.clone(),
+            id,
+            token: RuntimeHealthAttemptToken {
+                generation: state.generation,
+                probe_id,
+            },
+            active: true,
+        })
     }
 
-    pub fn release_probe(&self, id: i64, now_ms: i64) {
+    fn finish_neutral(&self, id: i64, token: RuntimeHealthAttemptToken, now_ms: i64) {
         let mut guard = self.by_id.write();
         let Some(state) = guard.get_mut(&id) else {
             return;
         };
-
-        if state.half_open_probe_in_flight {
-            state.half_open_probe_in_flight = false;
+        if attempt_token_matches(state, token) && release_probe_owner(state, token) {
             state.updated_at_ms = Some(now_ms);
         }
     }
 
-    pub fn record_success(
+    fn finish_success(
         &self,
         id: i64,
+        token: RuntimeHealthAttemptToken,
         status: Option<i32>,
         observed_latency_ms: Option<i64>,
         now_ms: i64,
@@ -141,15 +181,6 @@ impl RuntimeHealthBook {
         let state = guard.entry(id).or_default();
 
         state.success_count = state.success_count.saturating_add(1);
-        state.consecutive_failures = 0;
-        state.last_status = status;
-        state.last_error_type = None;
-        state.last_error_message = None;
-        state.open_until_ms = None;
-        state.last_success_at_ms = Some(now_ms);
-        state.updated_at_ms = Some(now_ms);
-        state.half_open_probe_in_flight = false;
-
         if let Some(latency_ms) = observed_latency_ms.filter(|value| *value >= 0) {
             state.latency_ewma_ms = Some(match state.latency_ewma_ms {
                 Some(current) => {
@@ -158,11 +189,28 @@ impl RuntimeHealthBook {
                 None => latency_ms as f64,
             });
         }
+        if !attempt_token_matches(state, token) {
+            return;
+        }
+
+        let previous_kind = Self::state_kind(state, now_ms);
+        state.consecutive_failures = 0;
+        state.last_status = status;
+        state.last_error_type = None;
+        state.last_error_message = None;
+        state.open_until_ms = None;
+        state.last_success_at_ms = Some(now_ms);
+        state.updated_at_ms = Some(now_ms);
+        release_probe_owner(state, token);
+        if previous_kind == CircuitState::HalfOpen {
+            advance_generation(state);
+        }
     }
 
-    pub fn record_failure(
+    fn finish_failure(
         &self,
         id: i64,
+        token: RuntimeHealthAttemptToken,
         status: Option<i32>,
         error_type: Option<&str>,
         error_message: Option<&str>,
@@ -170,15 +218,19 @@ impl RuntimeHealthBook {
     ) {
         let mut guard = self.by_id.write();
         let state = guard.entry(id).or_default();
-        let previous_kind = Self::state_kind(state, now_ms);
 
         state.failure_count = state.failure_count.saturating_add(1);
+        if !attempt_token_matches(state, token) {
+            return;
+        }
+
+        let previous_kind = Self::state_kind(state, now_ms);
         state.last_status = status;
         state.last_error_type = error_type.map(ToOwned::to_owned);
         state.last_error_message = error_message.map(ToOwned::to_owned);
         state.last_failure_at_ms = Some(now_ms);
         state.updated_at_ms = Some(now_ms);
-        state.half_open_probe_in_flight = false;
+        release_probe_owner(state, token);
 
         state.consecutive_failures = if previous_kind == CircuitState::HalfOpen {
             self.failure_threshold
@@ -187,7 +239,8 @@ impl RuntimeHealthBook {
         };
 
         if state.consecutive_failures >= self.failure_threshold {
-            state.open_until_ms = Some(now_ms + self.open_duration_ms);
+            state.open_until_ms = Some(now_ms.saturating_add(self.open_duration_ms));
+            advance_generation(state);
         }
     }
 
@@ -198,7 +251,7 @@ impl RuntimeHealthBook {
             available: match state_kind {
                 CircuitState::Closed => true,
                 CircuitState::Open => false,
-                CircuitState::HalfOpen => !state.half_open_probe_in_flight,
+                CircuitState::HalfOpen => state.probe_owner.is_none(),
             },
             consecutive_failures: state.consecutive_failures,
             success_count: state.success_count,
@@ -224,6 +277,77 @@ impl RuntimeHealthBook {
             None => CircuitState::Closed,
         }
     }
+}
+
+pub struct RuntimeHealthAttemptGuard {
+    book: Arc<RuntimeHealthBook>,
+    id: i64,
+    token: RuntimeHealthAttemptToken,
+    active: bool,
+}
+
+impl RuntimeHealthAttemptGuard {
+    pub fn success(mut self, status: Option<i32>, observed_latency_ms: Option<i64>, now_ms: i64) {
+        self.active = false;
+        self.book
+            .finish_success(self.id, self.token, status, observed_latency_ms, now_ms);
+    }
+
+    pub fn failure(
+        mut self,
+        status: Option<i32>,
+        error_type: Option<&str>,
+        error_message: Option<&str>,
+        now_ms: i64,
+    ) {
+        self.active = false;
+        self.book.finish_failure(
+            self.id,
+            self.token,
+            status,
+            error_type,
+            error_message,
+            now_ms,
+        );
+    }
+
+    pub fn neutral(mut self, now_ms: i64) {
+        self.active = false;
+        self.book.finish_neutral(self.id, self.token, now_ms);
+    }
+}
+
+impl Drop for RuntimeHealthAttemptGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.book
+                .finish_neutral(self.id, self.token, crate::util::now_ms());
+            self.active = false;
+        }
+    }
+}
+
+fn attempt_token_matches(state: &RuntimeHealthState, token: RuntimeHealthAttemptToken) -> bool {
+    state.generation == token.generation
+        && token
+            .probe_id
+            .is_none_or(|probe_id| state.probe_owner == Some(probe_id))
+}
+
+fn release_probe_owner(state: &mut RuntimeHealthState, token: RuntimeHealthAttemptToken) -> bool {
+    if token
+        .probe_id
+        .is_some_and(|probe_id| state.probe_owner == Some(probe_id))
+    {
+        state.probe_owner = None;
+        return true;
+    }
+    false
+}
+
+fn advance_generation(state: &mut RuntimeHealthState) {
+    state.generation = state.generation.wrapping_add(1).max(1);
+    state.probe_owner = None;
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -408,14 +532,25 @@ where
     (counts, views)
 }
 
-pub fn should_trip_endpoint(http_status: Option<i32>, error_type: Option<&str>) -> bool {
-    if error_type.is_some() {
-        return true;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_result_should_not_release_a_new_half_open_probe() {
+        let book = Arc::new(RuntimeHealthBook::new(1, 30));
+        let old_attempt = book.try_begin_attempt(7, 50).expect("old closed attempt");
+        book.try_begin_attempt(7, 51)
+            .expect("opening attempt")
+            .failure(Some(503), Some("upstream_error"), Some("failed"), 51);
+        let current_probe = book
+            .try_begin_attempt(7, 81)
+            .expect("current half-open probe");
+
+        old_attempt.success(Some(200), Some(10), 82);
+
+        assert!(!book.snapshot(7, 82).available);
+        drop(current_probe);
+        assert!(book.snapshot(7, 83).available);
     }
-
-    matches!(http_status, Some(408 | 409)) || http_status.is_some_and(|status| status >= 500)
-}
-
-pub fn should_trip_key(http_status: Option<i32>, _error_type: Option<&str>) -> bool {
-    matches!(http_status, Some(401 | 403))
 }

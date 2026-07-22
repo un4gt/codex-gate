@@ -13,6 +13,7 @@ import type {
   ModelAliasTarget,
   ModelPrice,
   ProviderModel,
+  ProviderGroup,
   ProviderSummary,
   ProviderWorkspace,
   RequestLogRow,
@@ -243,6 +244,26 @@ export async function loadProviderWorkspace(settings: ConnectionSettings): Promi
   );
 }
 
+export async function loadProviderGroups(settings: ConnectionSettings): Promise<ProviderGroup[]> {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<ProviderGroup[]>(apiBase, '/api/v1/provider-groups', adminToken);
+}
+
+export async function createProviderGroup(settings: ConnectionSettings, name: string) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<{ id: number }>(apiBase, '/api/v1/provider-groups', adminToken, { name });
+}
+
+export async function updateProviderGroup(settings: ConnectionSettings, groupId: number, name: string) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{ ok: boolean }>(apiBase, `/api/v1/provider-groups/${groupId}`, adminToken, { name });
+}
+
+export async function deleteProviderGroup(settings: ConnectionSettings, groupId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/provider-groups/${groupId}`, adminToken);
+}
+
 export async function loadModelAliases(settings: ConnectionSettings) {
   const { apiBase, adminToken } = requireConnection(settings);
   return fetchJson<ModelAlias[]>(apiBase, '/api/v1/model-aliases', adminToken);
@@ -319,6 +340,21 @@ export async function createProvider(settings: ConnectionSettings, payload: Crea
 export async function updateProvider(settings: ConnectionSettings, providerId: number, payload: UpdateProviderInput) {
   const { apiBase, adminToken } = requireConnection(settings);
   return patchJson<{ ok: boolean }>(apiBase, `/api/v1/providers/${providerId}`, adminToken, payload);
+}
+
+export async function deleteProvider(settings: ConnectionSettings, providerId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/providers/${providerId}`, adminToken);
+}
+
+export async function resetProviderCircuit(settings: ConnectionSettings, providerId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<{ ok: boolean }>(
+    apiBase,
+    `/api/v1/providers/${providerId}/circuit/reset`,
+    adminToken,
+    {},
+  );
 }
 
 export async function createEndpoint(settings: ConnectionSettings, providerId: number, payload: CreateEndpointInput) {

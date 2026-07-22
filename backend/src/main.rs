@@ -1,4 +1,5 @@
 mod admin;
+mod affinity;
 mod cache;
 mod config;
 mod crypto;
@@ -10,6 +11,7 @@ mod log_archive;
 mod metrics;
 mod openai;
 mod pricing;
+mod provider_runtime;
 mod proxy;
 mod responses_ws;
 mod runtime_settings;
@@ -258,6 +260,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.circuit_breaker_open_ms,
     ));
     let key_rotation = Arc::new(key_rotation::KeyRotationBook::new());
+    let affinity = Arc::new(affinity::AffinityBook::new(
+        config.affinity_ttl,
+        config.affinity_max_entries,
+    ));
+    let provider_runtime = Arc::new(provider_runtime::ProviderRuntimeBook::new());
+    let quota = Arc::new(provider_runtime::QuotaBook::new());
 
     let metrics = Arc::new(metrics::Metrics::new());
     let system_status = system_status::SystemStatusMonitor::new();
@@ -274,6 +282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         endpoint_health,
         upstream_key_health,
         key_rotation,
+        affinity,
+        provider_runtime,
+        quota,
         metrics,
         system_status,
         runtime_settings,

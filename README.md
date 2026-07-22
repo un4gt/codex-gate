@@ -295,6 +295,17 @@ bash scripts/run-prek-checks.sh pre-push
 | `CIRCUIT_BREAKER_OPEN_MS` | `30000` | 熔断打开时长。 |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `2000` | 上游连接超时。 |
 | `UPSTREAM_REQUEST_TIMEOUT_MS` | `120000` | 上游请求总超时。 |
+| `SESSION_AFFINITY_TTL_MS` | `1800000` | 会话到 Provider 亲和绑定的滑动 TTL（30 分钟）。 |
+| `SESSION_AFFINITY_MAX_ENTRIES` | `10000` | 单进程最多保留的会话亲和条目数。 |
+| `UPSTREAM_FIRST_EVENT_TIMEOUT_MS` | `60000` | SSE 首个有效事件到达前允许故障转移的等待上限。 |
+| `UPSTREAM_FIRST_EVENT_MAX_BYTES` | `65536` | SSE 首个有效事件预检缓冲上限。 |
+| `UPSTREAM_RATE_LIMIT_FALLBACK_COOLDOWN_MS` | `30000` | 402/429 未返回 reset 信息时的 key 冷却基准时长。 |
+
+Provider 调度先按 API Key 与 Provider 的调度组交集授权，再使用组内优先级覆盖（未设置时使用 Provider 全局优先级）。同一优先级使用权重采样加 power-of-two choices，根据并发占用与延迟 EWMA 选择。带 `session-id`、`session_id`、`x-session-id`、`thread-id`、`prompt_cache_key` 或支持的 `metadata` 会话标识的请求会保持 Provider 亲和；新增 Provider 不会让已有健康会话漂移。
+
+每个请求最多使用初始 Provider 加 3 次 Provider 切换，即最多 4 个不同 Provider；每个 Provider 默认尝试 2 次，可在管理界面单独调整。401/403 只影响 key，402/429 进入 key quota 冷却，404 会跨 Provider 重试但不累计 Provider 熔断，网络错误、408/409/425 和 5xx 才累计 Provider 熔断。SSE 只允许在首个有效事件发送给客户端之前故障转移，之后不会重放。
+
+会话亲和、Provider 并发、EWMA、熔断和 quota 冷却均为进程内内存状态：重启会清空，多副本之间不会自动共享。Provider/API Key 配置、调度组、路由和请求决策链日志仍持久化到 SQLite/Postgres。多副本部署如需全局一致亲和，应在网关前配置稳定的会话级负载分配。
 
 ### 留存与归档字段
 

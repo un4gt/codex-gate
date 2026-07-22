@@ -11,7 +11,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Failover baseline runner for little-gate.')
     parser.add_argument('--base-url', required=True)
     parser.add_argument('--admin-token', required=True)
-    parser.add_argument('--scenario', choices=['endpoint', 'key'], required=True)
+    parser.add_argument('--scenario', choices=['endpoint', 'key', 'provider'], required=True)
     parser.add_argument('--model', default='gpt-4o-mini')
     parser.add_argument('--provider-name', default='mock-provider')
     parser.add_argument('--client-key-name', default='bench-client')
@@ -59,12 +59,12 @@ def metrics_delta(before, after, key):
     return (after.get(key, 0.0) or 0.0) - (before.get(key, 0.0) or 0.0)
 
 
-def create_provider(base_url, admin_token, name, timeout):
+def create_provider(base_url, admin_token, name, timeout, priority=10):
     return request_json('POST', f'{base_url}/api/v1/providers', admin_token, {
         'name': name,
         'providerType': 'openai',
         'enabled': True,
-        'priority': 10,
+        'priority': priority,
         'weight': 1,
         'supportsIncludeUsage': True,
     }, timeout)['id']
@@ -116,10 +116,10 @@ def create_client_key(base_url, admin_token, name, timeout):
     }, timeout)
 
 
-def upsert_route(base_url, admin_token, model, provider_id, timeout):
+def upsert_route(base_url, admin_token, model, provider_ids, timeout):
     return request_json('PUT', f'{base_url}/api/v1/routes/{model}', admin_token, {
         'enabled': True,
-        'providerIds': [provider_id],
+        'providerIds': provider_ids,
     }, timeout)
 
 
@@ -170,37 +170,65 @@ def main():
     metrics_url = f'{base_url}/metrics'
     chat_url = f'{base_url}/v1/chat/completions'
 
-    provider_id = create_provider(base_url, args.admin_token, f'{args.provider_name}-{args.scenario}-{int(time.time())}', args.timeout)
-
     endpoint_a_url = args.endpoint_a_url or base_url
     endpoint_b_url = args.endpoint_b_url or endpoint_a_url
 
+    provider_ids = []
     endpoint_ids = []
     key_ids = []
+    provider_id = create_provider(
+        base_url,
+        args.admin_token,
+        f'{args.provider_name}-{args.scenario}-{int(time.time())}',
+        args.timeout,
+    )
+    provider_ids.append(provider_id)
 
     if args.scenario == 'endpoint':
         endpoint_ids.append(create_endpoint(base_url, args.admin_token, provider_id, 'endpoint-bad', endpoint_a_url, 10, 1, args.timeout))
         endpoint_ids.append(create_endpoint(base_url, args.admin_token, provider_id, 'endpoint-good', endpoint_b_url, 20, 1, args.timeout))
         key_ids.append(create_key(base_url, args.admin_token, provider_id, 'key-main', args.good_key_secret, 10, 1, args.timeout))
-    else:
+    elif args.scenario == 'key':
         endpoint_ids.append(create_endpoint(base_url, args.admin_token, provider_id, 'endpoint-main', endpoint_a_url, 10, 1, args.timeout))
         key_ids.append(create_key(base_url, args.admin_token, provider_id, 'key-bad', args.bad_key_secret, 10, 1, args.timeout))
         key_ids.append(create_key(base_url, args.admin_token, provider_id, 'key-good', args.good_key_secret, 20, 1, args.timeout))
+    else:
+        endpoint_ids.append(create_endpoint(base_url, args.admin_token, provider_id, 'provider-a-bad', endpoint_a_url, 10, 1, args.timeout))
+        key_ids.append(create_key(base_url, args.admin_token, provider_id, 'provider-a-key', args.good_key_secret, 10, 1, args.timeout))
+        provider_b_id = create_provider(
+            base_url,
+            args.admin_token,
+            f'{args.provider_name}-provider-b-{int(time.time())}',
+            args.timeout,
+            priority=20,
+        )
+        provider_ids.append(provider_b_id)
+        endpoint_ids.append(create_endpoint(base_url, args.admin_token, provider_b_id, 'provider-b-good', endpoint_b_url, 10, 1, args.timeout))
+        key_ids.append(create_key(base_url, args.admin_token, provider_b_id, 'provider-b-key', args.good_key_secret, 10, 1, args.timeout))
 
-    create_price(base_url, args.admin_token, provider_id, args.model, args.timeout)
-    upsert_route(base_url, args.admin_token, args.model, provider_id, args.timeout)
+    for current_provider_id in provider_ids:
+        create_price(base_url, args.admin_token, current_provider_id, args.model, args.timeout)
+    upsert_route(base_url, args.admin_token, args.model, provider_ids, args.timeout)
     client_key = create_client_key(base_url, args.admin_token, f'{args.client_key_name}-{args.scenario}', args.timeout)
 
     metrics_before = parse_metrics(fetch_text(metrics_url, args.timeout))
     response = proxy_request(chat_url, client_key['api_key'], args.model, args.timeout)
     time.sleep(0.4)
     metrics_after = parse_metrics(fetch_text(metrics_url, args.timeout))
-    provider = find_provider(base_url, args.admin_token, provider_id, args.timeout)
-    endpoints, keys = list_provider_children(base_url, args.admin_token, provider_id, args.timeout)
+    providers = [
+        find_provider(base_url, args.admin_token, current_provider_id, args.timeout)
+        for current_provider_id in provider_ids
+    ]
+    children = [
+        list_provider_children(base_url, args.admin_token, current_provider_id, args.timeout)
+        for current_provider_id in provider_ids
+    ]
+    endpoints = [endpoint for provider_endpoints, _ in children for endpoint in provider_endpoints]
+    keys = [key for _, provider_keys in children for key in provider_keys]
 
     output = {
         'scenario': args.scenario,
-        'provider_id': provider_id,
+        'provider_ids': provider_ids,
         'endpoint_ids': endpoint_ids,
         'key_ids': key_ids,
         'client_api_key_id': client_key['id'],
@@ -212,7 +240,14 @@ def main():
             'chat_ok_total': metrics_delta(metrics_before, metrics_after, 'little_gate_requests_total{api_format="chat_completions",result="ok"}'),
             'chat_error_total': metrics_delta(metrics_before, metrics_after, 'little_gate_requests_total{api_format="chat_completions",result="error"}'),
         },
-        'provider_health': provider.get('health'),
+        'provider_health': [
+            {
+                'provider_id': provider['id'],
+                'health': provider.get('health'),
+                'runtime': provider.get('runtime'),
+            }
+            for provider in providers
+        ],
         'endpoints': endpoints,
         'keys': keys,
     }

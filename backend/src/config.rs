@@ -25,6 +25,11 @@ pub struct Config {
     pub stats_flush_interval: Duration,
     pub upstream_connect_timeout: Duration,
     pub upstream_request_timeout: Duration,
+    pub affinity_ttl: Duration,
+    pub affinity_max_entries: usize,
+    pub stream_preflight_timeout: Duration,
+    pub stream_preflight_max_bytes: usize,
+    pub rate_limit_fallback_cooldown: Duration,
     pub request_log_retention_days: u32,
     pub stats_daily_retention_days: u32,
     pub retention_cleanup_interval: Duration,
@@ -100,6 +105,27 @@ impl Config {
                 .unwrap_or(120_000)
                 .max(1_000),
         );
+        let affinity_ttl = Duration::from_millis(
+            getenv_u64("SESSION_AFFINITY_TTL_MS")
+                .unwrap_or(30 * 60 * 1_000)
+                .max(1_000),
+        );
+        let affinity_max_entries = getenv_usize("SESSION_AFFINITY_MAX_ENTRIES")
+            .unwrap_or(10_000)
+            .max(1);
+        let stream_preflight_timeout = Duration::from_millis(
+            getenv_u64("UPSTREAM_FIRST_EVENT_TIMEOUT_MS")
+                .unwrap_or(60_000)
+                .max(1_000),
+        );
+        let stream_preflight_max_bytes = getenv_usize("UPSTREAM_FIRST_EVENT_MAX_BYTES")
+            .unwrap_or(64 * 1024)
+            .max(1_024);
+        let rate_limit_fallback_cooldown = Duration::from_millis(
+            getenv_u64("UPSTREAM_RATE_LIMIT_FALLBACK_COOLDOWN_MS")
+                .unwrap_or(30_000)
+                .max(1_000),
+        );
 
         let request_log_retention_days = getenv_u32("REQUEST_LOG_RETENTION_DAYS").unwrap_or(30);
         let stats_daily_retention_days = getenv_u32("STATS_DAILY_RETENTION_DAYS").unwrap_or(400);
@@ -140,6 +166,11 @@ impl Config {
             stats_flush_interval,
             upstream_connect_timeout,
             upstream_request_timeout,
+            affinity_ttl,
+            affinity_max_entries,
+            stream_preflight_timeout,
+            stream_preflight_max_bytes,
+            rate_limit_fallback_cooldown,
             request_log_retention_days,
             stats_daily_retention_days,
             retention_cleanup_interval,

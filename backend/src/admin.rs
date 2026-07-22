@@ -4,7 +4,7 @@ use hyper::Uri;
 use hyper::body::Bytes;
 use hyper::body::Incoming;
 use hyper::{Method, Request, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -32,6 +32,14 @@ const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const ASIA_SHANGHAI_OFFSET_MS: i64 = 8 * MILLIS_PER_HOUR;
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
 
 fn build_info() -> Value {
     serde_json::json!({
@@ -80,6 +88,11 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         (Method::GET, "/api/v1/api-keys") => return list_api_keys(req, state).await,
         (Method::POST, "/api/v1/api-keys") => return create_api_key(req, state).await,
 
+        (Method::GET, "/api/v1/provider-groups") => return list_provider_groups(req, state).await,
+        (Method::POST, "/api/v1/provider-groups") => {
+            return create_provider_group(req, state).await;
+        }
+
         (Method::GET, "/api/v1/providers") => return list_providers(req, state).await,
         (Method::POST, "/api/v1/providers") => return create_provider(req, state).await,
 
@@ -115,9 +128,23 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
             return delete_api_key(req, state).await;
         }
     }
+    if path.starts_with("/api/v1/provider-groups/") {
+        if req.method() == Method::PATCH {
+            return update_provider_group(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return delete_provider_group(req, state).await;
+        }
+    }
     if path.starts_with("/api/v1/providers/") {
+        if req.method() == Method::POST && path.ends_with("/circuit/reset") {
+            return reset_provider_circuit(req, state).await;
+        }
         if req.method() == Method::PATCH {
             return update_provider(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return delete_provider(req, state).await;
         }
         if req.method() == Method::GET && path.ends_with("/endpoints") {
             return list_provider_endpoints(req, state).await;
@@ -1140,6 +1167,178 @@ fn provider_models_sync_path(provider_type: &str) -> &'static str {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProviderGroupReq {
+    name: String,
+}
+
+fn normalize_provider_group_name(value: &str) -> Result<(String, String), &'static str> {
+    let name = value.trim();
+    if name.is_empty() {
+        return Err("group name is empty");
+    }
+    if name.chars().count() > 64 {
+        return Err("group name must be at most 64 characters");
+    }
+    let normalized = name.to_lowercase();
+    if normalized == "default" {
+        return Err("default group is reserved");
+    }
+    Ok((name.to_string(), normalized))
+}
+
+fn validate_provider_group_ids(
+    group_ids: &[i64],
+    available: &[crate::types::ProviderGroup],
+) -> Result<(), &'static str> {
+    if group_ids.is_empty() {
+        return Err("at least one provider group is required");
+    }
+    let mut unique = std::collections::HashSet::with_capacity(group_ids.len());
+    for group_id in group_ids {
+        if !unique.insert(*group_id) {
+            return Err("provider group ids must be unique");
+        }
+        if !available.iter().any(|group| group.id == *group_id) {
+            return Err("provider group not found");
+        }
+    }
+    Ok(())
+}
+
+fn default_provider_group_id(groups: &[crate::types::ProviderGroup]) -> Option<i64> {
+    groups
+        .iter()
+        .find(|group| group.is_default)
+        .map(|group| group.id)
+}
+
+async fn list_provider_groups(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    match state.db.list_provider_groups().await {
+        Ok(groups) => http::json(StatusCode::OK, &groups),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn create_provider_group(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let (_, body, _) = match http::read_json_limited::<ProviderGroupReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let (name, normalized_name) = match normalize_provider_group_name(&body.name) {
+        Ok(value) => value,
+        Err(message) => return http::json_error(StatusCode::BAD_REQUEST, message),
+    };
+    let groups = match state.db.list_provider_groups().await {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    if groups
+        .iter()
+        .any(|group| group.normalized_name == normalized_name)
+    {
+        return http::json_error(StatusCode::CONFLICT, "provider group already exists");
+    }
+    match state
+        .db
+        .insert_provider_group(&name, &normalized_name, util::now_ms())
+        .await
+    {
+        Ok(id) => http::json(StatusCode::OK, &serde_json::json!({ "id": id })),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn update_provider_group(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let Some(group_id) = parse_id_suffix(req.uri().path(), "/api/v1/provider-groups/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider group id");
+    };
+    let (_, body, _) = match http::read_json_limited::<ProviderGroupReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let (name, normalized_name) = match normalize_provider_group_name(&body.name) {
+        Ok(value) => value,
+        Err(message) => return http::json_error(StatusCode::BAD_REQUEST, message),
+    };
+    let groups = match state.db.list_provider_groups().await {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let Some(current) = groups.iter().find(|group| group.id == group_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "provider group not found");
+    };
+    if current.is_default {
+        return http::json_error(StatusCode::CONFLICT, "default group cannot be renamed");
+    }
+    if groups
+        .iter()
+        .any(|group| group.id != group_id && group.normalized_name == normalized_name)
+    {
+        return http::json_error(StatusCode::CONFLICT, "provider group already exists");
+    }
+    match state
+        .db
+        .update_provider_group(group_id, &name, &normalized_name, util::now_ms())
+        .await
+    {
+        Ok(true) => {
+            state.caches.upstream.invalidate();
+            state.caches.api_keys.invalidate_all();
+            http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+        }
+        Ok(false) => http::json_error(StatusCode::NOT_FOUND, "provider group not found"),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn delete_provider_group(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let Some(group_id) = parse_id_suffix(req.uri().path(), "/api/v1/provider-groups/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider group id");
+    };
+    let groups = match state.db.list_provider_groups().await {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let Some(current) = groups.iter().find(|group| group.id == group_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "provider group not found");
+    };
+    if current.is_default {
+        return http::json_error(StatusCode::CONFLICT, "default group cannot be deleted");
+    }
+    if current.provider_count > 0 || current.api_key_count > 0 {
+        return http::json(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "error": "provider group is still assigned",
+                "provider_count": current.provider_count,
+                "api_key_count": current.api_key_count,
+            }),
+        );
+    }
+    match state.db.delete_provider_group(group_id).await {
+        Ok(true) => http::empty(StatusCode::NO_CONTENT),
+        Ok(false) => http::json_error(StatusCode::CONFLICT, "provider group cannot be deleted"),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateApiKeyReq {
     name: String,
     enabled: Option<bool>,
@@ -1147,6 +1346,8 @@ struct CreateApiKeyReq {
     expires_at_ms: Option<i64>,
     #[serde(alias = "logEnabled")]
     log_enabled: Option<bool>,
+    #[serde(default, alias = "providerGroupIds")]
+    provider_group_ids: Option<Vec<i64>>,
 }
 
 async fn list_api_keys(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -1173,6 +1374,27 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
 
     let enabled = body.enabled.unwrap_or(true);
     let log_enabled = body.log_enabled.unwrap_or(false);
+    let available_groups = match state.db.list_provider_groups().await {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let provider_group_ids = match body.provider_group_ids {
+        Some(value) => value,
+        None => match default_provider_group_id(&available_groups) {
+            Some(group_id) => vec![group_id],
+            None => {
+                return http::json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "default provider group is missing",
+                );
+            }
+        },
+    };
+    if let Err(message) = validate_provider_group_ids(&provider_group_ids, &available_groups) {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
 
     // Generate plaintext key, store only hash.
     let api_key_plaintext = generate_api_key_plaintext();
@@ -1195,6 +1417,15 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
+    if let Err(error) = state
+        .db
+        .replace_api_key_provider_groups(id, &provider_group_ids, now_ms)
+        .await
+    {
+        let _ = state.db.delete_api_key(id).await;
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+
     state.caches.api_keys.invalidate_all();
 
     let resp = serde_json::json!({
@@ -1203,7 +1434,12 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         "name": body.name.trim(),
         "enabled": enabled,
         "expires_at_ms": body.expires_at_ms,
-        "log_enabled": log_enabled
+        "log_enabled": log_enabled,
+        "provider_groups": available_groups
+            .iter()
+            .filter(|group| provider_group_ids.contains(&group.id))
+            .map(|group| serde_json::json!({ "id": group.id, "name": group.name }))
+            .collect::<Vec<_>>()
     });
     http::json(StatusCode::OK, &resp)
 }
@@ -1212,10 +1448,16 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
 struct PatchApiKeyReq {
     name: Option<String>,
     enabled: Option<bool>,
-    #[serde(alias = "expiresAtMs")]
+    #[serde(
+        default,
+        alias = "expiresAtMs",
+        deserialize_with = "deserialize_present_option"
+    )]
     expires_at_ms: Option<Option<i64>>,
     #[serde(alias = "logEnabled")]
     log_enabled: Option<bool>,
+    #[serde(alias = "providerGroupIds")]
+    provider_group_ids: Option<Vec<i64>>,
 }
 
 async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -1248,6 +1490,17 @@ async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
     let new_enabled = patch.enabled.unwrap_or(current.enabled);
     let new_expires = patch.expires_at_ms.unwrap_or(current.expires_at_ms);
     let new_log_enabled = patch.log_enabled.unwrap_or(current.log_enabled);
+    let available_groups = match state.db.list_provider_groups().await {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    if let Some(group_ids) = patch.provider_group_ids.as_deref()
+        && let Err(message) = validate_provider_group_ids(group_ids, &available_groups)
+    {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
 
     let now_ms = util::now_ms();
     if let Err(e) = state
@@ -1263,6 +1516,15 @@ async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         .await
     {
         return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+
+    if let Some(group_ids) = patch.provider_group_ids
+        && let Err(error) = state
+            .db
+            .replace_api_key_provider_groups(id, &group_ids, now_ms)
+            .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
     state.caches.api_keys.invalidate_all();
@@ -1291,6 +1553,14 @@ async fn delete_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
 }
 
 #[derive(Debug, Deserialize)]
+struct ProviderGroupAssignmentReq {
+    #[serde(alias = "groupId")]
+    group_id: i64,
+    #[serde(alias = "priorityOverride")]
+    priority_override: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateProviderReq {
     name: String,
     #[serde(alias = "providerType")]
@@ -1306,6 +1576,76 @@ struct CreateProviderReq {
     beta_features: Vec<String>,
     #[serde(alias = "keySelectionStrategy")]
     key_selection_strategy: Option<String>,
+    #[serde(default)]
+    groups: Option<Vec<ProviderGroupAssignmentReq>>,
+    #[serde(alias = "maxAttempts")]
+    max_attempts: Option<i32>,
+    #[serde(alias = "maxConcurrency")]
+    max_concurrency: Option<i32>,
+    #[serde(alias = "circuitBreakerEnabled")]
+    circuit_breaker_enabled: Option<bool>,
+    #[serde(alias = "circuitBreakerFailureThreshold")]
+    circuit_breaker_failure_threshold: Option<i32>,
+    #[serde(alias = "circuitBreakerOpenMs")]
+    circuit_breaker_open_ms: Option<i64>,
+    #[serde(alias = "circuitBreakerHalfOpenSuccessThreshold")]
+    circuit_breaker_half_open_success_threshold: Option<i32>,
+}
+
+fn validate_provider_routing(
+    priority: Option<i32>,
+    weight: Option<i32>,
+) -> Result<(), &'static str> {
+    if priority.is_some_and(|value| value < 0) {
+        return Err("priority must be greater than or equal to 0");
+    }
+    if weight.is_some_and(|value| value < 1) {
+        return Err("weight must be greater than or equal to 1");
+    }
+    Ok(())
+}
+
+fn validate_provider_resilience(
+    max_attempts: i32,
+    max_concurrency: Option<i32>,
+    failure_threshold: i32,
+    open_ms: i64,
+    half_open_success_threshold: i32,
+) -> Result<(), &'static str> {
+    if !(1..=10).contains(&max_attempts) {
+        return Err("max_attempts must be between 1 and 10");
+    }
+    if max_concurrency.is_some_and(|value| !(1..=100_000).contains(&value)) {
+        return Err("max_concurrency must be null or between 1 and 100000");
+    }
+    if !(1..=100).contains(&failure_threshold) {
+        return Err("circuit breaker failure threshold must be between 1 and 100");
+    }
+    if !(1_000..=86_400_000).contains(&open_ms) {
+        return Err("circuit breaker open duration must be between 1000 and 86400000 ms");
+    }
+    if !(1..=20).contains(&half_open_success_threshold) {
+        return Err("half-open success threshold must be between 1 and 20");
+    }
+    Ok(())
+}
+
+fn validate_provider_group_assignments(
+    assignments: &[ProviderGroupAssignmentReq],
+    available: &[crate::types::ProviderGroup],
+) -> Result<(), &'static str> {
+    let group_ids = assignments
+        .iter()
+        .map(|assignment| assignment.group_id)
+        .collect::<Vec<_>>();
+    validate_provider_group_ids(&group_ids, available)?;
+    if assignments
+        .iter()
+        .any(|assignment| assignment.priority_override.is_some_and(|value| value < 0))
+    {
+        return Err("group priority override must be greater than or equal to 0");
+    }
+    Ok(())
 }
 
 async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -1320,6 +1660,7 @@ async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResp
     };
 
     let now_ms = util::now_ms();
+    let affinity_counts = state.affinity.binding_counts_by_provider(now_ms);
     let out = snap
         .providers
         .iter()
@@ -1341,7 +1682,20 @@ async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResp
                 &state.upstream_key_health,
                 now_ms,
             );
-            provider_to_json(provider, health)
+            let runtime = state.provider_runtime.snapshot(provider, now_ms);
+            provider_to_json(
+                provider,
+                snap.groups_by_provider
+                    .get(&provider.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                health,
+                runtime,
+                affinity_counts
+                    .get(&provider.id)
+                    .copied()
+                    .unwrap_or_default(),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -1365,6 +1719,9 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     let enabled = body.enabled.unwrap_or(true);
     let priority = body.priority.unwrap_or(100);
     let weight = body.weight.unwrap_or(1);
+    if let Err(message) = validate_provider_routing(Some(priority), Some(weight)) {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
     let supports_include_usage = body.supports_include_usage.unwrap_or(true);
     let websocket_enabled = body.websocket_enabled.unwrap_or(false);
     let beta_features = normalize_beta_features(body.beta_features);
@@ -1375,6 +1732,48 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         .trim();
     if !is_valid_key_selection_strategy(key_selection_strategy) {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid key_selection_strategy");
+    }
+    let max_attempts = body.max_attempts.unwrap_or(2);
+    let max_concurrency = body.max_concurrency;
+    let circuit_breaker_enabled = body.circuit_breaker_enabled.unwrap_or(true);
+    let circuit_breaker_failure_threshold = body.circuit_breaker_failure_threshold.unwrap_or(3);
+    let circuit_breaker_open_ms = body.circuit_breaker_open_ms.unwrap_or(30_000);
+    let circuit_breaker_half_open_success_threshold = body
+        .circuit_breaker_half_open_success_threshold
+        .unwrap_or(2);
+    if let Err(message) = validate_provider_resilience(
+        max_attempts,
+        max_concurrency,
+        circuit_breaker_failure_threshold,
+        circuit_breaker_open_ms,
+        circuit_breaker_half_open_success_threshold,
+    ) {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
+    let available_groups = match state.db.list_provider_groups().await {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let group_assignments = match body.groups {
+        Some(value) => value,
+        None => match default_provider_group_id(&available_groups) {
+            Some(group_id) => vec![ProviderGroupAssignmentReq {
+                group_id,
+                priority_override: None,
+            }],
+            None => {
+                return http::json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "default provider group is missing",
+                );
+            }
+        },
+    };
+    if let Err(message) = validate_provider_group_assignments(&group_assignments, &available_groups)
+    {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
     }
 
     let now_ms = util::now_ms();
@@ -1390,6 +1789,12 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
             websocket_enabled,
             &beta_features,
             key_selection_strategy,
+            max_attempts,
+            max_concurrency,
+            circuit_breaker_enabled,
+            circuit_breaker_failure_threshold,
+            circuit_breaker_open_ms,
+            circuit_breaker_half_open_success_threshold,
             now_ms,
         )
         .await
@@ -1397,6 +1802,19 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         Ok(id) => id,
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
+
+    let group_rows = group_assignments
+        .iter()
+        .map(|assignment| (assignment.group_id, assignment.priority_override))
+        .collect::<Vec<_>>();
+    if let Err(error) = state
+        .db
+        .replace_provider_group_memberships(id, &group_rows, now_ms)
+        .await
+    {
+        let _ = state.db.delete_upstream_provider(id).await;
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
 
     state.caches.upstream.invalidate();
     http::json(StatusCode::OK, &serde_json::json!({ "id": id }))
@@ -1418,6 +1836,23 @@ struct PatchProviderReq {
     beta_features: Option<Vec<String>>,
     #[serde(alias = "keySelectionStrategy")]
     key_selection_strategy: Option<String>,
+    groups: Option<Vec<ProviderGroupAssignmentReq>>,
+    #[serde(alias = "maxAttempts")]
+    max_attempts: Option<i32>,
+    #[serde(
+        default,
+        alias = "maxConcurrency",
+        deserialize_with = "deserialize_present_option"
+    )]
+    max_concurrency: Option<Option<i32>>,
+    #[serde(alias = "circuitBreakerEnabled")]
+    circuit_breaker_enabled: Option<bool>,
+    #[serde(alias = "circuitBreakerFailureThreshold")]
+    circuit_breaker_failure_threshold: Option<i32>,
+    #[serde(alias = "circuitBreakerOpenMs")]
+    circuit_breaker_open_ms: Option<i64>,
+    #[serde(alias = "circuitBreakerHalfOpenSuccessThreshold")]
+    circuit_breaker_half_open_success_threshold: Option<i32>,
 }
 
 async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -1435,6 +1870,9 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    if let Err(message) = validate_provider_routing(patch.priority, patch.weight) {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
 
     let providers = match state.db.list_upstream_providers().await {
         Ok(v) => v,
@@ -1484,6 +1922,49 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         }
         current.key_selection_strategy = value.to_string();
     }
+    if let Some(value) = patch.max_attempts {
+        current.max_attempts = value;
+    }
+    if let Some(value) = patch.max_concurrency {
+        current.max_concurrency = value;
+    }
+    if let Some(value) = patch.circuit_breaker_enabled {
+        current.circuit_breaker_enabled = value;
+    }
+    if let Some(value) = patch.circuit_breaker_failure_threshold {
+        current.circuit_breaker_failure_threshold = value;
+    }
+    if let Some(value) = patch.circuit_breaker_open_ms {
+        current.circuit_breaker_open_ms = value;
+    }
+    if let Some(value) = patch.circuit_breaker_half_open_success_threshold {
+        current.circuit_breaker_half_open_success_threshold = value;
+    }
+    if let Err(message) = validate_provider_resilience(
+        current.max_attempts,
+        current.max_concurrency,
+        current.circuit_breaker_failure_threshold,
+        current.circuit_breaker_open_ms,
+        current.circuit_breaker_half_open_success_threshold,
+    ) {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
+
+    let available_groups = if patch.groups.is_some() {
+        match state.db.list_provider_groups().await {
+            Ok(value) => value,
+            Err(error) => {
+                return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if let Some(assignments) = patch.groups.as_deref()
+        && let Err(message) = validate_provider_group_assignments(assignments, &available_groups)
+    {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
 
     if let Err(e) = state
         .db
@@ -1492,7 +1973,77 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     {
         return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
+    if let Some(assignments) = patch.groups {
+        let rows = assignments
+            .iter()
+            .map(|assignment| (assignment.group_id, assignment.priority_override))
+            .collect::<Vec<_>>();
+        if let Err(error) = state
+            .db
+            .replace_provider_group_memberships(provider_id, &rows, util::now_ms())
+            .await
+        {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    }
+    if !current.enabled {
+        state.affinity.purge_provider(provider_id);
+        state.provider_runtime.purge_provider(provider_id);
+    }
     state.caches.upstream.invalidate();
+    http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+}
+
+async fn delete_provider(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(provider_id) = parse_provider_id_with_suffix(path, "") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
+    };
+
+    let key_ids = state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+        .ok()
+        .and_then(|snapshot| snapshot.keys_by_provider.get(&provider_id).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|key| key.id)
+        .collect::<Vec<_>>();
+    match state.db.delete_upstream_provider(provider_id).await {
+        Ok(true) => {
+            state.caches.upstream.invalidate();
+            state.provider_runtime.purge_provider(provider_id);
+            state.affinity.purge_provider(provider_id);
+            for key_id in key_ids {
+                state.quota.purge_key(key_id);
+            }
+            http::empty(StatusCode::NO_CONTENT)
+        }
+        Ok(false) => http::json_error(StatusCode::NOT_FOUND, "provider not found"),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn reset_provider_circuit(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let path = req.uri().path();
+    let Some(provider_id) =
+        parse_provider_id_with_prefix_and_suffix(path, "/api/v1/providers/", "/circuit/reset")
+    else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
+    };
+    let providers = match state.db.list_upstream_providers().await {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    if !providers.iter().any(|provider| provider.id == provider_id) {
+        return http::json_error(StatusCode::NOT_FOUND, "provider not found");
+    }
+    state.provider_runtime.reset(provider_id);
+    state.metrics.record_provider_breaker_reset();
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
 }
 
@@ -1789,7 +2340,11 @@ async fn list_provider_keys(req: Request<Incoming>, state: SharedState) -> HttpR
             let out = items
                 .iter()
                 .map(|key| {
-                    upstream_key_to_json(key, state.upstream_key_health.snapshot(key.id, now_ms))
+                    upstream_key_to_json(
+                        key,
+                        state.upstream_key_health.snapshot(key.id, now_ms),
+                        state.quota.snapshot(key.id, now_ms),
+                    )
                 })
                 .collect::<Vec<_>>();
             http::json(StatusCode::OK, &out)
@@ -1899,6 +2454,7 @@ async fn delete_key(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     match state.db.delete_upstream_key(key_id).await {
         Ok(()) => {
             state.caches.upstream.invalidate();
+            state.quota.purge_key(key_id);
             http::empty(StatusCode::NO_CONTENT)
         }
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -2537,11 +3093,18 @@ fn api_key_to_json(k: &ApiKeyAuth) -> Value {
         "name": k.name,
         "enabled": k.enabled,
         "expires_at_ms": k.expires_at_ms,
-        "log_enabled": k.log_enabled
+        "log_enabled": k.log_enabled,
+        "provider_groups": k.provider_groups
     })
 }
 
-fn provider_to_json(p: &UpstreamProvider, health: ProviderHealthView) -> Value {
+fn provider_to_json(
+    p: &UpstreamProvider,
+    groups: &[crate::types::ProviderGroupMembership],
+    health: ProviderHealthView,
+    runtime: crate::provider_runtime::ProviderRuntimeView,
+    affinity_sessions: usize,
+) -> Value {
     serde_json::json!({
         "id": p.id,
         "name": p.name,
@@ -2553,7 +3116,16 @@ fn provider_to_json(p: &UpstreamProvider, health: ProviderHealthView) -> Value {
         "websocket_enabled": p.websocket_enabled,
         "beta_features": p.beta_features,
         "key_selection_strategy": p.key_selection_strategy,
-        "health": health
+        "groups": groups,
+        "max_attempts": p.max_attempts,
+        "max_concurrency": p.max_concurrency,
+        "circuit_breaker_enabled": p.circuit_breaker_enabled,
+        "circuit_breaker_failure_threshold": p.circuit_breaker_failure_threshold,
+        "circuit_breaker_open_ms": p.circuit_breaker_open_ms,
+        "circuit_breaker_half_open_success_threshold": p.circuit_breaker_half_open_success_threshold,
+        "health": health,
+        "runtime": runtime,
+        "affinity_sessions": affinity_sessions
     })
 }
 
@@ -2609,7 +3181,11 @@ fn endpoint_to_json(e: &UpstreamEndpoint, health: EndpointHealthView) -> Value {
     })
 }
 
-fn upstream_key_to_json(k: &UpstreamKeyMeta, health: UpstreamKeyHealthView) -> Value {
+fn upstream_key_to_json(
+    k: &UpstreamKeyMeta,
+    health: UpstreamKeyHealthView,
+    quota: crate::provider_runtime::QuotaRuntimeView,
+) -> Value {
     serde_json::json!({
         "id": k.id,
         "provider_id": k.provider_id,
@@ -2617,7 +3193,8 @@ fn upstream_key_to_json(k: &UpstreamKeyMeta, health: UpstreamKeyHealthView) -> V
         "enabled": k.enabled,
         "priority": k.priority,
         "weight": k.weight,
-        "health": health
+        "health": health,
+        "quota": quota
     })
 }
 
@@ -2772,6 +3349,64 @@ mod tests {
         assert_eq!(
             stats_window("7h", now_ms),
             Some((now_ms - 7 * MILLIS_PER_HOUR, now_ms))
+        );
+    }
+
+    #[test]
+    fn provider_routing_validation_should_accept_boundary_values() {
+        assert_eq!(validate_provider_routing(Some(0), Some(1)), Ok(()));
+    }
+
+    #[test]
+    fn provider_routing_validation_should_reject_negative_priority() {
+        assert_eq!(
+            validate_provider_routing(Some(-1), Some(1)),
+            Err("priority must be greater than or equal to 0")
+        );
+    }
+
+    #[test]
+    fn provider_routing_validation_should_reject_zero_weight() {
+        assert_eq!(
+            validate_provider_routing(Some(0), Some(0)),
+            Err("weight must be greater than or equal to 1")
+        );
+    }
+
+    #[test]
+    fn provider_routing_validation_should_ignore_omitted_patch_fields() {
+        assert_eq!(validate_provider_routing(None, None), Ok(()));
+    }
+
+    #[test]
+    fn nullable_provider_concurrency_should_distinguish_missing_and_null() {
+        let missing: PatchProviderReq =
+            serde_json::from_value(serde_json::json!({})).expect("missing field");
+        let cleared: PatchProviderReq =
+            serde_json::from_value(serde_json::json!({ "max_concurrency": null }))
+                .expect("nullable field");
+        let limited: PatchProviderReq =
+            serde_json::from_value(serde_json::json!({ "max_concurrency": 12 }))
+                .expect("numeric field");
+
+        assert_eq!(missing.max_concurrency, None);
+        assert_eq!(cleared.max_concurrency, Some(None));
+        assert_eq!(limited.max_concurrency, Some(Some(12)));
+    }
+
+    #[test]
+    fn provider_delete_path_should_accept_exact_provider_id() {
+        assert_eq!(
+            parse_provider_id_with_suffix("/api/v1/providers/42", ""),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn provider_delete_path_should_reject_nested_provider_resource() {
+        assert_eq!(
+            parse_provider_id_with_suffix("/api/v1/providers/42/endpoints", ""),
+            None
         );
     }
 }

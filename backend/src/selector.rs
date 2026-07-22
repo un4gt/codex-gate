@@ -1,9 +1,5 @@
-use std::collections::HashMap;
-
-use crate::health::{
-    CircuitState, EndpointHealthBook, UpstreamKeyHealthBook, summarize_provider_health,
-};
-use crate::types::{UpstreamEndpoint, UpstreamKey, UpstreamProvider};
+use crate::health::{CircuitState, EndpointHealthBook, UpstreamKeyHealthBook};
+use crate::types::{UpstreamEndpoint, UpstreamKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointSelectorStrategy {
@@ -19,35 +15,6 @@ impl EndpointSelectorStrategy {
             _ => None,
         }
     }
-}
-
-pub fn rank_provider_refs_with_health<'a>(
-    items: &'a [&'a UpstreamProvider],
-    keys_by_provider: &HashMap<i64, Vec<UpstreamKey>>,
-    endpoints_by_provider: &HashMap<i64, Vec<UpstreamEndpoint>>,
-    key_health: &UpstreamKeyHealthBook,
-    endpoint_health: &EndpointHealthBook,
-    now_ms: i64,
-) -> Vec<&'a UpstreamProvider> {
-    rank_by_priority_and_health(items, |provider| {
-        let keys = keys_by_provider
-            .get(&provider.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let endpoints = endpoints_by_provider
-            .get(&provider.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let summary =
-            summarize_provider_health(endpoints, keys, endpoint_health, key_health, now_ms);
-        (
-            provider.enabled,
-            provider.priority,
-            provider.weight,
-            summary.state,
-            summary.available,
-        )
-    })
 }
 
 pub fn rank_key_refs_with_health<'a>(

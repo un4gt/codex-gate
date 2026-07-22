@@ -85,6 +85,16 @@ pub struct Metrics {
     failover_endpoint_total: AtomicU64,
     failover_key_total: AtomicU64,
     failover_generic_total: AtomicU64,
+    affinity_hit_total: AtomicU64,
+    affinity_miss_total: AtomicU64,
+    affinity_migration_total: AtomicU64,
+    provider_selection_total: AtomicU64,
+    provider_switch_total: AtomicU64,
+    provider_capacity_skip_total: AtomicU64,
+    quota_cooldown_skip_total: AtomicU64,
+    provider_breaker_open_total: AtomicU64,
+    provider_breaker_probe_total: AtomicU64,
+    provider_breaker_reset_total: AtomicU64,
     chat: ApiCounters,
     responses: ApiCounters,
 }
@@ -108,6 +118,16 @@ impl Metrics {
             failover_endpoint_total: AtomicU64::new(0),
             failover_key_total: AtomicU64::new(0),
             failover_generic_total: AtomicU64::new(0),
+            affinity_hit_total: AtomicU64::new(0),
+            affinity_miss_total: AtomicU64::new(0),
+            affinity_migration_total: AtomicU64::new(0),
+            provider_selection_total: AtomicU64::new(0),
+            provider_switch_total: AtomicU64::new(0),
+            provider_capacity_skip_total: AtomicU64::new(0),
+            quota_cooldown_skip_total: AtomicU64::new(0),
+            provider_breaker_open_total: AtomicU64::new(0),
+            provider_breaker_probe_total: AtomicU64::new(0),
+            provider_breaker_reset_total: AtomicU64::new(0),
             chat: ApiCounters::default(),
             responses: ApiCounters::default(),
         }
@@ -126,6 +146,53 @@ impl Metrics {
 
     pub fn record_telemetry_dropped(&self) {
         self.telemetry_dropped_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_affinity_lookup(&self, hit: bool) {
+        let counter = if hit {
+            &self.affinity_hit_total
+        } else {
+            &self.affinity_miss_total
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_affinity_migration(&self) {
+        self.affinity_migration_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_provider_selection(&self, switched: bool) {
+        self.provider_selection_total
+            .fetch_add(1, Ordering::Relaxed);
+        if switched {
+            self.provider_switch_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_provider_capacity_skip(&self) {
+        self.provider_capacity_skip_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_quota_cooldown_skip(&self) {
+        self.quota_cooldown_skip_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_provider_breaker_open(&self) {
+        self.provider_breaker_open_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_provider_breaker_probe(&self) {
+        self.provider_breaker_probe_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_provider_breaker_reset(&self) {
+        self.provider_breaker_reset_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn live_snapshot(&self) -> MetricsLiveSnapshot {
@@ -460,6 +527,78 @@ pub async fn render_prometheus(state: &SharedState) -> String {
         "little_gate_failovers_total{{scope=\"generic\"}} {}\n",
         state.metrics.failover_generic_total.load(Ordering::Relaxed)
     ));
+
+    out.push_str("# HELP little_gate_affinity_total Session affinity lookups and migrations.\n");
+    out.push_str("# TYPE little_gate_affinity_total counter\n");
+    out.push_str(&format!(
+        "little_gate_affinity_total{{result=\"hit\"}} {}\n",
+        state.metrics.affinity_hit_total.load(Ordering::Relaxed)
+    ));
+    out.push_str(&format!(
+        "little_gate_affinity_total{{result=\"miss\"}} {}\n",
+        state.metrics.affinity_miss_total.load(Ordering::Relaxed)
+    ));
+    out.push_str(&format!(
+        "little_gate_affinity_total{{result=\"migration\"}} {}\n",
+        state
+            .metrics
+            .affinity_migration_total
+            .load(Ordering::Relaxed)
+    ));
+    out.push_str("# HELP little_gate_provider_routing_total Provider routing decisions.\n");
+    out.push_str("# TYPE little_gate_provider_routing_total counter\n");
+    for (result, value) in [
+        (
+            "selection",
+            state
+                .metrics
+                .provider_selection_total
+                .load(Ordering::Relaxed),
+        ),
+        (
+            "switch",
+            state.metrics.provider_switch_total.load(Ordering::Relaxed),
+        ),
+        (
+            "capacity_skip",
+            state
+                .metrics
+                .provider_capacity_skip_total
+                .load(Ordering::Relaxed),
+        ),
+        (
+            "quota_skip",
+            state
+                .metrics
+                .quota_cooldown_skip_total
+                .load(Ordering::Relaxed),
+        ),
+        (
+            "breaker_open",
+            state
+                .metrics
+                .provider_breaker_open_total
+                .load(Ordering::Relaxed),
+        ),
+        (
+            "breaker_probe",
+            state
+                .metrics
+                .provider_breaker_probe_total
+                .load(Ordering::Relaxed),
+        ),
+        (
+            "breaker_reset",
+            state
+                .metrics
+                .provider_breaker_reset_total
+                .load(Ordering::Relaxed),
+        ),
+    ] {
+        out.push_str(&format!(
+            "little_gate_provider_routing_total{{result=\"{result}\"}} {value}\n"
+        ));
+    }
 
     write_api_metrics(&mut out, "chat_completions", chat);
     write_api_metrics(&mut out, "responses", responses);

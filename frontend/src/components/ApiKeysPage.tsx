@@ -8,7 +8,7 @@ import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
 import { createApiKey, deleteApiKey, updateApiKey } from '../lib/api';
 import { formatCompactInteger, formatDateTime, formatDateTimeLocalInput, parseDateTimeLocalInput } from '../lib/format';
-import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, UpdateApiKeyInput } from '../lib/types';
+import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, ProviderGroup, UpdateApiKeyInput } from '../lib/types';
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -18,6 +18,9 @@ import FormControl from "@mui/material/FormControl";
 import FormHelperText from "@mui/material/FormHelperText";
 import FormLabel from "@mui/material/FormLabel";
 import InputBase from "@mui/material/InputBase";
+import ListItemText from "@mui/material/ListItemText";
+import MenuItem from "@mui/material/MenuItem";
+import Select from "@mui/material/Select";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
@@ -28,6 +31,7 @@ import Typography from "@mui/material/Typography";
 interface ApiKeysPageProps {
   settings: ConnectionSettings;
   items: ApiKeyWorkspace[];
+  groups: ProviderGroup[];
   onRefresh: (successMessage?: string) => Promise<void>;
   onMessage: (message: string) => void;
 }
@@ -59,10 +63,17 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [createGroupIds, setCreateGroupIds] = useState<number[]>([]);
+  const [editGroupIds, setEditGroupIds] = useState<number[]>([]);
   const selected = props.items.find(item => item.apiKey.id === selectedId) ?? null;
   const openCreateDrawer = () => {
     setCreated(null);
+    setCreateGroupIds(props.groups.filter(group => group.is_default).map(group => group.id));
     setCreateOpen(true);
+  };
+  const openDetails = (item: ApiKeyWorkspace) => {
+    setSelectedId(item.apiKey.id);
+    setEditGroupIds(item.apiKey.provider_groups.map(group => group.id));
   };
   const closeCreateDrawer = () => {
     setCreateOpen(false);
@@ -83,10 +94,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       name: readString(formData, 'name'),
       enabled: readBool(formData, 'enabled'),
       log_enabled: readBool(formData, 'log_enabled'),
-      expires_at_ms: parseDateTimeLocalInput(readString(formData, 'expires_at'))
+      expires_at_ms: parseDateTimeLocalInput(readString(formData, 'expires_at')),
+      provider_group_ids: createGroupIds
     };
-    if (!payload.name) {
-      props.onMessage('密钥名称不能为空。');
+    if (!payload.name || payload.provider_group_ids.length === 0) {
+      props.onMessage(!payload.name ? '密钥名称不能为空。' : '请至少选择一个调度组。');
       return;
     }
     setBusy('create');
@@ -111,10 +123,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       name: readString(formData, 'name'),
       enabled: readBool(formData, 'enabled'),
       log_enabled: readBool(formData, 'log_enabled'),
-      expires_at_ms: parseDateTimeLocalInput(readString(formData, 'expires_at'))
+      expires_at_ms: parseDateTimeLocalInput(readString(formData, 'expires_at')),
+      provider_group_ids: editGroupIds
     };
-    if (!payload.name) {
-      props.onMessage('密钥名称不能为空。');
+    if (!payload.name || editGroupIds.length === 0) {
+      props.onMessage(!payload.name ? '密钥名称不能为空。' : '请至少选择一个调度组。');
       return;
     }
     setBusy(`update-${current.apiKey.id}`);
@@ -198,6 +211,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 <TableRow>
                   <TableCell>{t("密钥")}</TableCell>
                   <TableCell>{t("状态")}</TableCell>
+                  <TableCell>{t("调度组")}</TableCell>
                   <TableCell>{t("日志")}</TableCell>
                   <TableCell>{t("到期")}</TableCell>
                   <TableCell className="text-right">{t("操作")}</TableCell>
@@ -206,7 +220,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
               <TableBody>
                 {props.items.map(item => {
               const status = keyStatus(item);
-              return <TableRow key={item.apiKey.id} className="cursor-pointer" onClick={() => setSelectedId(item.apiKey.id)}>
+              return <TableRow key={item.apiKey.id} className="cursor-pointer" onClick={() => openDetails(item)}>
                         <TableCell>
                           <Box className="flex flex-col gap-1">
                             <Box className="text-sm font-medium text-foreground" component="strong">{item.apiKey.name}</Box>
@@ -216,13 +230,16 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                         <TableCell>
                           <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                         </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {item.apiKey.provider_groups.map(group => group.name).join(', ') || '—'}
+                        </TableCell>
                         <TableCell>{t(item.apiKey.log_enabled ? '开启' : '关闭')}</TableCell>
                         <TableCell>{item.apiKey.expires_at_ms ? formatDateTime(item.apiKey.expires_at_ms) : t('不过期')}</TableCell>
                         <TableCell className="text-right">
                           <Box className="flex justify-end gap-2">
                             <Button type="button" size="sm" variant="ghost" onClick={event => {
                       event.stopPropagation();
-                      setSelectedId(item.apiKey.id);
+                      openDetails(item);
                     }}>{t("查看")}</Button>
                             <Button type="button" size="sm" variant="ghost" aria-label={item.apiKey.enabled ? t('停用密钥') : t('启用密钥')} disabled={busy === `toggle-${item.apiKey.id}`} onClick={event => {
                       event.stopPropagation();
@@ -250,6 +267,31 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
               <FormLabel>{t("到期时间")}</FormLabel>
               <InputBase name="expires_at" type="datetime-local" />
               <FormHelperText>{t("留空表示不过期。")}</FormHelperText>
+            </FormControl>
+            <FormControl>
+              <FormLabel>{t('调度组')}</FormLabel>
+              <Select
+                multiple
+                value={createGroupIds}
+                onChange={event => {
+                  const value = event.target.value;
+                  setCreateGroupIds(
+                    (typeof value === 'string' ? value.split(',') : value)
+                      .map(Number)
+                      .filter(Number.isFinite),
+                  );
+                }}
+                renderValue={selectedIds => props.groups
+                  .filter(group => selectedIds.includes(group.id))
+                  .map(group => group.name)
+                  .join(', ')}
+              >
+                {props.groups.map(group => <MenuItem key={group.id} value={group.id}>
+                    <Checkbox checked={createGroupIds.includes(group.id)} />
+                    <ListItemText primary={group.name} />
+                  </MenuItem>)}
+              </Select>
+              <FormHelperText>{t('仅路由到所选组中的上游。')}</FormHelperText>
             </FormControl>
           </Box>
           <Box className="grid gap-3 md:grid-cols-2">
@@ -309,6 +351,30 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                     <FormControl>
                       <FormLabel>{t("到期时间")}</FormLabel>
                       <InputBase name="expires_at" type="datetime-local" defaultValue={formatDateTimeLocalInput(data.apiKey.expires_at_ms)} />
+                    </FormControl>
+                    <FormControl>
+                      <FormLabel>{t('调度组')}</FormLabel>
+                      <Select
+                        multiple
+                        value={editGroupIds}
+                        onChange={event => {
+                          const value = event.target.value;
+                          setEditGroupIds(
+                            (typeof value === 'string' ? value.split(',') : value)
+                              .map(Number)
+                              .filter(Number.isFinite),
+                          );
+                        }}
+                        renderValue={selectedIds => props.groups
+                          .filter(group => selectedIds.includes(group.id))
+                          .map(group => group.name)
+                          .join(', ')}
+                      >
+                        {props.groups.map(group => <MenuItem key={group.id} value={group.id}>
+                            <Checkbox checked={editGroupIds.includes(group.id)} />
+                            <ListItemText primary={group.name} />
+                          </MenuItem>)}
+                      </Select>
                     </FormControl>
                   </Box>
 

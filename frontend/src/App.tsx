@@ -14,10 +14,10 @@ import { LogsPage } from '@/components/LogsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
-import { loadApiKeyWorkspace, loadPrices, loadModelAliases, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
+import { loadApiKeyWorkspace, loadPrices, loadModelAliases, loadProviderGroups, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
 import { formatBytes, formatCommitShort, formatCompactInteger, formatMs, formatVersionLabel } from '@/lib/format';
 import { calculateOverviewPricing, formatUsd } from '@/lib/pricing';
-import type { ApiKeyWorkspace, ConnectionSettings, ModelPrice, ModelAlias, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingsResponse, StatsOverviewResponse, StatsPeriod, SystemConfigResponse } from '@/lib/types';
+import type { ApiKeyWorkspace, ConnectionSettings, ModelPrice, ModelAlias, ProviderGroup, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingsResponse, StatsOverviewResponse, StatsPeriod, SystemConfigResponse } from '@/lib/types';
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
@@ -33,6 +33,7 @@ interface AppDataContext {
   settings: ConnectionSettings;
   providers: ProviderWorkspace[];
   modelAliases: ModelAlias[];
+  providerGroups: ProviderGroup[];
   apiKeys: ApiKeyWorkspace[];
   prices: ModelPrice[];
   systemConfig: SystemConfigResponse | null;
@@ -691,7 +692,7 @@ function UpstreamsPage(props: {
   }, [props.data.loadModelAliases, props.data.loadProviders, props.data.modelAliases.length, props.data.providers.length]);
   return <Box className="section-stack">
       <PageHeader title="上游" description="查看连接目标与健康状态。" />
-      <ProvidersPage settings={props.data.settings} items={props.data.providers} aliases={props.data.modelAliases} onRefresh={async (successMessage?: string) => {
+      <ProvidersPage settings={props.data.settings} items={props.data.providers} aliases={props.data.modelAliases} groups={props.data.providerGroups} onRefresh={async (successMessage?: string) => {
       await Promise.all([props.data.loadProviders(), props.data.loadModelAliases(successMessage)]);
     }} onMessage={props.data.onMessage} />
     </Box>;
@@ -704,7 +705,7 @@ function KeysRoutePage(props: {
       void props.data.loadApiKeys();
     }
   }, [props.data.apiKeys.length, props.data.loadApiKeys]);
-  return <ApiKeysPage settings={props.data.settings} items={props.data.apiKeys} onRefresh={props.data.loadApiKeys} onMessage={props.data.onMessage} />;
+  return <ApiKeysPage settings={props.data.settings} items={props.data.apiKeys} groups={props.data.providerGroups} onRefresh={props.data.loadApiKeys} onMessage={props.data.onMessage} />;
 }
 function LogsRoutePage(props: {
   data: AppDataContext;
@@ -735,6 +736,7 @@ function Root() {
   const [settings, setSettings] = useState<ConnectionSettings>(readSettings);
   const [providers, setProviders] = useState<ProviderWorkspace[]>([]);
   const [modelAliases, setModelAliases] = useState<ModelAlias[]>([]);
+  const [providerGroups, setProviderGroups] = useState<ProviderGroup[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKeyWorkspace[]>([]);
   const [prices, setPrices] = useState<ModelPrice[]>([]);
   const [systemConfig, setSystemConfig] = useState<SystemConfigResponse | null>(null);
@@ -747,6 +749,7 @@ function Root() {
   const clearWorkspace = useCallback(() => {
     setProviders([]);
     setModelAliases([]);
+    setProviderGroups([]);
     setApiKeys([]);
     setPrices([]);
     setSystemConfig(null);
@@ -761,11 +764,16 @@ function Root() {
     }
     setStatus('loading');
     try {
-      const providerWorkspace = await loadProviderWorkspace(current);
+      const [providerWorkspace, groups] = await Promise.all([
+        loadProviderWorkspace(current),
+        loadProviderGroups(current),
+      ]);
       setProviders(providerWorkspace);
+      setProviderGroups(groups);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
       setProviders([]);
+      setProviderGroups([]);
       setMessage(error instanceof Error ? error.message : '读取上游失败。');
     } finally {
       setStatus('ready');
@@ -797,11 +805,16 @@ function Root() {
     }
     setStatus('loading');
     try {
-      const apiKeyWorkspace = await loadApiKeyWorkspace(current);
+      const [apiKeyWorkspace, groups] = await Promise.all([
+        loadApiKeyWorkspace(current),
+        loadProviderGroups(current),
+      ]);
       setApiKeys(apiKeyWorkspace);
+      setProviderGroups(groups);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
       setApiKeys([]);
+      setProviderGroups([]);
       setMessage(error instanceof Error ? error.message : '读取密钥失败。');
     } finally {
       setStatus('ready');
@@ -891,6 +904,7 @@ function Root() {
     settings,
     providers,
     modelAliases,
+    providerGroups,
     apiKeys,
     prices,
     systemConfig,
@@ -917,6 +931,7 @@ function Root() {
     logout,
     message,
     modelAliases,
+    providerGroups,
     onAdminTokenChange,
     onApiBaseChange,
     onMessage,

@@ -40,7 +40,56 @@ export interface RequestLogRow {
   transport: 'http' | 'ws' | 'ws_native' | 'ws_http_bridge' | 'ws_setup' | string;
   parent_id: string | null;
   ws_session_id: string | null;
+  routing_trace: RoutingTrace | null;
   created_at_ms: number;
+}
+
+export interface RoutingTrace {
+  authorized_groups: Array<{ id: number; name: string }>;
+  affinity: {
+    source: string;
+    hash: string;
+    hit: boolean;
+    bound_provider_id: number | null;
+  } | null;
+  candidates: Array<{
+    provider_id: number;
+    priority: number;
+    weight: number;
+    attempt_budget: number;
+  }>;
+  attempts: Array<{
+    provider_id: number;
+    endpoint_id: number;
+    upstream_key_id: number;
+    status: number | null;
+    error_type: string | null;
+    duration_ms: number;
+  }>;
+  provider_switches: number;
+  terminal: { status: number | null; error_type: string | null; message?: string } | null;
+}
+
+export interface ProviderGroupRef {
+  id: number;
+  name: string;
+}
+
+export interface ProviderGroup {
+  id: number;
+  name: string;
+  normalized_name: string;
+  is_default: boolean;
+  provider_count: number;
+  api_key_count: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface ProviderGroupMembership {
+  group_id: number;
+  group_name: string;
+  priority_override: number | null;
 }
 
 export interface RequestLogSearchParams {
@@ -77,6 +126,7 @@ export interface ApiKeySummary {
   enabled: boolean;
   expires_at_ms: number | null;
   log_enabled: boolean;
+  provider_groups: ProviderGroupRef[];
 }
 
 export interface CreateApiKeyInput {
@@ -84,6 +134,7 @@ export interface CreateApiKeyInput {
   enabled: boolean;
   expires_at_ms: number | null;
   log_enabled: boolean;
+  provider_group_ids: number[];
 }
 
 export interface UpdateApiKeyInput {
@@ -91,6 +142,7 @@ export interface UpdateApiKeyInput {
   enabled?: boolean;
   expires_at_ms?: number | null;
   log_enabled?: boolean;
+  provider_group_ids?: number[];
 }
 
 export interface CreatedApiKey {
@@ -100,6 +152,7 @@ export interface CreatedApiKey {
   enabled: boolean;
   expires_at_ms: number | null;
   log_enabled: boolean;
+  provider_groups?: ProviderGroupRef[];
 }
 
 export interface ApiKeyWorkspace {
@@ -158,7 +211,34 @@ export interface ProviderSummary {
   websocket_enabled: boolean;
   beta_features: string[];
   key_selection_strategy: 'round_robin' | 'weighted';
+  groups: ProviderGroupMembership[];
+  max_attempts: number;
+  max_concurrency: number | null;
+  circuit_breaker_enabled: boolean;
+  circuit_breaker_failure_threshold: number;
+  circuit_breaker_open_ms: number;
+  circuit_breaker_half_open_success_threshold: number;
+  runtime?: ProviderRuntimeSummary;
+  affinity_sessions?: number;
   health?: ProviderHealthSummary;
+}
+
+export interface ProviderRuntimeSummary {
+  state: CircuitState;
+  available: boolean;
+  in_flight: number;
+  max_concurrency: number | null;
+  consecutive_failures: number;
+  success_count: number;
+  failure_count: number;
+  half_open_successes: number;
+  latency_ewma_ms: number | null;
+  open_until_ms: number | null;
+  last_status: number | null;
+  last_error_type: string | null;
+  last_error_message: string | null;
+  last_success_at_ms: number | null;
+  last_failure_at_ms: number | null;
 }
 
 export type EndpointHealthSummary = RuntimeHealthSummary;
@@ -183,6 +263,14 @@ export interface UpstreamKeyMeta {
   priority: number;
   weight: number;
   health?: UpstreamKeyHealthSummary;
+  quota?: {
+    remaining_requests: number | null;
+    remaining_tokens: number | null;
+    reset_at_ms: number | null;
+    cooldown_until_ms: number | null;
+    consecutive_rate_limits: number;
+    updated_at_ms: number | null;
+  };
 }
 
 export interface UpstreamKeyModel {
@@ -249,6 +337,13 @@ export interface CreateProviderInput {
   websocket_enabled: boolean;
   beta_features: string[];
   key_selection_strategy: 'round_robin' | 'weighted';
+  groups?: Array<{ group_id: number; priority_override: number | null }>;
+  max_attempts: number;
+  max_concurrency: number | null;
+  circuit_breaker_enabled: boolean;
+  circuit_breaker_failure_threshold: number;
+  circuit_breaker_open_ms: number;
+  circuit_breaker_half_open_success_threshold: number;
 }
 
 export interface UpdateProviderInput {
@@ -261,6 +356,13 @@ export interface UpdateProviderInput {
   websocket_enabled?: boolean;
   beta_features?: string[];
   key_selection_strategy?: 'round_robin' | 'weighted';
+  groups?: Array<{ group_id: number; priority_override: number | null }>;
+  max_attempts?: number;
+  max_concurrency?: number | null;
+  circuit_breaker_enabled?: boolean;
+  circuit_breaker_failure_threshold?: number;
+  circuit_breaker_open_ms?: number;
+  circuit_breaker_half_open_success_threshold?: number;
 }
 
 export interface CreateEndpointInput {

@@ -9,7 +9,8 @@ use crate::cache::policy::UpstreamCachePolicy;
 use crate::db::Database;
 use crate::pricing::PriceVersion;
 use crate::types::{
-    ModelAlias, ModelAliasTarget, ModelRoute, UpstreamEndpoint, UpstreamKey, UpstreamProvider,
+    ModelAlias, ModelAliasTarget, ModelRoute, ProviderGroupMembership, UpstreamEndpoint,
+    UpstreamKey, UpstreamProvider,
 };
 
 #[derive(Clone, Debug)]
@@ -17,6 +18,7 @@ pub struct UpstreamSnapshot {
     pub providers: Vec<UpstreamProvider>,
     pub keys_by_provider: HashMap<i64, Vec<UpstreamKey>>,
     pub endpoints_by_provider: HashMap<i64, Vec<UpstreamEndpoint>>,
+    pub groups_by_provider: HashMap<i64, Vec<ProviderGroupMembership>>,
     pub routes_by_model: HashMap<String, ModelRoute>,
     pub provider_models_by_provider: HashMap<i64, HashMap<String, bool>>,
     pub alias_to_provider_model: HashMap<String, ProviderModelAliasTarget>,
@@ -144,10 +146,11 @@ impl UpstreamCache {
         db: &Database,
         master_key: &str,
     ) -> Result<Arc<UpstreamSnapshot>, String> {
-        let providers = db
-            .list_upstream_providers()
-            .await
-            .map_err(|e| e.to_string())?;
+        let (providers, groups_by_provider) = tokio::try_join!(
+            db.list_upstream_providers(),
+            db.list_provider_group_memberships(),
+        )
+        .map_err(|e| e.to_string())?;
         let upstream_keys = db
             .list_upstream_keys(master_key)
             .await
@@ -289,6 +292,7 @@ impl UpstreamCache {
             providers,
             keys_by_provider,
             endpoints_by_provider,
+            groups_by_provider,
             routes_by_model,
             provider_models_by_provider,
             alias_to_provider_model,
@@ -333,6 +337,7 @@ mod tests {
             providers: Vec::new(),
             keys_by_provider: HashMap::new(),
             endpoints_by_provider: HashMap::new(),
+            groups_by_provider: HashMap::new(),
             routes_by_model: HashMap::new(),
             provider_models_by_provider: HashMap::new(),
             alias_to_provider_model: HashMap::new(),

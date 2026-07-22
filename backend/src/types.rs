@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::pricing::PriceCard;
 
@@ -9,6 +10,7 @@ pub struct ApiKeyAuth {
     pub expires_at_ms: Option<i64>,
     pub log_enabled: bool,
     pub name: String,
+    pub provider_groups: Vec<ProviderGroupRef>,
 }
 
 #[derive(Clone, Debug)]
@@ -23,6 +25,37 @@ pub struct UpstreamProvider {
     pub websocket_enabled: bool,
     pub beta_features: Vec<String>,
     pub key_selection_strategy: String,
+    pub max_attempts: i32,
+    pub max_concurrency: Option<i32>,
+    pub circuit_breaker_enabled: bool,
+    pub circuit_breaker_failure_threshold: i32,
+    pub circuit_breaker_open_ms: i64,
+    pub circuit_breaker_half_open_success_threshold: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderGroupRef {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderGroup {
+    pub id: i64,
+    pub name: String,
+    pub normalized_name: String,
+    pub is_default: bool,
+    pub provider_count: i64,
+    pub api_key_count: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderGroupMembership {
+    pub group_id: i64,
+    pub group_name: String,
+    pub priority_override: Option<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -277,5 +310,6 @@ pub struct RequestLogRow {
     pub transport: String,
     pub parent_id: Option<String>,
     pub ws_session_id: Option<String>,
+    pub routing_trace: Option<Value>,
     pub created_at_ms: i64,
 }

@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::http::{
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use crate::affinity::extract_affinity_identity;
 use crate::cache::transport_capability::{TransportCapabilityKey, WsCapability};
 use crate::http::{self, HttpResponse};
 use crate::metrics::RequestMetric;
@@ -49,6 +50,7 @@ struct ActiveUpstream {
     requested_model: String,
     resolved: ResolvedUpstream,
     transport: ActiveTransport,
+    _provider_capacity: Option<crate::provider_runtime::ProviderCapacityPermit>,
 }
 
 enum ActiveTransport {
@@ -60,6 +62,7 @@ struct WsBridgeError {
     status: StatusCode,
     error_type: &'static str,
     message: String,
+    scope: proxy::FailureScope,
 }
 
 struct TurnOutcome {
@@ -72,6 +75,7 @@ struct TurnOutcome {
     duration_ms: i64,
     usage: Usage,
     usage_observed: bool,
+    origin: proxy::OutcomeOrigin,
 }
 
 #[derive(Clone, Copy)]
@@ -92,9 +96,50 @@ impl TurnTransport {
 }
 
 enum NativeWsConnectOutcome {
-    Connected(Box<UpstreamWs>),
+    Connected(
+        Box<UpstreamWs>,
+        crate::provider_runtime::ProviderCapacityPermit,
+    ),
     Unsupported(WsBridgeError),
+    Unavailable(WsBridgeError),
     Failed(WsBridgeError),
+}
+
+enum ForwardResult {
+    Complete,
+    RetryableBeforeEvent(WsBridgeError),
+    Fatal,
+}
+
+#[derive(Default)]
+struct WsProviderBudget {
+    attempted_provider_ids: std::collections::HashSet<i64>,
+}
+
+impl WsProviderBudget {
+    fn seed(&mut self, provider_id: i64) {
+        self.attempted_provider_ids.insert(provider_id);
+    }
+
+    fn contains(&self, provider_id: i64) -> bool {
+        self.attempted_provider_ids.contains(&provider_id)
+    }
+
+    fn try_note_attempt(&mut self, provider_id: i64) -> Option<bool> {
+        if self.attempted_provider_ids.contains(&provider_id) {
+            return Some(false);
+        }
+        if self.attempted_provider_ids.len() >= proxy::MAX_DISTINCT_PROVIDERS {
+            return None;
+        }
+        let switched = !self.attempted_provider_ids.is_empty();
+        self.attempted_provider_ids.insert(provider_id);
+        Some(switched)
+    }
+
+    fn exhausted(&self) -> bool {
+        self.attempted_provider_ids.len() >= proxy::MAX_DISTINCT_PROVIDERS
+    }
 }
 
 pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -246,7 +291,7 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
         match message {
             Message::Text(text) => {
                 let text = text.to_string();
-                let mut value = match serde_json::from_str::<Value>(&text) {
+                let value = match serde_json::from_str::<Value>(&text) {
                     Ok(value) => value,
                     Err(err) => {
                         let _ = send_ws_error(
@@ -346,8 +391,14 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     continue;
                 };
 
+                let mut provider_budget = WsProviderBudget::default();
+                if let Some(selected) = active.as_ref() {
+                    provider_budget.seed(selected.resolved.provider.id);
+                }
                 if active.is_none() {
-                    match connect_selected_upstream(&ctx, &requested_model).await {
+                    match connect_selected_upstream(&ctx, &requested_model, &mut provider_budget)
+                        .await
+                    {
                         Ok(upstream) => active = Some(upstream),
                         Err(err) => {
                             record_ws_setup_failed_turn(
@@ -373,10 +424,10 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     }
                 }
 
-                let Some(active) = active.as_mut() else {
+                let Some(selected) = active.as_ref() else {
                     break;
                 };
-                if active.requested_model != requested_model {
+                if selected.requested_model != requested_model {
                     let message =
                         "a responses websocket connection can only serve one routed model";
                     record_ws_setup_failed_turn(
@@ -400,24 +451,83 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     break;
                 }
 
-                normalize_response_create(&mut value, &active.resolved.upstream_model);
-                let payload = match serde_json::to_string(&value) {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        let _ = send_ws_error(
-                            &mut downstream,
-                            StatusCode::BAD_REQUEST,
-                            "invalid_payload",
-                            &format!("failed to encode websocket payload: {err}"),
-                        )
-                        .await;
-                        continue;
-                    }
-                };
+                let original_value = value;
+                let mut turn_complete = false;
+                while active.is_some() {
+                    let Some(selected) = active.as_ref() else {
+                        break;
+                    };
+                    let mut routed_value = original_value.clone();
+                    normalize_response_create(&mut routed_value, &selected.resolved.upstream_model);
+                    let payload = match serde_json::to_string(&routed_value) {
+                        Ok(payload) => payload,
+                        Err(err) => {
+                            let _ = send_ws_error(
+                                &mut downstream,
+                                StatusCode::BAD_REQUEST,
+                                "invalid_payload",
+                                &format!("failed to encode websocket payload: {err}"),
+                            )
+                            .await;
+                            break;
+                        }
+                    };
 
-                let keep_open =
-                    forward_response_create(&ctx, &mut downstream, active, payload).await;
-                if !keep_open {
+                    let Some(active_upstream) = active.as_mut() else {
+                        break;
+                    };
+                    let result =
+                        forward_response_create(&ctx, &mut downstream, active_upstream, payload)
+                            .await;
+                    match result {
+                        ForwardResult::Complete => {
+                            turn_complete = true;
+                            break;
+                        }
+                        ForwardResult::Fatal => break,
+                        ForwardResult::RetryableBeforeEvent(err) => {
+                            let failed_provider_id = active
+                                .as_ref()
+                                .map(|item| item.resolved.provider.id)
+                                .unwrap_or_default();
+                            provider_budget.seed(failed_provider_id);
+                            active = None;
+                            if provider_budget.exhausted() {
+                                let _ = send_ws_error(
+                                    &mut downstream,
+                                    err.status,
+                                    err.error_type,
+                                    &err.message,
+                                )
+                                .await;
+                                break;
+                            }
+                            ctx.state
+                                .metrics
+                                .record_failover(crate::metrics::FailoverKind::Generic);
+                            match connect_selected_upstream(
+                                &ctx,
+                                &requested_model,
+                                &mut provider_budget,
+                            )
+                            .await
+                            {
+                                Ok(upstream) => active = Some(upstream),
+                                Err(connect_error) => {
+                                    let _ = send_ws_error(
+                                        &mut downstream,
+                                        connect_error.status,
+                                        connect_error.error_type,
+                                        &connect_error.message,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !turn_complete {
                     close_status = StatusCode::BAD_GATEWAY;
                     close_error_type = Some("websocket_turn_failed".to_string());
                     close_error_message = Some("responses websocket turn failed".to_string());
@@ -457,38 +567,90 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
 async fn connect_selected_upstream(
     ctx: &WsContext,
     requested_model: &str,
+    provider_budget: &mut WsProviderBudget,
 ) -> Result<ActiveUpstream, WsBridgeError> {
-    let plan = proxy::build_upstream_plan(&ctx.state, ApiFormat::Responses, requested_model)
-        .await
-        .map_err(|(status, message)| WsBridgeError {
-            status,
-            error_type: "upstream_resolve_failed",
-            message,
-        })?;
+    let affinity = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id);
+    let existing_affinity_binding = affinity
+        .as_ref()
+        .and_then(|identity| ctx.state.affinity.lookup(identity, util::now_ms()));
+    if affinity.is_some() {
+        ctx.state
+            .metrics
+            .record_affinity_lookup(existing_affinity_binding.is_some());
+    }
+    let mut plan = proxy::build_upstream_plan(
+        &ctx.state,
+        ApiFormat::Responses,
+        requested_model,
+        &ctx.api_key,
+        affinity.as_ref(),
+    )
+    .await
+    .map_err(|(status, message)| WsBridgeError {
+        status,
+        error_type: "upstream_resolve_failed",
+        message,
+        scope: proxy::classify_failure_scope(
+            Some(status.as_u16() as i32),
+            proxy::OutcomeOrigin::Gateway,
+        ),
+    })?;
+    let affinity_binding = proxy::apply_affinity_to_plan(
+        &ctx.state,
+        affinity.as_ref(),
+        existing_affinity_binding,
+        &mut plan,
+    );
 
     let attempts = plan
         .attempts
         .into_iter()
-        .filter(|resolved| resolved.provider.websocket_enabled)
+        .filter(|resolved| {
+            resolved.provider.websocket_enabled && !provider_budget.contains(resolved.provider.id)
+        })
         .collect::<Vec<_>>();
 
     if attempts.is_empty() {
         return Err(WsBridgeError {
             status: StatusCode::UPGRADE_REQUIRED,
             error_type: "websocket_not_supported",
-            message: "no websocket-enabled upstream target is available".to_string(),
+            message: if provider_budget.exhausted() {
+                "websocket provider failover budget exhausted".to_string()
+            } else {
+                "no websocket-enabled upstream target is available".to_string()
+            },
+            scope: proxy::FailureScope::Client,
         });
     }
 
     let mut last_error = None;
-    let total = attempts.len();
-    for (index, resolved) in attempts.into_iter().enumerate() {
+    let mut faulted_providers = std::collections::HashSet::new();
+    for (index, resolved) in attempts.iter().cloned().enumerate() {
+        let already_attempted = provider_budget.contains(resolved.provider.id);
+        let Some(switched) = provider_budget.try_note_attempt(resolved.provider.id) else {
+            break;
+        };
+        if !already_attempted {
+            ctx.state.metrics.record_provider_selection(switched);
+        }
         match connect_or_bridge_upstream(ctx, &resolved).await {
-            NativeWsConnectOutcome::Connected(ws) => {
+            NativeWsConnectOutcome::Connected(ws, permit) => {
+                confirm_ws_affinity(
+                    ctx,
+                    affinity.as_ref(),
+                    affinity_binding,
+                    resolved.provider.id,
+                    faulted_providers.contains(
+                        &affinity_binding
+                            .map(|binding| binding.provider_id)
+                            .unwrap_or_default(),
+                    ),
+                );
                 return Ok(ActiveUpstream {
                     requested_model: requested_model.to_string(),
                     resolved,
                     transport: ActiveTransport::NativeWs(ws),
+                    _provider_capacity: Some(permit),
                 });
             }
             NativeWsConnectOutcome::Unsupported(err)
@@ -504,10 +666,47 @@ async fn connect_selected_upstream(
                     requested_model: requested_model.to_string(),
                     resolved,
                     transport: ActiveTransport::HttpBridge,
+                    _provider_capacity: None,
                 });
             }
-            NativeWsConnectOutcome::Unsupported(err) | NativeWsConnectOutcome::Failed(err) => {
-                if index + 1 < total {
+            NativeWsConnectOutcome::Unsupported(err) => {
+                if index + 1 < attempts.len() {
+                    ctx.state
+                        .metrics
+                        .record_failover(crate::metrics::FailoverKind::Endpoint);
+                }
+                last_error = Some(err);
+            }
+            NativeWsConnectOutcome::Unavailable(err) => {
+                if index + 1 < attempts.len() {
+                    ctx.state
+                        .metrics
+                        .record_failover(crate::metrics::FailoverKind::Generic);
+                }
+                last_error = Some(err);
+            }
+            NativeWsConnectOutcome::Failed(err) => {
+                let has_same_provider = attempts[index + 1..]
+                    .iter()
+                    .any(|attempt| attempt.provider.id == resolved.provider.id);
+                if !has_same_provider {
+                    if err.scope.should_migrate_affinity() {
+                        faulted_providers.insert(resolved.provider.id);
+                    }
+                    if err.scope.should_avoid_affinity_immediately()
+                        && let Some(identity) = affinity.as_ref()
+                    {
+                        ctx.state.affinity.mark_provider_failed(
+                            identity,
+                            resolved.provider.id,
+                            util::now_ms(),
+                            std::time::Duration::from_millis(
+                                resolved.provider.circuit_breaker_open_ms.max(1) as u64,
+                            ),
+                        );
+                    }
+                }
+                if index + 1 < attempts.len() {
                     ctx.state
                         .metrics
                         .record_failover(crate::metrics::FailoverKind::Endpoint);
@@ -521,22 +720,40 @@ async fn connect_selected_upstream(
         status: StatusCode::SERVICE_UNAVAILABLE,
         error_type: "upstream_retry_exhausted",
         message: "no websocket upstream target could be reserved".to_string(),
+        scope: proxy::FailureScope::Provider,
     }))
+}
+
+fn confirm_ws_affinity(
+    ctx: &WsContext,
+    identity: Option<&crate::affinity::AffinityIdentity>,
+    binding: Option<crate::affinity::AffinityBinding>,
+    provider_id: i64,
+    migrate: bool,
+) {
+    let (Some(identity), Some(binding)) = (identity, binding) else {
+        return;
+    };
+    let now_ms = util::now_ms();
+    if binding.provider_id == provider_id {
+        if binding.confirmed {
+            let _ = ctx
+                .state
+                .affinity
+                .refresh_if_provider(identity, provider_id, now_ms);
+        } else {
+            let _ = ctx.state.affinity.confirm(identity, binding, now_ms);
+        }
+    } else if migrate {
+        ctx.state.affinity.migrate(identity, provider_id, now_ms);
+        ctx.state.metrics.record_affinity_migration();
+    }
 }
 
 async fn connect_or_bridge_upstream(
     ctx: &WsContext,
     resolved: &ResolvedUpstream,
 ) -> NativeWsConnectOutcome {
-    if !proxy::reserve_attempt(&ctx.state, resolved, util::now_ms()) {
-        return NativeWsConnectOutcome::Failed(WsBridgeError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            error_type: "upstream_retry_exhausted",
-            message: "websocket upstream target could not be reserved".to_string(),
-        });
-    }
-    ctx.state.metrics.record_upstream_attempt();
-
     let key = TransportCapabilityKey {
         provider_id: resolved.provider.id,
         endpoint_id: resolved.endpoint.id,
@@ -548,13 +765,23 @@ async fn connect_or_bridge_upstream(
         .get(key, util::now_ms())
         == Some(WsCapability::NativeUnsupported)
     {
-        release_reserved_attempt(ctx, resolved);
         return NativeWsConnectOutcome::Unsupported(WsBridgeError {
             status: StatusCode::UPGRADE_REQUIRED,
             error_type: "upstream_websocket_capability_cached",
             message: "upstream websocket is cached as unsupported".to_string(),
+            scope: proxy::FailureScope::Client,
         });
     }
+
+    let Ok(reservation) = proxy::reserve_ws_connection(&ctx.state, resolved, util::now_ms()) else {
+        return NativeWsConnectOutcome::Unavailable(WsBridgeError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            error_type: "upstream_retry_exhausted",
+            message: "websocket upstream target could not be reserved".to_string(),
+            scope: proxy::FailureScope::Provider,
+        });
+    };
+    ctx.state.metrics.record_upstream_attempt();
 
     if ctx
         .state
@@ -565,7 +792,7 @@ async fn connect_or_bridge_upstream(
     {
         // A recent native-WS success lets this request probe immediately instead of
         // serializing all healthy connects behind the single-flight lock.
-        return connect_upstream_ws_once(ctx, resolved, key).await;
+        return connect_upstream_ws_once(ctx, resolved, key, reservation).await;
     }
 
     let probe_lock = ctx.state.caches.transport_capability.probe_lock(key);
@@ -577,50 +804,47 @@ async fn connect_or_bridge_upstream(
         .get(key, util::now_ms())
     {
         Some(WsCapability::NativeUnsupported) => {
-            release_reserved_attempt(ctx, resolved);
+            reservation.neutral();
             return NativeWsConnectOutcome::Unsupported(WsBridgeError {
                 status: StatusCode::UPGRADE_REQUIRED,
                 error_type: "upstream_websocket_capability_cached",
                 message: "upstream websocket is cached as unsupported".to_string(),
+                scope: proxy::FailureScope::Client,
             });
         }
         Some(WsCapability::NativeSupported) => {
-            return connect_upstream_ws_once(ctx, resolved, key).await;
+            return connect_upstream_ws_once(ctx, resolved, key, reservation).await;
         }
         None => {}
     }
 
-    connect_upstream_ws_once(ctx, resolved, key).await
+    connect_upstream_ws_once(ctx, resolved, key, reservation).await
 }
 
 async fn connect_upstream_ws_once(
     ctx: &WsContext,
     resolved: &ResolvedUpstream,
     key: TransportCapabilityKey,
+    reservation: proxy::UpstreamAttemptReservation,
 ) -> NativeWsConnectOutcome {
     let start = Instant::now();
     let ws_url = match build_upstream_ws_url(&resolved.endpoint.base_url) {
         Ok(ws_url) => ws_url,
         Err(message) => {
-            proxy::record_pre_stream_outcome(
-                &ctx.state,
-                resolved,
-                Some(StatusCode::BAD_REQUEST.as_u16() as i32),
-                Some("invalid_upstream_uri"),
-                Some(&message),
-                Some(start.elapsed().as_millis() as i64),
+            reservation.finish(
+                proxy::AttemptOutcome::local_provider(
+                    Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                    "invalid_upstream_uri",
+                    &message,
+                    Some(start.elapsed().as_millis() as i64),
+                ),
+                &ctx.state.metrics,
             );
-            let now_ms = util::now_ms();
-            ctx.state
-                .endpoint_health
-                .release_probe(resolved.endpoint.id, now_ms);
-            ctx.state
-                .upstream_key_health
-                .release_probe(resolved.key.id, now_ms);
             return NativeWsConnectOutcome::Failed(WsBridgeError {
                 status: StatusCode::BAD_REQUEST,
                 error_type: "invalid_upstream_uri",
                 message,
+                scope: proxy::FailureScope::Provider,
             });
         }
     };
@@ -632,47 +856,38 @@ async fn connect_upstream_ws_once(
                 .caches
                 .transport_capability
                 .mark_native_supported(key, util::now_ms());
-            proxy::record_pre_stream_outcome(
-                &ctx.state,
-                resolved,
-                Some(StatusCode::SWITCHING_PROTOCOLS.as_u16() as i32),
-                None,
-                None,
-                Some(start.elapsed().as_millis() as i64),
-            );
-            NativeWsConnectOutcome::Connected(Box::new(ws))
+            let Some(capacity) = reservation.into_capacity() else {
+                return NativeWsConnectOutcome::Unavailable(WsBridgeError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_type: "provider_capacity_unavailable",
+                    message: "websocket provider capacity was released during connect".to_string(),
+                    scope: proxy::FailureScope::Provider,
+                });
+            };
+            NativeWsConnectOutcome::Connected(Box::new(ws), capacity)
         }
         Err(err) => {
             if is_deterministic_ws_unsupported(err.status) {
-                release_reserved_attempt(ctx, resolved);
+                reservation.neutral();
                 ctx.state
                     .caches
                     .transport_capability
                     .mark_native_unsupported(key, util::now_ms());
                 NativeWsConnectOutcome::Unsupported(err)
             } else {
-                proxy::record_pre_stream_outcome(
-                    &ctx.state,
-                    resolved,
-                    Some(err.status.as_u16() as i32),
-                    Some(err.error_type),
-                    Some(&err.message),
-                    Some(start.elapsed().as_millis() as i64),
+                reservation.finish(
+                    proxy::AttemptOutcome::upstream_response(
+                        err.status.as_u16() as i32,
+                        Some(err.error_type),
+                        Some(&err.message),
+                        Some(start.elapsed().as_millis() as i64),
+                    ),
+                    &ctx.state.metrics,
                 );
                 NativeWsConnectOutcome::Failed(err)
             }
         }
     }
-}
-
-fn release_reserved_attempt(ctx: &WsContext, resolved: &ResolvedUpstream) {
-    let now_ms = util::now_ms();
-    ctx.state
-        .endpoint_health
-        .release_probe(resolved.endpoint.id, now_ms);
-    ctx.state
-        .upstream_key_health
-        .release_probe(resolved.key.id, now_ms);
 }
 
 fn is_deterministic_ws_unsupported(status: StatusCode) -> bool {
@@ -702,6 +917,7 @@ async fn connect_upstream_ws(
         status: StatusCode::BAD_REQUEST,
         error_type: "invalid_upstream_uri",
         message: err.to_string(),
+        scope: proxy::FailureScope::Provider,
     })?;
     for (name, value) in headers {
         let name =
@@ -709,11 +925,13 @@ async fn connect_upstream_ws(
                 status: StatusCode::BAD_REQUEST,
                 error_type: "invalid_upstream_header",
                 message: err.to_string(),
+                scope: proxy::FailureScope::Provider,
             })?;
         let value = WsHeaderValue::from_bytes(value.as_bytes()).map_err(|err| WsBridgeError {
             status: StatusCode::BAD_REQUEST,
             error_type: "invalid_upstream_header",
             message: err.to_string(),
+            scope: proxy::FailureScope::Provider,
         })?;
         request.headers_mut().append(name, value);
     }
@@ -730,6 +948,7 @@ async fn connect_upstream_ws(
             "upstream websocket connect timeout after {:?}",
             state.config.upstream_connect_timeout
         ),
+        scope: proxy::FailureScope::Provider,
     })?;
 
     connected
@@ -746,17 +965,23 @@ fn map_ws_connect_error(err: WsError) -> WsBridgeError {
                 status,
                 error_type: "upstream_websocket_http_error",
                 message: format!("upstream websocket handshake failed with status {status}"),
+                scope: proxy::classify_failure_scope(
+                    Some(status.as_u16() as i32),
+                    proxy::OutcomeOrigin::UpstreamResponse,
+                ),
             }
         }
         WsError::Io(err) => WsBridgeError {
             status: StatusCode::BAD_GATEWAY,
             error_type: "upstream_websocket_io_error",
             message: err.to_string(),
+            scope: proxy::FailureScope::Provider,
         },
         other => WsBridgeError {
             status: StatusCode::BAD_GATEWAY,
             error_type: "upstream_websocket_error",
             message: other.to_string(),
+            scope: proxy::FailureScope::Provider,
         },
     }
 }
@@ -766,7 +991,7 @@ async fn forward_response_create<D, E>(
     downstream: &mut D,
     active: &mut ActiveUpstream,
     payload: String,
-) -> bool
+) -> ForwardResult
 where
     D: Sink<Message, Error = E> + Unpin,
     E: Display,
@@ -822,14 +1047,66 @@ async fn forward_native_response_create<D, E>(
     payload: String,
     turn_start: Instant,
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
-) -> bool
+) -> ForwardResult
 where
     D: Sink<Message, Error = E> + Unpin,
     E: Display,
 {
+    let reservation = match proxy::reserve_ws_turn(&ctx.state, resolved, util::now_ms()) {
+        Ok(reservation) => reservation,
+        Err(proxy::AttemptReservationError::Quota) => {
+            let message = "upstream request quota is unavailable".to_string();
+            let outcome = TurnOutcome::error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "upstream_quota_unavailable",
+                message.clone(),
+                turn_start,
+            );
+            record_turn(
+                ctx,
+                resolved,
+                requested_model,
+                TurnTransport::NativeWs,
+                &outcome,
+                telemetry_permit,
+                None,
+            );
+            return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                status: outcome.status,
+                error_type: "upstream_quota_unavailable",
+                message,
+                scope: proxy::FailureScope::Quota,
+            });
+        }
+        Err(_) => {
+            let message = "native websocket upstream target could not be reserved".to_string();
+            let outcome = TurnOutcome::error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_capacity_unavailable",
+                message.clone(),
+                turn_start,
+            );
+            record_turn(
+                ctx,
+                resolved,
+                requested_model,
+                TurnTransport::NativeWs,
+                &outcome,
+                telemetry_permit,
+                None,
+            );
+            return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                status: outcome.status,
+                error_type: "provider_capacity_unavailable",
+                message,
+                scope: proxy::FailureScope::Provider,
+            });
+        }
+    };
+    ctx.state.metrics.record_upstream_attempt();
     if let Err(err) = ws.send(Message::Text(payload.into())).await {
         let message = format!("failed to send websocket request upstream: {err}");
-        let outcome = TurnOutcome::error(
+        let outcome = TurnOutcome::provider_error(
             StatusCode::BAD_GATEWAY,
             "upstream_websocket_write_error",
             message.clone(),
@@ -842,15 +1119,14 @@ where
             TurnTransport::NativeWs,
             &outcome,
             telemetry_permit,
+            Some(reservation),
         );
-        let _ = send_ws_error(
-            downstream,
-            outcome.status,
-            outcome.error_type.as_deref().unwrap_or("upstream_error"),
-            &message,
-        )
-        .await;
-        return false;
+        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+            status: outcome.status,
+            error_type: "upstream_websocket_write_error",
+            message,
+            scope: proxy::FailureScope::Provider,
+        });
     }
 
     let t_stream_ms = Some(turn_start.elapsed().as_millis() as i64);
@@ -858,6 +1134,7 @@ where
     let mut first_token_ms = None;
     let mut usage = Usage::default();
     let mut usage_observed = false;
+    let mut emitted_event = false;
 
     loop {
         let polled =
@@ -884,7 +1161,16 @@ where
                     TurnTransport::NativeWs,
                     &outcome,
                     telemetry_permit,
+                    Some(reservation),
                 );
+                if !emitted_event {
+                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                        status: outcome.status,
+                        error_type: "upstream_websocket_read_error",
+                        message: error_message,
+                        scope: proxy::FailureScope::Provider,
+                    });
+                }
                 let _ = send_ws_error(
                     downstream,
                     outcome.status,
@@ -892,7 +1178,7 @@ where
                     &error_message,
                 )
                 .await;
-                return false;
+                return ForwardResult::Fatal;
             }
             Ok(None) => {
                 let error_message =
@@ -915,7 +1201,16 @@ where
                     TurnTransport::NativeWs,
                     &outcome,
                     telemetry_permit,
+                    Some(reservation),
                 );
+                if !emitted_event {
+                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                        status: outcome.status,
+                        error_type: "upstream_websocket_closed",
+                        message: error_message,
+                        scope: proxy::FailureScope::Provider,
+                    });
+                }
                 let _ = send_ws_error(
                     downstream,
                     outcome.status,
@@ -923,7 +1218,7 @@ where
                     &error_message,
                 )
                 .await;
-                return false;
+                return ForwardResult::Fatal;
             }
             Err(_) => {
                 let error_message = format!(
@@ -948,7 +1243,16 @@ where
                     TurnTransport::NativeWs,
                     &outcome,
                     telemetry_permit,
+                    Some(reservation),
                 );
+                if !emitted_event {
+                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                        status: outcome.status,
+                        error_type: "upstream_timeout",
+                        message: error_message,
+                        scope: proxy::FailureScope::Provider,
+                    });
+                }
                 let _ = send_ws_error(
                     downstream,
                     outcome.status,
@@ -956,7 +1260,7 @@ where
                     &error_message,
                 )
                 .await;
-                return false;
+                return ForwardResult::Fatal;
             }
         };
 
@@ -979,10 +1283,6 @@ where
                     usage_observed = true;
                 }
 
-                if downstream.send(Message::Text(text)).await.is_err() {
-                    return false;
-                }
-
                 if let Some(event) = event.as_ref()
                     && is_terminal_response_event(event)
                 {
@@ -998,6 +1298,42 @@ where
                         usage_observed,
                         turn_start,
                     );
+                    let scope = proxy::classify_failure_scope(
+                        Some(status.as_u16() as i32),
+                        proxy::OutcomeOrigin::UpstreamEvent,
+                    );
+                    if scope == proxy::FailureScope::Quota {
+                        ctx.state.quota.observe_response(
+                            resolved.key.id,
+                            status.as_u16() as i32,
+                            &HeaderMap::new(),
+                            util::now_ms(),
+                            ctx.state.config.rate_limit_fallback_cooldown,
+                        );
+                    }
+                    if should_retry_terminal_before_event(event, emitted_event) {
+                        let message = outcome.error_message.clone().unwrap_or_else(|| {
+                            "upstream websocket returned a retryable terminal event".to_string()
+                        });
+                        record_turn(
+                            ctx,
+                            resolved,
+                            requested_model,
+                            TurnTransport::NativeWs,
+                            &outcome,
+                            telemetry_permit,
+                            Some(reservation),
+                        );
+                        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                            status,
+                            error_type: "upstream_websocket_terminal_error",
+                            message,
+                            scope,
+                        });
+                    }
+                    if downstream.send(Message::Text(text)).await.is_err() {
+                        return ForwardResult::Fatal;
+                    }
                     record_turn(
                         ctx,
                         resolved,
@@ -1005,21 +1341,51 @@ where
                         TurnTransport::NativeWs,
                         &outcome,
                         telemetry_permit,
+                        Some(reservation),
                     );
-                    return true;
+                    return ForwardResult::Complete;
                 }
+                if downstream.send(Message::Text(text)).await.is_err() {
+                    return ForwardResult::Fatal;
+                }
+                emitted_event = true;
             }
             Message::Binary(bytes) => {
                 if first_byte_ms.is_none() {
                     first_byte_ms = Some(turn_start.elapsed().as_millis() as i64);
                 }
                 if downstream.send(Message::Binary(bytes)).await.is_err() {
-                    return false;
+                    return ForwardResult::Fatal;
                 }
+                emitted_event = true;
             }
             Message::Ping(payload) => {
                 if ws.send(Message::Pong(payload)).await.is_err() {
-                    return false;
+                    let message = "failed to send websocket pong upstream".to_string();
+                    let outcome = TurnOutcome::provider_error(
+                        StatusCode::BAD_GATEWAY,
+                        "upstream_websocket_write_error",
+                        message.clone(),
+                        turn_start,
+                    );
+                    record_turn(
+                        ctx,
+                        resolved,
+                        requested_model,
+                        TurnTransport::NativeWs,
+                        &outcome,
+                        telemetry_permit,
+                        Some(reservation),
+                    );
+                    if !emitted_event {
+                        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                            status: StatusCode::BAD_GATEWAY,
+                            error_type: "upstream_websocket_write_error",
+                            message,
+                            scope: proxy::FailureScope::Provider,
+                        });
+                    }
+                    return ForwardResult::Fatal;
                 }
             }
             Message::Pong(_) => {}
@@ -1044,9 +1410,21 @@ where
                     TurnTransport::NativeWs,
                     &outcome,
                     telemetry_permit,
+                    Some(reservation),
                 );
+                if !emitted_event {
+                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                        status: outcome.status,
+                        error_type: "upstream_websocket_closed",
+                        message: outcome
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| "upstream websocket closed".to_string()),
+                        scope: proxy::FailureScope::Provider,
+                    });
+                }
                 let _ = downstream.send(Message::Close(frame)).await;
-                return false;
+                return ForwardResult::Fatal;
             }
             Message::Frame(_) => {}
         }
@@ -1061,7 +1439,7 @@ async fn forward_http_bridge_response_create<D, E>(
     payload: String,
     turn_start: Instant,
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
-) -> bool
+) -> ForwardResult
 where
     D: Sink<Message, Error = E> + Unpin,
     E: Display,
@@ -1083,9 +1461,10 @@ where
                 TurnTransport::HttpBridge,
                 &outcome,
                 telemetry_permit,
+                None,
             );
             let _ = send_ws_error(downstream, outcome.status, "invalid_payload", &message).await;
-            return false;
+            return ForwardResult::Fatal;
         }
     };
     if let Some(root) = body_value.as_object_mut() {
@@ -1109,16 +1488,70 @@ where
                 TurnTransport::HttpBridge,
                 &outcome,
                 telemetry_permit,
+                None,
             );
             let _ = send_ws_error(downstream, outcome.status, "invalid_payload", &message).await;
-            return false;
+            return ForwardResult::Fatal;
         }
     };
+
+    let reservation = match proxy::reserve_attempt(&ctx.state, resolved, util::now_ms()) {
+        Ok(reservation) => reservation,
+        Err(proxy::AttemptReservationError::Quota) => {
+            let message = "upstream request quota is unavailable".to_string();
+            let outcome = TurnOutcome::error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "upstream_quota_unavailable",
+                message.clone(),
+                turn_start,
+            );
+            record_turn(
+                ctx,
+                resolved,
+                requested_model,
+                TurnTransport::HttpBridge,
+                &outcome,
+                telemetry_permit,
+                None,
+            );
+            return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                status: outcome.status,
+                error_type: "upstream_quota_unavailable",
+                message,
+                scope: proxy::FailureScope::Quota,
+            });
+        }
+        Err(_) => {
+            let message = "HTTP bridge upstream target could not be reserved".to_string();
+            let outcome = TurnOutcome::error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "provider_capacity_unavailable",
+                message.clone(),
+                turn_start,
+            );
+            record_turn(
+                ctx,
+                resolved,
+                requested_model,
+                TurnTransport::HttpBridge,
+                &outcome,
+                telemetry_permit,
+                None,
+            );
+            return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                status: outcome.status,
+                error_type: "provider_capacity_unavailable",
+                message,
+                scope: proxy::FailureScope::Provider,
+            });
+        }
+    };
+    ctx.state.metrics.record_upstream_attempt();
 
     let upstream_uri = match build_upstream_http_responses_uri(&resolved.endpoint.base_url) {
         Ok(uri) => uri,
         Err(message) => {
-            let outcome = TurnOutcome::error(
+            let outcome = TurnOutcome::provider_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_upstream_uri",
                 message.clone(),
@@ -1131,10 +1564,14 @@ where
                 TurnTransport::HttpBridge,
                 &outcome,
                 telemetry_permit,
+                Some(reservation),
             );
-            let _ =
-                send_ws_error(downstream, outcome.status, "invalid_upstream_uri", &message).await;
-            return false;
+            return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                status: outcome.status,
+                error_type: "invalid_upstream_uri",
+                message,
+                scope: proxy::FailureScope::Provider,
+            });
         }
     };
 
@@ -1155,7 +1592,8 @@ where
         Ok(response) => response,
         Err(error) => {
             let (status, error_type, message) = proxy::dispatch_error_to_http(error, &ctx.state);
-            let outcome = TurnOutcome::error(status, error_type, message.clone(), turn_start);
+            let outcome =
+                TurnOutcome::provider_error(status, error_type, message.clone(), turn_start);
             record_turn(
                 ctx,
                 resolved,
@@ -1163,15 +1601,54 @@ where
                 TurnTransport::HttpBridge,
                 &outcome,
                 telemetry_permit,
+                Some(reservation),
             );
-            let _ = send_ws_error(downstream, outcome.status, error_type, &message).await;
-            return false;
+            return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                status: outcome.status,
+                error_type,
+                message,
+                scope: proxy::FailureScope::Provider,
+            });
         }
     };
 
     let t_stream_ms = Some(turn_start.elapsed().as_millis() as i64);
     let status = upstream_resp.status();
     let status_i32 = status.as_u16() as i32;
+    ctx.state.quota.observe_response(
+        resolved.key.id,
+        status_i32,
+        upstream_resp.headers(),
+        util::now_ms(),
+        ctx.state.config.rate_limit_fallback_cooldown,
+    );
+    if proxy::should_retry_response_status(status_i32) {
+        let message = format!("retryable upstream HTTP bridge status {status_i32}");
+        let outcome = TurnOutcome::upstream_response_error(
+            status,
+            "upstream_retry_status",
+            message.clone(),
+            turn_start,
+        );
+        record_turn(
+            ctx,
+            resolved,
+            requested_model,
+            TurnTransport::HttpBridge,
+            &outcome,
+            telemetry_permit,
+            Some(reservation),
+        );
+        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+            status,
+            error_type: "upstream_retry_status",
+            message,
+            scope: proxy::classify_failure_scope(
+                Some(status_i32),
+                proxy::OutcomeOrigin::UpstreamResponse,
+            ),
+        });
+    }
     let (parts, mut body) = upstream_resp.into_parts();
     let is_sse = parts
         .headers
@@ -1187,6 +1664,7 @@ where
     let mut terminal: Option<(StatusCode, Option<String>, Option<String>)> = None;
     let mut sse = SseToWsParser::new();
     let mut capture = BytesMut::new();
+    let mut emitted_event = false;
 
     loop {
         let polled =
@@ -1213,10 +1691,20 @@ where
                     TurnTransport::HttpBridge,
                     &outcome,
                     telemetry_permit,
+                    Some(reservation),
                 );
-                let _ = send_ws_error(downstream, outcome.status, "upstream_body_error", &message)
-                    .await;
-                return false;
+                if emitted_event {
+                    let _ =
+                        send_ws_error(downstream, outcome.status, "upstream_body_error", &message)
+                            .await;
+                    return ForwardResult::Fatal;
+                }
+                return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                    status: outcome.status,
+                    error_type: "upstream_body_error",
+                    message,
+                    scope: proxy::FailureScope::Provider,
+                });
             }
             Ok(None) => break,
             Err(_) => {
@@ -1242,10 +1730,19 @@ where
                     TurnTransport::HttpBridge,
                     &outcome,
                     telemetry_permit,
+                    Some(reservation),
                 );
-                let _ =
-                    send_ws_error(downstream, outcome.status, "upstream_timeout", &message).await;
-                return false;
+                if emitted_event {
+                    let _ = send_ws_error(downstream, outcome.status, "upstream_timeout", &message)
+                        .await;
+                    return ForwardResult::Fatal;
+                }
+                return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                    status: outcome.status,
+                    error_type: "upstream_timeout",
+                    message,
+                    scope: proxy::FailureScope::Provider,
+                });
             }
         };
 
@@ -1259,6 +1756,44 @@ where
         if is_sse {
             let events = sse.push_bytes(data);
             for event in events {
+                if !emitted_event && is_terminal_response_event(&event) {
+                    let (event_status, _event_error_type, event_error_message) =
+                        terminal_status(&event);
+                    let scope = proxy::classify_failure_scope(
+                        Some(event_status.as_u16() as i32),
+                        proxy::OutcomeOrigin::UpstreamEvent,
+                    );
+                    if should_retry_terminal_before_event(&event, emitted_event) {
+                        let message = event_error_message
+                            .unwrap_or_else(|| "upstream SSE returned an error event".to_string());
+                        let outcome = TurnOutcome::from_parts(
+                            event_status,
+                            Some("upstream_sse_error_event".to_string()),
+                            Some(message.clone()),
+                            t_stream_ms,
+                            first_byte_ms,
+                            first_token_ms,
+                            usage,
+                            usage_observed,
+                            turn_start,
+                        );
+                        record_turn(
+                            ctx,
+                            resolved,
+                            requested_model,
+                            TurnTransport::HttpBridge,
+                            &outcome,
+                            telemetry_permit,
+                            Some(reservation),
+                        );
+                        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                            status: outcome.status,
+                            error_type: "upstream_sse_error_event",
+                            message,
+                            scope,
+                        });
+                    }
+                }
                 if first_token_ms.is_none() && is_responses_delta_event(&event) {
                     first_token_ms = Some(turn_start.elapsed().as_millis() as i64);
                 }
@@ -1271,8 +1806,9 @@ where
                     .await
                     .is_err()
                 {
-                    return false;
+                    return ForwardResult::Fatal;
                 }
+                emitted_event = true;
                 if is_terminal_response_event(&event) {
                     terminal = Some(terminal_status(&event));
                 }
@@ -1284,13 +1820,52 @@ where
 
     if is_sse {
         for event in sse.finish() {
+            if !emitted_event && is_terminal_response_event(&event) {
+                let (event_status, _event_error_type, event_error_message) =
+                    terminal_status(&event);
+                let scope = proxy::classify_failure_scope(
+                    Some(event_status.as_u16() as i32),
+                    proxy::OutcomeOrigin::UpstreamEvent,
+                );
+                if should_retry_terminal_before_event(&event, emitted_event) {
+                    let message = event_error_message
+                        .unwrap_or_else(|| "upstream SSE returned an error event".to_string());
+                    let outcome = TurnOutcome::from_parts(
+                        event_status,
+                        Some("upstream_sse_error_event".to_string()),
+                        Some(message.clone()),
+                        t_stream_ms,
+                        first_byte_ms,
+                        first_token_ms,
+                        usage,
+                        usage_observed,
+                        turn_start,
+                    );
+                    record_turn(
+                        ctx,
+                        resolved,
+                        requested_model,
+                        TurnTransport::HttpBridge,
+                        &outcome,
+                        telemetry_permit,
+                        Some(reservation),
+                    );
+                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                        status: outcome.status,
+                        error_type: "upstream_sse_error_event",
+                        message,
+                        scope,
+                    });
+                }
+            }
             if downstream
                 .send(Message::Text(event.to_string().into()))
                 .await
                 .is_err()
             {
-                return false;
+                return ForwardResult::Fatal;
             }
+            emitted_event = true;
             if is_terminal_response_event(&event) {
                 terminal = Some(terminal_status(&event));
             }
@@ -1310,9 +1885,54 @@ where
             .await
             .is_err()
         {
-            return false;
+            return ForwardResult::Fatal;
         }
+        emitted_event = true;
         terminal = Some(terminal_status(&event));
+    }
+
+    if terminal.is_none() {
+        let message = if is_sse {
+            "upstream SSE ended before a terminal response event".to_string()
+        } else {
+            "upstream HTTP bridge returned an empty response".to_string()
+        };
+        let outcome = TurnOutcome::from_parts(
+            StatusCode::BAD_GATEWAY,
+            Some("upstream_incomplete_response".to_string()),
+            Some(message.clone()),
+            t_stream_ms,
+            first_byte_ms,
+            first_token_ms,
+            usage,
+            usage_observed,
+            turn_start,
+        );
+        record_turn(
+            ctx,
+            resolved,
+            requested_model,
+            TurnTransport::HttpBridge,
+            &outcome,
+            telemetry_permit,
+            Some(reservation),
+        );
+        if emitted_event {
+            let _ = send_ws_error(
+                downstream,
+                outcome.status,
+                "upstream_incomplete_response",
+                &message,
+            )
+            .await;
+            return ForwardResult::Fatal;
+        }
+        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+            status: outcome.status,
+            error_type: "upstream_incomplete_response",
+            message,
+            scope: proxy::FailureScope::Provider,
+        });
     }
 
     let (final_status, error_type, error_message) = terminal.unwrap_or_else(|| {
@@ -1344,8 +1964,17 @@ where
         TurnTransport::HttpBridge,
         &outcome,
         telemetry_permit,
+        Some(reservation),
     );
-    final_status.is_success() && outcome.error_type.is_none()
+    if proxy::classify_failure_scope(
+        Some(final_status.as_u16() as i32),
+        proxy::OutcomeOrigin::UpstreamEvent,
+    ) == proxy::FailureScope::Success
+    {
+        ForwardResult::Complete
+    } else {
+        ForwardResult::Fatal
+    }
 }
 
 impl TurnOutcome {
@@ -1355,7 +1984,7 @@ impl TurnOutcome {
         error_message: String,
         start: Instant,
     ) -> Self {
-        Self::from_parts(
+        let mut outcome = Self::from_parts(
             status,
             Some(error_type.into()),
             Some(error_message),
@@ -1365,7 +1994,31 @@ impl TurnOutcome {
             Usage::default(),
             false,
             start,
-        )
+        );
+        outcome.origin = proxy::OutcomeOrigin::Gateway;
+        outcome
+    }
+
+    fn provider_error(
+        status: StatusCode,
+        error_type: impl Into<String>,
+        error_message: String,
+        start: Instant,
+    ) -> Self {
+        let mut outcome = Self::error(status, error_type, error_message, start);
+        outcome.origin = proxy::OutcomeOrigin::LocalTransport;
+        outcome
+    }
+
+    fn upstream_response_error(
+        status: StatusCode,
+        error_type: impl Into<String>,
+        error_message: String,
+        start: Instant,
+    ) -> Self {
+        let mut outcome = Self::error(status, error_type, error_message, start);
+        outcome.origin = proxy::OutcomeOrigin::UpstreamResponse;
+        outcome
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1390,6 +2043,7 @@ impl TurnOutcome {
             duration_ms: start.elapsed().as_millis() as i64,
             usage,
             usage_observed,
+            origin: proxy::OutcomeOrigin::UpstreamEvent,
         }
     }
 }
@@ -1401,6 +2055,7 @@ fn record_turn(
     transport: TurnTransport,
     outcome: &TurnOutcome,
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
+    reservation: Option<proxy::UpstreamAttemptReservation>,
 ) {
     let pricing = evaluate_price(
         &outcome.usage,
@@ -1415,19 +2070,73 @@ fn record_turn(
         .or(outcome.t_first_token_ms)
         .or(outcome.t_stream_ms);
 
-    proxy::record_pre_stream_outcome(
-        &ctx.state,
-        resolved,
-        Some(status_i32),
-        error_type,
-        error_message,
-        observed_latency_ms,
-    );
+    let now_ms = util::now_ms();
+    let scope = proxy::classify_failure_scope(Some(status_i32), outcome.origin);
+    let attempted_upstream = reservation.is_some();
+    if let Some(reservation) = reservation {
+        reservation.finish(
+            proxy::AttemptOutcome {
+                status: Some(status_i32),
+                origin: outcome.origin,
+                error_type,
+                error_message,
+                observed_latency_ms,
+            },
+            &ctx.state.metrics,
+        );
+    }
+    if attempted_upstream && scope == proxy::FailureScope::Success {
+        if let Some(identity) = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id)
+        {
+            if let Some(binding) = ctx.state.affinity.lookup(&identity, now_ms) {
+                if binding.provider_id == resolved.provider.id {
+                    if binding.confirmed {
+                        let _ = ctx.state.affinity.refresh_if_provider(
+                            &identity,
+                            resolved.provider.id,
+                            now_ms,
+                        );
+                    } else {
+                        let _ = ctx.state.affinity.confirm(&identity, binding, now_ms);
+                    }
+                } else {
+                    ctx.state
+                        .affinity
+                        .migrate(&identity, resolved.provider.id, now_ms);
+                    ctx.state.metrics.record_affinity_migration();
+                }
+            } else {
+                let binding = ctx
+                    .state
+                    .affinity
+                    .claim(&identity, resolved.provider.id, now_ms);
+                if binding.provider_id == resolved.provider.id {
+                    let _ = ctx.state.affinity.confirm(&identity, binding, now_ms);
+                }
+            }
+        }
+    } else if attempted_upstream
+        && scope.should_avoid_affinity_immediately()
+        && let Some(identity) = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id)
+    {
+        ctx.state.affinity.mark_provider_failed(
+            &identity,
+            resolved.provider.id,
+            now_ms,
+            std::time::Duration::from_millis(
+                resolved.provider.circuit_breaker_open_ms.max(1) as u64
+            ),
+        );
+    }
     ctx.state.metrics.record_request(
         ApiFormat::Responses,
         RequestMetric {
             http_status: Some(status_i32),
-            error_type,
+            error_type: if scope == proxy::FailureScope::Success {
+                None
+            } else {
+                error_type
+            },
             duration_ms: Some(outcome.duration_ms),
             usage: outcome.usage,
             pricing,
@@ -1462,6 +2171,7 @@ fn record_turn(
         transport: transport.as_log_value(),
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        routing_trace: None,
     });
 }
 
@@ -1523,6 +2233,7 @@ fn record_ws_setup_failed_turn(
         transport: TurnTransport::WsSetup.as_log_value(),
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        routing_trace: None,
     });
 }
 
@@ -1556,6 +2267,7 @@ fn record_session_open(ctx: &WsContext) {
         transport: "ws",
         parent_id: None,
         ws_session_id: Some(ctx.session_id.clone()),
+        routing_trace: None,
     });
 }
 
@@ -1594,6 +2306,7 @@ fn record_session_close(
         transport: "ws",
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        routing_trace: None,
     });
 }
 
@@ -1623,6 +2336,18 @@ fn is_terminal_response_event(value: &Value) -> bool {
                 | "error"
         )
     )
+}
+
+fn should_retry_terminal_before_event(value: &Value, emitted_event: bool) -> bool {
+    if emitted_event || !is_terminal_response_event(value) {
+        return false;
+    }
+    let (status, _, _) = terminal_status(value);
+    proxy::classify_failure_scope(
+        Some(status.as_u16() as i32),
+        proxy::OutcomeOrigin::UpstreamEvent,
+    )
+    .is_retryable()
 }
 
 fn terminal_status(value: &Value) -> (StatusCode, Option<String>, Option<String>) {
@@ -2149,6 +2874,19 @@ mod tests {
     }
 
     #[test]
+    fn websocket_provider_budget_should_allow_only_four_distinct_providers() {
+        let mut budget = WsProviderBudget::default();
+
+        assert_eq!(budget.try_note_attempt(1), Some(false));
+        assert_eq!(budget.try_note_attempt(1), Some(false));
+        assert_eq!(budget.try_note_attempt(2), Some(true));
+        assert_eq!(budget.try_note_attempt(3), Some(true));
+        assert_eq!(budget.try_note_attempt(4), Some(true));
+        assert!(budget.exhausted());
+        assert_eq!(budget.try_note_attempt(5), None);
+    }
+
+    #[test]
     fn response_failed_should_be_terminal_and_extract_response_error() {
         let event = json!({
             "type": "response.failed",
@@ -2170,6 +2908,30 @@ mod tests {
     }
 
     #[test]
+    fn retryable_first_terminal_event_should_fail_over_before_forwarding() {
+        let event = json!({
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {"code": "server_error", "message": "failed"}
+            }
+        });
+
+        assert!(should_retry_terminal_before_event(&event, false));
+    }
+
+    #[test]
+    fn retryable_terminal_event_after_valid_output_should_not_fail_over() {
+        let event = json!({
+            "type": "error",
+            "status": 503,
+            "error": {"type": "server_error", "message": "failed"}
+        });
+
+        assert!(!should_retry_terminal_before_event(&event, true));
+    }
+
+    #[test]
     fn response_incomplete_should_be_terminal_and_extract_reason() {
         let event = json!({
             "type": "response.incomplete",
@@ -2187,6 +2949,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(error_type.as_deref(), Some("response_incomplete"));
         assert_eq!(error_message.as_deref(), Some("max_output_tokens"));
+        assert!(!should_retry_terminal_before_event(&event, false));
     }
 
     #[test]

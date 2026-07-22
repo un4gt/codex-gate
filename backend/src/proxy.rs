@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::header::{
     ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, PROXY_AUTHENTICATE,
@@ -14,20 +14,23 @@ use hyper::http::HeaderMap;
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use memchr::memchr;
 use pin_project_lite::pin_project;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time;
 
+use crate::affinity::{AffinityBinding, AffinityIdentity, extract_affinity_identity};
 use crate::cache::upstream_cache::UpstreamSnapshot;
-use crate::health::{should_trip_endpoint, should_trip_key};
+use crate::health::RuntimeHealthAttemptGuard;
 use crate::http::{self, HttpResponse};
 use crate::metrics::{FailoverKind, RequestMetric};
 use crate::openai::{OpenAiRequestInfo, ensure_include_usage, parse_request_info};
 use crate::pricing::{PriceVersion, PricingEvaluation, evaluate_price};
+use crate::provider_runtime::{BreakerTransition, ProviderAttemptGuard, ProviderCapacityPermit};
 use crate::selector;
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
-use crate::types::{ApiFormat, ModelAlias, ModelAliasTarget, UpstreamKey, Usage};
+use crate::types::{ApiFormat, ApiKeyAuth, UpstreamKey, UpstreamProvider, Usage};
 use crate::util;
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -67,10 +70,9 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         Ok(v) => v,
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    if auth.is_none() {
+    let Some(api_key) = auth else {
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
-    }
-
+    };
     let snap = match state
         .caches
         .upstream
@@ -81,10 +83,18 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
+    let authorized_group_ids = api_key
+        .provider_groups
+        .iter()
+        .map(|group| group.id)
+        .collect::<HashSet<_>>();
     let mut enabled_provider_ids = HashSet::new();
     for provider in &snap.providers {
         if provider.enabled
             && provider_supports_api_format(&provider.provider_type, requested_api_format)
+            && provider_matching_groups(&snap, provider.id, &authorized_group_ids)
+                .next()
+                .is_some()
         {
             enabled_provider_ids.insert(provider.id);
         }
@@ -292,6 +302,14 @@ async fn proxy_openai(
         );
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
     };
+    let routing_trace = std::sync::Arc::new(parking_lot::Mutex::new(RoutingTrace {
+        authorized_groups: api_key
+            .provider_groups
+            .iter()
+            .map(|group| serde_json::json!({ "id": group.id, "name": group.name }))
+            .collect(),
+        ..RoutingTrace::default()
+    }));
 
     let mut telemetry_permit = match state.telemetry.try_reserve_permit() {
         Ok(p) => Some(p),
@@ -319,6 +337,11 @@ async fn proxy_openai(
                       endpoint_id: Option<i64>,
                       upstream_key_id: Option<i64>,
                       model: Option<String>| {
+        routing_trace.lock().terminal = Some(serde_json::json!({
+            "status": status.as_u16(),
+            "error_type": error_type,
+            "message": error_message.clone(),
+        }));
         submit_with_permit(
             permit,
             TelemetryEvent {
@@ -349,6 +372,7 @@ async fn proxy_openai(
                 transport: "http",
                 parent_id: None,
                 ws_session_id: None,
+                routing_trace: Some(routing_trace_value(&routing_trace)),
             },
         );
     };
@@ -398,13 +422,30 @@ async fn proxy_openai(
     let request_version = parts.version;
     let request_headers = parts.headers.clone();
     let request_path_and_query = parts.uri.path_and_query().cloned();
+    let affinity_identity = extract_affinity_identity(&request_headers, &body_bytes, api_key.id);
+    let existing_affinity_binding = affinity_identity
+        .as_ref()
+        .and_then(|identity| state.affinity.lookup(identity, util::now_ms()));
+    if affinity_identity.is_some() {
+        state
+            .metrics
+            .record_affinity_lookup(existing_affinity_binding.is_some());
+    }
 
     let api_format_str = match api_format {
         ApiFormat::ChatCompletions => "chat_completions",
         ApiFormat::Responses => "responses",
     };
 
-    let plan = match build_upstream_plan(&state, api_format, &model_name).await {
+    let mut plan = match build_upstream_plan(
+        &state,
+        api_format,
+        &model_name,
+        &api_key,
+        affinity_identity.as_ref(),
+    )
+    .await
+    {
         Ok(v) => v,
         Err((status, msg)) => {
             submit_err(
@@ -424,18 +465,67 @@ async fn proxy_openai(
             return http::json_error(status, msg);
         }
     };
+    let affinity_binding = apply_affinity_to_plan(
+        &state,
+        affinity_identity.as_ref(),
+        existing_affinity_binding,
+        &mut plan,
+    );
+    {
+        let mut trace = routing_trace.lock();
+        trace.affinity = affinity_identity.as_ref().map(|identity| {
+            serde_json::json!({
+                "source": identity.source,
+                "hash": identity.log_hash,
+                "hit": existing_affinity_binding.is_some(),
+                "bound_provider_id": affinity_binding.map(|binding| binding.provider_id),
+            })
+        });
+        let mut seen = HashSet::new();
+        trace.candidates = plan
+            .attempts
+            .iter()
+            .filter(|attempt| seen.insert(attempt.provider.id))
+            .map(|attempt| {
+                serde_json::json!({
+                    "provider_id": attempt.provider.id,
+                    "priority": attempt.provider.priority,
+                    "weight": attempt.provider.weight,
+                    "attempt_budget": attempt.provider.max_attempts,
+                })
+            })
+            .collect();
+    }
 
     let mut exclusions = AttemptExclusions::default();
     let mut last_failure: Option<AttemptFailure> = None;
+    let mut faulted_providers = HashSet::new();
+    let mut last_attempted_provider_id = None;
 
     for (index, resolved) in plan.attempts.iter().enumerate() {
         if exclusions.should_skip(resolved) {
             continue;
         }
 
-        if !reserve_attempt(&state, resolved, util::now_ms()) {
+        let Ok(reservation) = reserve_attempt(&state, resolved, util::now_ms()) else {
+            trace_attempt(
+                &routing_trace,
+                resolved,
+                None,
+                Some("runtime_reservation_unavailable"),
+                start.elapsed().as_millis() as i64,
+            );
             continue;
+        };
+        let provider_switched =
+            last_attempted_provider_id.is_some_and(|id| id != resolved.provider.id);
+        if provider_switched {
+            routing_trace.lock().provider_switches += 1;
         }
+        if last_attempted_provider_id != Some(resolved.provider.id) {
+            state.metrics.record_provider_selection(provider_switched);
+        }
+        last_attempted_provider_id = Some(resolved.provider.id);
         state.metrics.record_upstream_attempt();
 
         let mut out_body = if resolved.upstream_model == model_name {
@@ -478,16 +568,38 @@ async fn proxy_openai(
         ) {
             Ok(uri) => uri,
             Err(error) => {
-                record_pre_stream_outcome(
-                    &state,
+                trace_attempt(
+                    &routing_trace,
                     resolved,
                     Some(StatusCode::BAD_REQUEST.as_u16() as i32),
                     Some("invalid_upstream_uri"),
-                    Some(&error),
-                    None,
+                    start.elapsed().as_millis() as i64,
+                );
+                reservation.finish(
+                    AttemptOutcome::local_provider(
+                        Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                        "invalid_upstream_uri",
+                        &error,
+                        None,
+                    ),
+                    &state.metrics,
                 );
                 exclusions.note_attempt(resolved);
                 exclusions.avoid_endpoint(resolved.endpoint.id);
+                if !has_remaining_provider_candidate(
+                    &plan.attempts,
+                    index + 1,
+                    &exclusions,
+                    resolved.provider.id,
+                ) {
+                    note_affinity_failure(
+                        &state,
+                        resolved,
+                        FailureScope::Provider,
+                        affinity_identity.as_ref(),
+                        &mut faulted_providers,
+                    );
+                }
                 last_failure = Some(AttemptFailure::new(
                     resolved,
                     StatusCode::BAD_REQUEST,
@@ -535,17 +647,39 @@ async fn proxy_openai(
             Ok(response) => response,
             Err(error) => {
                 let (status, error_type, error_message) = dispatch_error_to_http(error, &state);
-
-                record_pre_stream_outcome(
-                    &state,
+                trace_attempt(
+                    &routing_trace,
                     resolved,
                     Some(status.as_u16() as i32),
                     Some(error_type),
-                    Some(&error_message),
-                    None,
+                    start.elapsed().as_millis() as i64,
+                );
+
+                reservation.finish(
+                    AttemptOutcome::local_provider(
+                        Some(status.as_u16() as i32),
+                        error_type,
+                        &error_message,
+                        None,
+                    ),
+                    &state.metrics,
                 );
                 exclusions.note_attempt(resolved);
                 exclusions.avoid_endpoint(resolved.endpoint.id);
+                if !has_remaining_provider_candidate(
+                    &plan.attempts,
+                    index + 1,
+                    &exclusions,
+                    resolved.provider.id,
+                ) {
+                    note_affinity_failure(
+                        &state,
+                        resolved,
+                        FailureScope::Provider,
+                        affinity_identity.as_ref(),
+                        &mut faulted_providers,
+                    );
+                }
                 last_failure = Some(AttemptFailure::new(
                     resolved,
                     status,
@@ -576,36 +710,74 @@ async fn proxy_openai(
         let t_stream_ms = start.elapsed().as_millis() as i64;
         let status_code = upstream_resp.status();
         let status_i32 = status_code.as_u16() as i32;
-        if should_retry_response_status(status_i32)
-            && has_remaining_candidate(&plan.attempts, index + 1, &exclusions)
-        {
-            record_pre_stream_outcome(
-                &state,
+        state.quota.observe_response(
+            resolved.key.id,
+            status_i32,
+            upstream_resp.headers(),
+            util::now_ms(),
+            state.config.rate_limit_fallback_cooldown,
+        );
+        if should_retry_response_status(status_i32) {
+            trace_attempt(
+                &routing_trace,
                 resolved,
                 Some(status_i32),
-                None,
-                None,
-                Some(t_stream_ms),
+                Some("upstream_retry_status"),
+                t_stream_ms,
             );
             exclusions.note_attempt(resolved);
-            let failover_kind = if should_avoid_key_on_retry(Some(status_i32), None) {
-                exclusions.avoid_key(resolved.key.id);
-                FailoverKind::Key
-            } else if should_avoid_endpoint_on_retry(Some(status_i32), None) {
-                exclusions.avoid_endpoint(resolved.endpoint.id);
-                FailoverKind::Endpoint
-            } else {
-                FailoverKind::Generic
+            let failure_scope =
+                classify_failure_scope(Some(status_i32), OutcomeOrigin::UpstreamResponse);
+            let failover_kind = match failure_scope {
+                FailureScope::Model => {
+                    exclusions.avoid_provider(resolved.provider.id);
+                    FailoverKind::Generic
+                }
+                FailureScope::Key | FailureScope::Quota => {
+                    exclusions.avoid_key(resolved.key.id);
+                    FailoverKind::Key
+                }
+                FailureScope::Provider => {
+                    exclusions.avoid_endpoint(resolved.endpoint.id);
+                    FailoverKind::Endpoint
+                }
+                FailureScope::Success | FailureScope::Client => FailoverKind::Generic,
             };
-            state.metrics.record_failover(failover_kind);
+            let error_message = format!("retryable upstream status {status_i32}");
             last_failure = Some(AttemptFailure::new(
                 resolved,
                 status_code,
                 "upstream_retry_status",
-                format!("retryable upstream status {status_i32}"),
+                error_message.clone(),
             ));
-            drop(upstream_resp);
-            continue;
+            if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
+                reservation.finish(
+                    AttemptOutcome::upstream_response(
+                        status_i32,
+                        Some("upstream_retry_status"),
+                        Some(&error_message),
+                        Some(t_stream_ms),
+                    ),
+                    &state.metrics,
+                );
+                if !has_remaining_provider_candidate(
+                    &plan.attempts,
+                    index + 1,
+                    &exclusions,
+                    resolved.provider.id,
+                ) {
+                    note_affinity_failure(
+                        &state,
+                        resolved,
+                        failure_scope,
+                        affinity_identity.as_ref(),
+                        &mut faulted_providers,
+                    );
+                }
+                state.metrics.record_failover(failover_kind);
+                drop(upstream_resp);
+                continue;
+            }
         }
 
         let (mut resp_parts, body) = upstream_resp.into_parts();
@@ -617,6 +789,79 @@ async fn proxy_openai(
             .and_then(|v| v.to_str().ok())
             .map(|ct| ct.contains("text/event-stream"))
             .unwrap_or(false);
+        let body = if is_sse {
+            match preflight_sse(
+                body,
+                api_format_str,
+                state.config.stream_preflight_timeout,
+                state.config.stream_preflight_max_bytes,
+            )
+            .await
+            {
+                Ok(body) => body,
+                Err(error) => {
+                    trace_attempt(
+                        &routing_trace,
+                        resolved,
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("upstream_sse_preflight_failed"),
+                        start.elapsed().as_millis() as i64,
+                    );
+                    reservation.finish(
+                        AttemptOutcome::local_provider(
+                            Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                            "upstream_sse_preflight_failed",
+                            &error,
+                            Some(t_stream_ms),
+                        ),
+                        &state.metrics,
+                    );
+                    exclusions.note_attempt(resolved);
+                    exclusions.avoid_endpoint(resolved.endpoint.id);
+                    if !has_remaining_provider_candidate(
+                        &plan.attempts,
+                        index + 1,
+                        &exclusions,
+                        resolved.provider.id,
+                    ) {
+                        note_affinity_failure(
+                            &state,
+                            resolved,
+                            FailureScope::Provider,
+                            affinity_identity.as_ref(),
+                            &mut faulted_providers,
+                        );
+                    }
+                    last_failure = Some(AttemptFailure::new(
+                        resolved,
+                        StatusCode::BAD_GATEWAY,
+                        "upstream_sse_preflight_failed",
+                        error.clone(),
+                    ));
+                    if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
+                        state.metrics.record_failover(FailoverKind::Endpoint);
+                        continue;
+                    }
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_GATEWAY,
+                        "upstream_sse_preflight_failed",
+                        error.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("upstream_sse_preflight_failed"),
+                    );
+                    return http::json_error(StatusCode::BAD_GATEWAY, error);
+                }
+            }
+        } else {
+            ReplayIncomingBody::new(body)
+        };
 
         let tap = ProxyTapBody::new(
             body,
@@ -635,11 +880,19 @@ async fn proxy_openai(
                 price: resolved.price.clone(),
                 usage_capture_bytes: plan.runtime.usage_capture_bytes,
                 usage_capture_tail_bytes: plan.runtime.usage_capture_tail_bytes,
-                endpoint_health: state.endpoint_health.clone(),
-                upstream_key_health: state.upstream_key_health.clone(),
+                provider: resolved.provider.clone(),
                 metrics: state.metrics.clone(),
+                affinity: state.affinity.clone(),
+                affinity_identity: affinity_identity.clone(),
+                affinity_binding,
+                affinity_should_migrate: affinity_binding.is_some_and(|binding| {
+                    binding.provider_id != resolved.provider.id
+                        && faulted_providers.contains(&binding.provider_id)
+                }),
+                routing_trace: routing_trace.clone(),
             },
             telemetry_permit.take(),
+            reservation,
         );
 
         return Response::from_parts(resp_parts, http::boxed(tap));
@@ -828,13 +1081,15 @@ pub(crate) struct ResolvedUpstream {
 #[derive(Default)]
 struct AttemptExclusions {
     attempted_pairs: HashSet<(i64, i64)>,
+    provider_ids: HashSet<i64>,
     endpoint_ids: HashSet<i64>,
     key_ids: HashSet<i64>,
 }
 
 impl AttemptExclusions {
     fn should_skip(&self, resolved: &ResolvedUpstream) -> bool {
-        self.endpoint_ids.contains(&resolved.endpoint.id)
+        self.provider_ids.contains(&resolved.provider.id)
+            || self.endpoint_ids.contains(&resolved.endpoint.id)
             || self.key_ids.contains(&resolved.key.id)
             || self
                 .attempted_pairs
@@ -850,6 +1105,10 @@ impl AttemptExclusions {
         self.endpoint_ids.insert(endpoint_id);
     }
 
+    fn avoid_provider(&mut self, provider_id: i64) {
+        self.provider_ids.insert(provider_id);
+    }
+
     fn avoid_key(&mut self, key_id: i64) {
         self.key_ids.insert(key_id);
     }
@@ -862,6 +1121,43 @@ struct AttemptFailure {
     status: StatusCode,
     error_type: &'static str,
     error_message: String,
+}
+
+#[derive(Default, Serialize)]
+struct RoutingTrace {
+    authorized_groups: Vec<Value>,
+    affinity: Option<Value>,
+    candidates: Vec<Value>,
+    attempts: Vec<Value>,
+    provider_switches: usize,
+    terminal: Option<Value>,
+}
+
+type SharedRoutingTrace = std::sync::Arc<parking_lot::Mutex<RoutingTrace>>;
+
+fn routing_trace_value(trace: &SharedRoutingTrace) -> Value {
+    serde_json::to_value(&*trace.lock()).unwrap_or(Value::Null)
+}
+
+fn trace_attempt(
+    trace: &SharedRoutingTrace,
+    resolved: &ResolvedUpstream,
+    status: Option<i32>,
+    error_type: Option<&str>,
+    duration_ms: i64,
+) {
+    let mut trace = trace.lock();
+    if trace.attempts.len() >= 40 {
+        return;
+    }
+    trace.attempts.push(serde_json::json!({
+        "provider_id": resolved.provider.id,
+        "endpoint_id": resolved.endpoint.id,
+        "upstream_key_id": resolved.key.id,
+        "status": status,
+        "error_type": error_type,
+        "duration_ms": duration_ms,
+    }));
 }
 
 impl AttemptFailure {
@@ -885,12 +1181,81 @@ impl AttemptFailure {
 pub(crate) struct UpstreamPlan {
     pub(crate) runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
     pub(crate) attempts: Vec<ResolvedUpstream>,
+    pub(crate) transient_spill_provider_ids: HashSet<i64>,
+}
+
+impl UpstreamPlan {
+    pub(crate) fn prefer_provider(&mut self, provider_id: i64) -> bool {
+        if !self
+            .attempts
+            .iter()
+            .any(|attempt| attempt.provider.id == provider_id)
+        {
+            return false;
+        }
+        self.attempts
+            .sort_by_key(|attempt| (attempt.provider.id != provider_id) as u8);
+        true
+    }
+}
+
+pub(crate) fn apply_affinity_to_plan(
+    state: &SharedState,
+    identity: Option<&AffinityIdentity>,
+    existing: Option<AffinityBinding>,
+    plan: &mut UpstreamPlan,
+) -> Option<AffinityBinding> {
+    let identity = identity?;
+    if let Some(binding) = existing {
+        if plan.prefer_provider(binding.provider_id)
+            || plan
+                .transient_spill_provider_ids
+                .contains(&binding.provider_id)
+        {
+            return Some(binding);
+        }
+        let _ = state
+            .affinity
+            .clear_if_provider(identity, binding.provider_id);
+    }
+
+    let first_provider_id = plan.attempts.first()?.provider.id;
+    let binding = state
+        .affinity
+        .claim(identity, first_provider_id, util::now_ms());
+    let _ = plan.prefer_provider(binding.provider_id);
+    Some(binding)
+}
+
+const MAX_PROVIDER_SWITCHES: usize = 3;
+pub(crate) const MAX_DISTINCT_PROVIDERS: usize = MAX_PROVIDER_SWITCHES + 1;
+
+#[derive(Clone)]
+struct ProviderRoute {
+    provider: UpstreamProvider,
+    upstream_model: String,
+    route_priority: Option<i32>,
+    route_weight: Option<i32>,
+}
+
+struct SchedulableProvider {
+    route: ProviderRoute,
+    effective_priority: i32,
+    effective_weight: i32,
+    keys: Vec<UpstreamKey>,
+    endpoints: Vec<crate::types::UpstreamEndpoint>,
+    price: Option<PriceVersion>,
+    in_flight: u32,
+    max_concurrency: Option<i32>,
+    latency_ewma_ms: Option<i64>,
 }
 
 pub(crate) async fn build_upstream_plan(
     state: &SharedState,
     api_format: ApiFormat,
     requested_model: &str,
+    api_key: &ApiKeyAuth,
+    affinity: Option<&AffinityIdentity>,
 ) -> Result<UpstreamPlan, (StatusCode, String)> {
     let snap = state
         .caches
@@ -904,252 +1269,378 @@ pub(crate) async fn build_upstream_plan(
     }
 
     let runtime = state.runtime_settings.snapshot();
+    let now_ms = util::now_ms();
+    let routes = collect_provider_routes(&snap, api_format, requested_model)?;
+    if routes.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no providers can route this model".to_string(),
+        ));
+    }
 
+    let authorized_group_ids = api_key
+        .provider_groups
+        .iter()
+        .map(|group| group.id)
+        .collect::<HashSet<_>>();
+    let mut authorized_routes = routes
+        .into_iter()
+        .filter(|route| {
+            provider_matching_groups(&snap, route.provider.id, &authorized_group_ids)
+                .next()
+                .is_some()
+        })
+        .collect::<Vec<_>>();
+    if authorized_routes.is_empty() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "API key is not authorized for any provider that can route this model".to_string(),
+        ));
+    }
+
+    authorized_routes.retain(|route| route.provider.enabled);
+    let affinity_provider_id = affinity
+        .and_then(|identity| state.affinity.lookup(identity, now_ms))
+        .map(|binding| binding.provider_id);
+    let mut schedulable = Vec::new();
+    let mut transient_spill_provider_ids = HashSet::new();
+    for route in authorized_routes {
+        let provider = &route.provider;
+        if affinity.is_some_and(|identity| {
+            state
+                .affinity
+                .is_provider_avoided(identity, provider.id, now_ms)
+        }) {
+            continue;
+        }
+        let provider_runtime = state.provider_runtime.snapshot(provider, now_ms);
+        if !provider_runtime.available {
+            if provider_runtime.state != crate::health::CircuitState::Open {
+                state.metrics.record_provider_capacity_skip();
+                transient_spill_provider_ids.insert(provider.id);
+            }
+            continue;
+        }
+        let model_keys = snap
+            .keys_by_provider
+            .get(&provider.id)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|key| key_allows_model(&snap, key.id, &route.upstream_model))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let keys = model_keys
+            .iter()
+            .copied()
+            .filter(|key| {
+                let available = state.quota.is_available(key.id, now_ms);
+                if !available {
+                    state.metrics.record_quota_cooldown_skip();
+                }
+                available
+            })
+            .collect::<Vec<_>>();
+        if !model_keys.is_empty() && keys.is_empty() {
+            transient_spill_provider_ids.insert(provider.id);
+        }
+        let ranked_keys =
+            selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
+        let ranked_keys = order_keys_for_provider(
+            state,
+            provider.id,
+            &provider.key_selection_strategy,
+            &ranked_keys,
+        );
+        if ranked_keys.is_empty() {
+            continue;
+        }
+
+        let endpoints = snap
+            .endpoints_by_provider
+            .get(&provider.id)
+            .map(|items| items.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let ranked_endpoints = selector::rank_endpoint_refs_with_health(
+            &endpoints,
+            &state.endpoint_health,
+            runtime.endpoint_selector_strategy,
+            now_ms,
+        );
+        if ranked_endpoints.is_empty() {
+            continue;
+        }
+
+        let effective_priority = effective_provider_priority(
+            &snap,
+            provider,
+            &authorized_group_ids,
+            route.route_priority,
+        );
+        let effective_weight = provider
+            .weight
+            .max(0)
+            .saturating_mul(route.route_weight.unwrap_or(1).max(0))
+            .max(1);
+        let price =
+            snap.find_price_for_request(provider.id, requested_model, &route.upstream_model);
+        schedulable.push(SchedulableProvider {
+            route,
+            effective_priority,
+            effective_weight,
+            keys: ranked_keys,
+            endpoints: ranked_endpoints.into_iter().cloned().collect(),
+            price,
+            in_flight: provider_runtime.in_flight,
+            max_concurrency: provider_runtime.max_concurrency,
+            latency_ewma_ms: provider_runtime.latency_ewma_ms,
+        });
+    }
+
+    if schedulable.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no available upstream targets".to_string(),
+        ));
+    }
+
+    let attempts = build_scheduled_attempts(schedulable, affinity_provider_id);
+
+    if attempts.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no available upstream targets".to_string(),
+        ));
+    }
+
+    Ok(UpstreamPlan {
+        runtime,
+        attempts,
+        transient_spill_provider_ids,
+    })
+}
+
+fn build_scheduled_attempts(
+    schedulable: Vec<SchedulableProvider>,
+    affinity_provider_id: Option<i64>,
+) -> Vec<ResolvedUpstream> {
+    let mut attempts = Vec::new();
+    for scheduled in order_schedulable_providers(schedulable, affinity_provider_id)
+        .into_iter()
+        .take(MAX_DISTINCT_PROVIDERS)
+    {
+        let max_attempts = scheduled.route.provider.max_attempts.max(1) as usize;
+        let mut provider_attempts = 0usize;
+        'pairs: for diagonal in 0..scheduled.endpoints.len() {
+            for (key_index, key) in scheduled.keys.iter().enumerate() {
+                let endpoint =
+                    &scheduled.endpoints[(key_index + diagonal) % scheduled.endpoints.len()];
+                attempts.push(ResolvedUpstream {
+                    upstream_model: scheduled.route.upstream_model.clone(),
+                    provider: scheduled.route.provider.clone(),
+                    endpoint: endpoint.clone(),
+                    key: key.clone(),
+                    price: scheduled.price.clone(),
+                });
+                provider_attempts += 1;
+                if provider_attempts >= max_attempts {
+                    break 'pairs;
+                }
+            }
+        }
+    }
+    attempts
+}
+
+fn collect_provider_routes(
+    snap: &UpstreamSnapshot,
+    api_format: ApiFormat,
+    requested_model: &str,
+) -> Result<Vec<ProviderRoute>, (StatusCode, String)> {
+    let mut routes = Vec::new();
     if let Some(alias) = snap.model_aliases_by_name.get(requested_model) {
         if !alias.enabled {
             return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
         }
-        return build_alias_upstream_plan(
-            state,
-            &snap,
-            api_format,
-            requested_model,
-            alias,
-            runtime,
-        );
-    }
-
-    let mut upstream_model = requested_model.to_string();
-    let mut forced_provider_id: Option<i64> = None;
-
-    if let Some(target) = snap.alias_to_provider_model.get(requested_model) {
-        if !target.enabled {
-            return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+        let Some(targets) = snap.alias_targets_by_alias.get(&alias.id) else {
+            return Ok(routes);
+        };
+        let mut seen = HashSet::new();
+        for target in targets {
+            if !target.enabled
+                || !snap.is_model_globally_enabled(&target.upstream_model)
+                || !route_allows_provider_for_model(
+                    snap,
+                    &target.upstream_model,
+                    target.provider_id,
+                )
+            {
+                continue;
+            }
+            if let Some(provider) = snap.providers.iter().find(|item| {
+                item.id == target.provider_id
+                    && provider_supports_api_format(&item.provider_type, api_format)
+                    && provider_model_enabled(snap, item.id, &target.upstream_model)
+            }) && seen.insert(target.provider_id)
+            {
+                routes.push(ProviderRoute {
+                    provider: provider.clone(),
+                    upstream_model: target.upstream_model.clone(),
+                    route_priority: Some(target.priority),
+                    route_weight: (alias.mode == "weighted").then_some(target.weight),
+                });
+            }
         }
-        upstream_model = target.upstream_model.clone();
-        forced_provider_id = Some(target.provider_id);
+        return Ok(routes);
     }
 
+    let (upstream_model, forced_provider_id) =
+        if let Some(target) = snap.alias_to_provider_model.get(requested_model) {
+            if !target.enabled {
+                return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+            }
+            (target.upstream_model.clone(), Some(target.provider_id))
+        } else {
+            (requested_model.to_string(), None)
+        };
     if !snap.is_model_globally_enabled(&upstream_model) {
         return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
     }
-
-    let mut candidates: Vec<&crate::types::UpstreamProvider> =
-        if let Some(route) = snap.routes_by_model.get(&upstream_model) {
-            if route.enabled && !route.provider_ids.is_empty() {
-                snap.providers
-                    .iter()
-                    .filter(|provider| route.provider_ids.contains(&provider.id))
-                    .collect()
-            } else {
-                snap.providers.iter().collect()
-            }
-        } else {
-            snap.providers.iter().collect()
-        };
-
-    if let Some(provider_id) = forced_provider_id {
-        candidates.retain(|provider| provider.id == provider_id);
-    }
-
-    candidates.retain(|provider| match api_format {
-        ApiFormat::ChatCompletions => provider.provider_type != "openai_compatible_responses",
-        ApiFormat::Responses => true,
-    });
-
-    candidates.retain(|provider| {
-        snap.provider_models_by_provider
-            .get(&provider.id)
-            .and_then(|items| items.get(&upstream_model).copied())
-            .unwrap_or(true)
-    });
-
-    let now_ms = util::now_ms();
-    let ranked_providers = selector::rank_provider_refs_with_health(
-        &candidates,
-        &snap.keys_by_provider,
-        &snap.endpoints_by_provider,
-        &state.upstream_key_health,
-        &state.endpoint_health,
-        now_ms,
-    );
-    if ranked_providers.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no available providers".to_string(),
-        ));
-    }
-
-    let mut attempts = Vec::new();
-    for provider in ranked_providers {
-        let keys = snap
-            .keys_by_provider
-            .get(&provider.id)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter(|key| match snap.key_models_by_key.get(&key.id) {
-                        Some(models) => models.get(&upstream_model).copied().unwrap_or(false),
-                        None => true,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let ranked_keys =
-            selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
-        let ranked_keys = order_keys_for_provider(
-            state,
-            provider.id,
-            &provider.key_selection_strategy,
-            &ranked_keys,
-        );
-        if ranked_keys.is_empty() {
+    for provider in &snap.providers {
+        if forced_provider_id.is_some_and(|id| id != provider.id)
+            || !route_allows_provider_for_model(snap, &upstream_model, provider.id)
+            || !provider_supports_api_format(&provider.provider_type, api_format)
+            || !provider_model_enabled(snap, provider.id, &upstream_model)
+        {
             continue;
         }
-
-        let endpoints = snap
-            .endpoints_by_provider
-            .get(&provider.id)
-            .map(|items| items.iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let ranked_endpoints = selector::rank_endpoint_refs_with_health(
-            &endpoints,
-            &state.endpoint_health,
-            runtime.endpoint_selector_strategy,
-            now_ms,
-        );
-        if ranked_endpoints.is_empty() {
-            continue;
-        }
-
-        let price = snap.find_price_for_request(provider.id, requested_model, &upstream_model);
-        for key in &ranked_keys {
-            for endpoint in &ranked_endpoints {
-                attempts.push(ResolvedUpstream {
-                    upstream_model: upstream_model.clone(),
-                    provider: provider.clone(),
-                    endpoint: (*endpoint).clone(),
-                    key: (*key).clone(),
-                    price: price.clone(),
-                });
-            }
-        }
+        routes.push(ProviderRoute {
+            provider: provider.clone(),
+            upstream_model: upstream_model.clone(),
+            route_priority: None,
+            route_weight: None,
+        });
     }
-
-    if attempts.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no available upstream targets".to_string(),
-        ));
-    }
-
-    Ok(UpstreamPlan { runtime, attempts })
+    Ok(routes)
 }
 
-fn build_alias_upstream_plan(
-    state: &SharedState,
-    snap: &UpstreamSnapshot,
-    api_format: ApiFormat,
-    requested_model: &str,
-    alias: &ModelAlias,
-    runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
-) -> Result<UpstreamPlan, (StatusCode, String)> {
-    let Some(targets) = snap.alias_targets_by_alias.get(&alias.id) else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no available upstream targets".to_string(),
-        ));
-    };
+fn provider_matching_groups<'a>(
+    snap: &'a UpstreamSnapshot,
+    provider_id: i64,
+    authorized_group_ids: &'a HashSet<i64>,
+) -> impl Iterator<Item = &'a crate::types::ProviderGroupMembership> {
+    snap.groups_by_provider
+        .get(&provider_id)
+        .into_iter()
+        .flatten()
+        .filter(|membership| authorized_group_ids.contains(&membership.group_id))
+}
 
-    let mut enabled_targets = targets
-        .iter()
-        .filter(|target| {
-            target.enabled
-                && snap.is_model_globally_enabled(&target.upstream_model)
-                && route_allows_provider_for_model(snap, &target.upstream_model, target.provider_id)
-        })
-        .collect::<Vec<_>>();
-    if alias.mode == "weighted" {
-        enabled_targets = weighted_order_alias_targets(enabled_targets);
+fn effective_provider_priority(
+    snap: &UpstreamSnapshot,
+    provider: &UpstreamProvider,
+    authorized_group_ids: &HashSet<i64>,
+    route_priority: Option<i32>,
+) -> i32 {
+    effective_priority_from_memberships(
+        provider,
+        provider_matching_groups(snap, provider.id, authorized_group_ids),
+        route_priority,
+    )
+}
+
+fn effective_priority_from_memberships<'a>(
+    provider: &UpstreamProvider,
+    memberships: impl Iterator<Item = &'a crate::types::ProviderGroupMembership>,
+    route_priority: Option<i32>,
+) -> i32 {
+    memberships
+        .filter_map(|membership| membership.priority_override)
+        .min()
+        .unwrap_or_else(|| route_priority.unwrap_or(provider.priority))
+}
+
+fn order_schedulable_providers(
+    mut providers: Vec<SchedulableProvider>,
+    affinity_provider_id: Option<i64>,
+) -> Vec<SchedulableProvider> {
+    let mut ordered = Vec::with_capacity(providers.len());
+    if let Some(provider_id) = affinity_provider_id
+        && let Some(index) = providers
+            .iter()
+            .position(|provider| provider.route.provider.id == provider_id)
+    {
+        ordered.push(providers.swap_remove(index));
     }
 
-    let now_ms = util::now_ms();
-    let mut attempts = Vec::new();
-    for target in enabled_targets {
-        let Some(provider) = snap
-            .providers
+    while !providers.is_empty() {
+        let best_priority = providers
             .iter()
-            .find(|provider| provider.id == target.provider_id)
-        else {
-            continue;
-        };
-        if !provider.enabled || !provider_supports_api_format(&provider.provider_type, api_format) {
-            continue;
-        }
-        if !provider_model_enabled(snap, provider.id, &target.upstream_model) {
-            continue;
-        }
-
-        let keys = snap
-            .keys_by_provider
-            .get(&provider.id)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter(|key| key_allows_model(snap, key.id, &target.upstream_model))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let ranked_keys =
-            selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
-        let ranked_keys = order_keys_for_provider(
-            state,
-            provider.id,
-            &provider.key_selection_strategy,
-            &ranked_keys,
-        );
-        if ranked_keys.is_empty() {
-            continue;
-        }
-
-        let endpoints = snap
-            .endpoints_by_provider
-            .get(&provider.id)
-            .map(|items| items.iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let ranked_endpoints = selector::rank_endpoint_refs_with_health(
-            &endpoints,
-            &state.endpoint_health,
-            runtime.endpoint_selector_strategy,
-            now_ms,
-        );
-        if ranked_endpoints.is_empty() {
-            continue;
-        }
-
-        let price =
-            snap.find_price_for_request(provider.id, requested_model, &target.upstream_model);
-        for key in &ranked_keys {
-            for endpoint in &ranked_endpoints {
-                attempts.push(ResolvedUpstream {
-                    upstream_model: target.upstream_model.clone(),
-                    provider: provider.clone(),
-                    endpoint: (*endpoint).clone(),
-                    key: (*key).clone(),
-                    price: price.clone(),
-                });
+            .map(|provider| provider.effective_priority)
+            .min()
+            .unwrap_or(i32::MAX);
+        let mut priority_group = Vec::new();
+        let mut remaining = Vec::new();
+        for provider in providers {
+            if provider.effective_priority == best_priority {
+                priority_group.push(provider);
+            } else {
+                remaining.push(provider);
             }
         }
+        while !priority_group.is_empty() {
+            let first = weighted_sample_provider(&priority_group);
+            let second = weighted_sample_provider(&priority_group);
+            let selected =
+                if provider_load_is_lower(&priority_group[second], &priority_group[first]) {
+                    second
+                } else {
+                    first
+                };
+            ordered.push(priority_group.swap_remove(selected));
+        }
+        providers = remaining;
     }
+    ordered
+}
 
-    if attempts.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no available upstream targets".to_string(),
-        ));
+fn weighted_sample_provider(providers: &[SchedulableProvider]) -> usize {
+    let total_weight = providers
+        .iter()
+        .map(|provider| provider.effective_weight.max(0) as i64)
+        .sum::<i64>();
+    if total_weight <= 0 {
+        return fastrand::usize(..providers.len());
     }
+    let mut offset = fastrand::i64(0..total_weight);
+    for (index, provider) in providers.iter().enumerate() {
+        let weight = provider.effective_weight.max(0) as i64;
+        if offset < weight {
+            return index;
+        }
+        offset -= weight;
+    }
+    providers.len() - 1
+}
 
-    Ok(UpstreamPlan { runtime, attempts })
+fn provider_load_is_lower(left: &SchedulableProvider, right: &SchedulableProvider) -> bool {
+    let utilization = |provider: &SchedulableProvider| {
+        provider
+            .max_concurrency
+            .map_or(provider.in_flight as f64, |limit| {
+                provider.in_flight as f64 / limit.max(1) as f64
+            })
+    };
+    utilization(left)
+        .total_cmp(&utilization(right))
+        .then_with(|| {
+            left.latency_ewma_ms
+                .unwrap_or(i64::MAX)
+                .cmp(&right.latency_ewma_ms.unwrap_or(i64::MAX))
+        })
+        .then_with(|| left.route.provider.id.cmp(&right.route.provider.id))
+        .is_lt()
 }
 
 fn route_allows_provider_for_model(
@@ -1197,74 +1688,269 @@ fn order_keys_for_provider(
     }
 }
 
-fn weighted_order_alias_targets(mut targets: Vec<&ModelAliasTarget>) -> Vec<&ModelAliasTarget> {
-    let mut out = Vec::with_capacity(targets.len());
-    while !targets.is_empty() {
-        let best_priority = targets
-            .iter()
-            .map(|target| target.priority)
-            .min()
-            .expect("non-empty");
-        let mut group = Vec::new();
-        let mut next = Vec::new();
-        for target in targets {
-            if target.priority == best_priority {
-                group.push(target);
-            } else {
-                next.push(target);
-            }
-        }
-        out.extend(weighted_pick_alias_group(group));
-        targets = next;
-    }
-    out
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailureScope {
+    Success,
+    Key,
+    Quota,
+    Model,
+    Provider,
+    Client,
 }
 
-fn weighted_pick_alias_group(mut group: Vec<&ModelAliasTarget>) -> Vec<&ModelAliasTarget> {
-    let mut out = Vec::with_capacity(group.len());
-    while !group.is_empty() {
-        let total_weight: i32 = group.iter().map(|target| target.weight.max(0)).sum();
-        let index = if total_weight <= 0 {
-            fastrand::usize(..group.len())
-        } else {
-            let mut offset = fastrand::i32(0..total_weight);
-            let mut picked = 0usize;
-            for (index, target) in group.iter().enumerate() {
-                let weight = target.weight.max(0);
-                if offset < weight {
-                    picked = index;
-                    break;
-                }
-                offset -= weight;
-            }
-            picked
-        };
-        out.push(group.swap_remove(index));
+impl FailureScope {
+    pub(crate) fn is_retryable(self) -> bool {
+        matches!(self, Self::Key | Self::Quota | Self::Model | Self::Provider)
     }
-    out
+
+    pub(crate) fn should_migrate_affinity(self) -> bool {
+        matches!(self, Self::Key | Self::Model | Self::Provider)
+    }
+
+    pub(crate) fn should_avoid_affinity_immediately(self) -> bool {
+        matches!(self, Self::Model | Self::Provider)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutcomeOrigin {
+    UpstreamResponse,
+    UpstreamEvent,
+    LocalTransport,
+    Gateway,
+}
+
+pub(crate) fn classify_failure_scope(status: Option<i32>, origin: OutcomeOrigin) -> FailureScope {
+    if origin == OutcomeOrigin::LocalTransport {
+        return FailureScope::Provider;
+    }
+    match status {
+        Some(200..=399) => FailureScope::Success,
+        Some(401 | 403) => FailureScope::Key,
+        Some(402 | 429) => FailureScope::Quota,
+        Some(404) => FailureScope::Model,
+        Some(408 | 409 | 425) => FailureScope::Provider,
+        Some(code) if code >= 500 => FailureScope::Provider,
+        Some(400..=499) => FailureScope::Client,
+        _ => FailureScope::Provider,
+    }
+}
+
+pub(crate) struct AttemptOutcome<'a> {
+    pub(crate) status: Option<i32>,
+    pub(crate) origin: OutcomeOrigin,
+    pub(crate) error_type: Option<&'a str>,
+    pub(crate) error_message: Option<&'a str>,
+    pub(crate) observed_latency_ms: Option<i64>,
+}
+
+impl<'a> AttemptOutcome<'a> {
+    pub(crate) fn upstream_response(
+        status: i32,
+        error_type: Option<&'a str>,
+        error_message: Option<&'a str>,
+        observed_latency_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            status: Some(status),
+            origin: OutcomeOrigin::UpstreamResponse,
+            error_type,
+            error_message,
+            observed_latency_ms,
+        }
+    }
+
+    pub(crate) fn local_provider(
+        status: Option<i32>,
+        error_type: &'a str,
+        error_message: &'a str,
+        observed_latency_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            status,
+            origin: OutcomeOrigin::LocalTransport,
+            error_type: Some(error_type),
+            error_message: Some(error_message),
+            observed_latency_ms,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AttemptReservationError {
+    Provider,
+    Key,
+    Endpoint,
+    Quota,
+}
+
+pub(crate) struct UpstreamAttemptReservation {
+    capacity: Option<ProviderCapacityPermit>,
+    provider: Option<ProviderAttemptGuard>,
+    endpoint: Option<RuntimeHealthAttemptGuard>,
+    key: Option<RuntimeHealthAttemptGuard>,
+}
+
+impl UpstreamAttemptReservation {
+    pub(crate) fn finish(mut self, outcome: AttemptOutcome<'_>, metrics: &crate::metrics::Metrics) {
+        let scope = classify_failure_scope(outcome.status, outcome.origin);
+        let now_ms = util::now_ms();
+        let error_type = outcome.error_type.unwrap_or("upstream_error");
+        let error_message = outcome.error_message.unwrap_or("upstream attempt failed");
+
+        match scope {
+            FailureScope::Success => {
+                if let Some(endpoint) = self.endpoint.take() {
+                    endpoint.success(outcome.status, outcome.observed_latency_ms, now_ms);
+                }
+                if let Some(key) = self.key.take() {
+                    key.success(outcome.status, outcome.observed_latency_ms, now_ms);
+                }
+                if let Some(provider) = self.provider.take() {
+                    provider.success(outcome.status, outcome.observed_latency_ms, now_ms);
+                }
+            }
+            FailureScope::Key => {
+                if let Some(endpoint) = self.endpoint.take() {
+                    endpoint.success(outcome.status, outcome.observed_latency_ms, now_ms);
+                }
+                if let Some(key) = self.key.take() {
+                    key.failure(
+                        outcome.status,
+                        outcome.error_type,
+                        outcome.error_message,
+                        now_ms,
+                    );
+                }
+                neutral_provider(self.provider.take());
+            }
+            FailureScope::Model | FailureScope::Client => {
+                if let Some(endpoint) = self.endpoint.take() {
+                    endpoint.success(outcome.status, outcome.observed_latency_ms, now_ms);
+                }
+                if let Some(key) = self.key.take() {
+                    key.success(outcome.status, outcome.observed_latency_ms, now_ms);
+                }
+                neutral_provider(self.provider.take());
+            }
+            FailureScope::Quota => {
+                neutral_health(self.endpoint.take(), now_ms);
+                neutral_health(self.key.take(), now_ms);
+                neutral_provider(self.provider.take());
+            }
+            FailureScope::Provider => {
+                if let Some(endpoint) = self.endpoint.take() {
+                    endpoint.failure(
+                        outcome.status,
+                        outcome.error_type,
+                        outcome.error_message,
+                        now_ms,
+                    );
+                }
+                neutral_health(self.key.take(), now_ms);
+                if let Some(provider) = self.provider.take()
+                    && provider.failure(outcome.status, error_type, error_message, now_ms)
+                        == BreakerTransition::Opened
+                {
+                    metrics.record_provider_breaker_open();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn neutral(mut self) {
+        let now_ms = util::now_ms();
+        neutral_health(self.endpoint.take(), now_ms);
+        neutral_health(self.key.take(), now_ms);
+        neutral_provider(self.provider.take());
+    }
+
+    pub(crate) fn into_capacity(mut self) -> Option<ProviderCapacityPermit> {
+        let now_ms = util::now_ms();
+        neutral_health(self.endpoint.take(), now_ms);
+        neutral_health(self.key.take(), now_ms);
+        neutral_provider(self.provider.take());
+        self.capacity.take()
+    }
+}
+
+fn neutral_health(guard: Option<RuntimeHealthAttemptGuard>, now_ms: i64) {
+    if let Some(guard) = guard {
+        guard.neutral(now_ms);
+    }
+}
+
+fn neutral_provider(guard: Option<ProviderAttemptGuard>) {
+    if let Some(guard) = guard {
+        guard.neutral();
+    }
 }
 
 pub(crate) fn reserve_attempt(
     state: &SharedState,
     resolved: &ResolvedUpstream,
     now_ms: i64,
-) -> bool {
-    if !state
+) -> Result<UpstreamAttemptReservation, AttemptReservationError> {
+    reserve_attempt_inner(state, resolved, now_ms, true, true)
+}
+
+pub(crate) fn reserve_ws_connection(
+    state: &SharedState,
+    resolved: &ResolvedUpstream,
+    now_ms: i64,
+) -> Result<UpstreamAttemptReservation, AttemptReservationError> {
+    reserve_attempt_inner(state, resolved, now_ms, true, false)
+}
+
+pub(crate) fn reserve_ws_turn(
+    state: &SharedState,
+    resolved: &ResolvedUpstream,
+    now_ms: i64,
+) -> Result<UpstreamAttemptReservation, AttemptReservationError> {
+    reserve_attempt_inner(state, resolved, now_ms, false, true)
+}
+
+fn reserve_attempt_inner(
+    state: &SharedState,
+    resolved: &ResolvedUpstream,
+    now_ms: i64,
+    acquire_capacity: bool,
+    reserve_quota: bool,
+) -> Result<UpstreamAttemptReservation, AttemptReservationError> {
+    let capacity = if acquire_capacity {
+        Some(
+            state
+                .provider_runtime
+                .try_acquire_capacity(&resolved.provider)
+                .ok_or(AttemptReservationError::Provider)?,
+        )
+    } else {
+        None
+    };
+    let provider = state
+        .provider_runtime
+        .try_begin_attempt(&resolved.provider, now_ms)
+        .ok_or(AttemptReservationError::Provider)?;
+    if provider.is_half_open_probe() {
+        state.metrics.record_provider_breaker_probe();
+    }
+    let key = state
         .upstream_key_health
-        .try_acquire(resolved.key.id, now_ms)
-    {
-        return false;
-    }
-    if !state
+        .try_begin_attempt(resolved.key.id, now_ms)
+        .ok_or(AttemptReservationError::Key)?;
+    let endpoint = state
         .endpoint_health
-        .try_acquire(resolved.endpoint.id, now_ms)
-    {
-        state
-            .upstream_key_health
-            .release_probe(resolved.key.id, now_ms);
-        return false;
+        .try_begin_attempt(resolved.endpoint.id, now_ms)
+        .ok_or(AttemptReservationError::Endpoint)?;
+    if reserve_quota && !state.quota.reserve_request(resolved.key.id, now_ms) {
+        return Err(AttemptReservationError::Quota);
     }
-    true
+    Ok(UpstreamAttemptReservation {
+        capacity,
+        provider: Some(provider),
+        endpoint: Some(endpoint),
+        key: Some(key),
+    })
 }
 
 fn has_remaining_candidate(
@@ -1277,45 +1963,47 @@ fn has_remaining_candidate(
         .any(|resolved| !exclusions.should_skip(resolved))
 }
 
-fn should_retry_response_status(status: i32) -> bool {
-    matches!(status, 401 | 403 | 408 | 409 | 429) || status >= 500
+fn has_remaining_provider_candidate(
+    attempts: &[ResolvedUpstream],
+    start_index: usize,
+    exclusions: &AttemptExclusions,
+    provider_id: i64,
+) -> bool {
+    attempts[start_index..]
+        .iter()
+        .any(|resolved| resolved.provider.id == provider_id && !exclusions.should_skip(resolved))
 }
 
-fn should_avoid_endpoint_on_retry(status: Option<i32>, error_type: Option<&str>) -> bool {
-    error_type.is_some()
-        || matches!(status, Some(408 | 409))
-        || status.is_some_and(|code| code >= 500)
+pub(crate) fn should_retry_response_status(status: i32) -> bool {
+    matches!(status, 401 | 402 | 403 | 404 | 408 | 409 | 425 | 429) || status >= 500
 }
 
-fn should_avoid_key_on_retry(status: Option<i32>, _error_type: Option<&str>) -> bool {
-    matches!(status, Some(401 | 403 | 429))
-}
-
-pub(crate) fn record_pre_stream_outcome(
+fn note_affinity_failure(
     state: &SharedState,
     resolved: &ResolvedUpstream,
-    status: Option<i32>,
-    error_type: Option<&str>,
-    error_message: Option<&str>,
-    observed_latency_ms: Option<i64>,
+    scope: FailureScope,
+    affinity_identity: Option<&AffinityIdentity>,
+    faulted_providers: &mut HashSet<i64>,
 ) {
-    record_endpoint_outcome_for_id(
-        &state.endpoint_health,
-        Some(resolved.endpoint.id),
-        status,
-        observed_latency_ms,
-        error_type,
-        error_message,
-    );
-    record_upstream_key_outcome_for_id(
-        &state.upstream_key_health,
-        Some(resolved.key.id),
-        status,
-        observed_latency_ms,
-        error_type,
-        error_message,
-    );
+    if !scope.should_migrate_affinity() {
+        return;
+    }
+    faulted_providers.insert(resolved.provider.id);
+    if scope.should_avoid_affinity_immediately()
+        && let Some(identity) = affinity_identity
+    {
+        let now_ms = util::now_ms();
+        state.affinity.mark_provider_failed(
+            identity,
+            resolved.provider.id,
+            now_ms,
+            std::time::Duration::from_millis(
+                resolved.provider.circuit_breaker_open_ms.max(1) as u64
+            ),
+        );
+    }
 }
+
 pub(crate) fn build_upstream_uri(
     base_url: &str,
     path_and_query: Option<&hyper::http::uri::PathAndQuery>,
@@ -1401,6 +2089,106 @@ fn copy_allowed_upstream_headers_by_prefix(from: &HeaderMap, to: &mut HeaderMap,
     }
 }
 
+struct ReplayIncomingBody {
+    buffered: VecDeque<Frame<Bytes>>,
+    inner: Incoming,
+}
+
+impl ReplayIncomingBody {
+    fn new(inner: Incoming) -> Self {
+        Self {
+            buffered: VecDeque::new(),
+            inner,
+        }
+    }
+}
+
+impl hyper::body::Body for ReplayIncomingBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if let Some(frame) = self.buffered.pop_front() {
+            return Poll::Ready(Some(Ok(frame)));
+        }
+        Pin::new(&mut self.inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.buffered.is_empty() && self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let buffered_bytes = self
+            .buffered
+            .iter()
+            .filter_map(Frame::data_ref)
+            .map(Bytes::len)
+            .sum::<usize>() as u64;
+        let inner = self.inner.size_hint();
+        let mut hint = SizeHint::new();
+        hint.set_lower(inner.lower().saturating_add(buffered_bytes));
+        if let Some(upper) = inner
+            .upper()
+            .and_then(|value| value.checked_add(buffered_bytes))
+        {
+            hint.set_upper(upper);
+        }
+        hint
+    }
+}
+
+async fn preflight_sse(
+    mut inner: Incoming,
+    api_format: &'static str,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> Result<ReplayIncomingBody, String> {
+    let preflight = async {
+        let mut parser = SseParser::new(api_format);
+        let mut buffered = VecDeque::new();
+        let mut buffered_bytes = 0usize;
+        loop {
+            let Some(frame) = inner.frame().await else {
+                return Err("upstream SSE ended before its first valid event".to_string());
+            };
+            let frame = frame.map_err(|error| {
+                format!("upstream SSE failed before its first valid event: {error}")
+            })?;
+            if let Some(data) = frame.data_ref() {
+                buffered_bytes = buffered_bytes.saturating_add(data.len());
+                if buffered_bytes > max_bytes {
+                    return Err(format!(
+                        "upstream SSE exceeded the {max_bytes}-byte first-event buffer"
+                    ));
+                }
+                let parsed = parser.push_bytes(data);
+                if parsed.saw_error_event {
+                    return Err(
+                        "upstream SSE returned an error before its first valid event".to_string(),
+                    );
+                }
+                buffered.push_back(frame);
+                if parsed.saw_valid_event {
+                    return Ok(ReplayIncomingBody { buffered, inner });
+                }
+            } else {
+                buffered.push_back(frame);
+            }
+        }
+    };
+
+    time::timeout(timeout, preflight).await.map_err(|_| {
+        format!(
+            "upstream SSE did not produce a valid event within {} ms",
+            timeout.as_millis()
+        )
+    })?
+}
+
 #[derive(Clone)]
 struct TapConfig {
     api_key_id: i64,
@@ -1417,9 +2205,13 @@ struct TapConfig {
     price: Option<PriceVersion>,
     usage_capture_bytes: usize,
     usage_capture_tail_bytes: usize,
-    endpoint_health: std::sync::Arc<crate::health::EndpointHealthBook>,
-    upstream_key_health: std::sync::Arc<crate::health::UpstreamKeyHealthBook>,
+    provider: UpstreamProvider,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
+    affinity: std::sync::Arc<crate::affinity::AffinityBook>,
+    affinity_identity: Option<AffinityIdentity>,
+    affinity_binding: Option<AffinityBinding>,
+    affinity_should_migrate: bool,
+    routing_trace: SharedRoutingTrace,
 }
 
 struct TapFinalizeInputs<'a> {
@@ -1435,9 +2227,10 @@ struct TapFinalizeInputs<'a> {
 pin_project! {
     struct ProxyTapBody {
         #[pin]
-        inner: Incoming,
+        inner: ReplayIncomingBody,
         cfg: TapConfig,
         telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
+        reservation: Option<UpstreamAttemptReservation>,
 
         finalized: bool,
         first_byte_ms: Option<i64>,
@@ -1457,6 +2250,7 @@ pin_project! {
             finalize_tap(
                 this.cfg,
                 this.telemetry_permit,
+                this.reservation,
                 this.finalized,
                 TapFinalizeInputs {
                     first_byte_ms: *this.first_byte_ms,
@@ -1474,9 +2268,10 @@ pin_project! {
 
 impl ProxyTapBody {
     fn new(
-        inner: Incoming,
+        inner: ReplayIncomingBody,
         cfg: TapConfig,
         telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
+        reservation: UpstreamAttemptReservation,
     ) -> Self {
         let sse = if cfg.is_sse {
             Some(SseParser::new(cfg.api_format))
@@ -1489,6 +2284,7 @@ impl ProxyTapBody {
             inner,
             cfg,
             telemetry_permit,
+            reservation: Some(reservation),
             finalized: false,
             first_byte_ms: None,
             first_token_ms: None,
@@ -1519,6 +2315,7 @@ impl hyper::body::Body for ProxyTapBody {
                 finalize_tap(
                     this.cfg,
                     this.telemetry_permit,
+                    this.reservation,
                     this.finalized,
                     TapFinalizeInputs {
                         first_byte_ms: *this.first_byte_ms,
@@ -1560,6 +2357,7 @@ impl hyper::body::Body for ProxyTapBody {
                 finalize_tap(
                     this.cfg,
                     this.telemetry_permit,
+                    this.reservation,
                     this.finalized,
                     TapFinalizeInputs {
                         first_byte_ms: *this.first_byte_ms,
@@ -1585,100 +2383,10 @@ impl hyper::body::Body for ProxyTapBody {
     }
 }
 
-fn record_endpoint_outcome_for_id(
-    health: &crate::health::EndpointHealthBook,
-    endpoint_id: Option<i64>,
-    status: Option<i32>,
-    observed_latency_ms: Option<i64>,
-    error_type: Option<&str>,
-    error_message: Option<&str>,
-) {
-    let Some(endpoint_id) = endpoint_id else {
-        return;
-    };
-
-    let now_ms = util::now_ms();
-    if should_trip_endpoint(status, error_type) {
-        health.record_failure(endpoint_id, status, error_type, error_message, now_ms);
-        return;
-    }
-
-    if should_record_endpoint_success(status, error_type) {
-        health.record_success(endpoint_id, status, observed_latency_ms, now_ms);
-    } else {
-        health.release_probe(endpoint_id, now_ms);
-    }
-}
-
-fn should_record_endpoint_success(status: Option<i32>, error_type: Option<&str>) -> bool {
-    status.is_some() && error_type.is_none() && !matches!(status, Some(429))
-}
-
-fn should_record_key_success(status: Option<i32>, error_type: Option<&str>) -> bool {
-    status.is_some()
-        && error_type.is_none()
-        && !should_trip_key(status, error_type)
-        && !matches!(status, Some(429))
-}
-
-fn record_upstream_key_outcome_for_id(
-    health: &crate::health::UpstreamKeyHealthBook,
-    upstream_key_id: Option<i64>,
-    status: Option<i32>,
-    observed_latency_ms: Option<i64>,
-    error_type: Option<&str>,
-    error_message: Option<&str>,
-) {
-    let Some(upstream_key_id) = upstream_key_id else {
-        return;
-    };
-
-    let now_ms = util::now_ms();
-    if should_trip_key(status, error_type) {
-        health.record_failure(upstream_key_id, status, error_type, error_message, now_ms);
-        return;
-    }
-
-    if should_record_key_success(status, error_type) {
-        health.record_success(upstream_key_id, status, observed_latency_ms, now_ms);
-    } else {
-        health.release_probe(upstream_key_id, now_ms);
-    }
-}
-
-fn record_runtime_outcomes(
-    cfg: &TapConfig,
-    first_byte_ms: Option<i64>,
-    first_token_ms: Option<i64>,
-    error_type: Option<&str>,
-    error_message: Option<&str>,
-) {
-    let observed_latency_ms = first_byte_ms
-        .or(first_token_ms)
-        .or(cfg.t_stream_ms)
-        .or_else(|| Some(cfg.start.elapsed().as_millis() as i64));
-
-    record_endpoint_outcome_for_id(
-        &cfg.endpoint_health,
-        cfg.endpoint_id,
-        cfg.http_status,
-        observed_latency_ms,
-        error_type,
-        error_message,
-    );
-    record_upstream_key_outcome_for_id(
-        &cfg.upstream_key_health,
-        cfg.upstream_key_id,
-        cfg.http_status,
-        observed_latency_ms,
-        error_type,
-        error_message,
-    );
-}
-
 fn finalize_tap(
     cfg: &TapConfig,
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
+    reservation: &mut Option<UpstreamAttemptReservation>,
     finalized: &mut bool,
     inputs: TapFinalizeInputs<'_>,
 ) {
@@ -1696,14 +2404,75 @@ fn finalize_tap(
     }
 
     let pricing = evaluate_price(inputs.usage, *inputs.usage_observed, cfg.price.as_ref());
-    record_runtime_outcomes(
-        cfg,
-        inputs.first_byte_ms,
-        inputs.first_token_ms,
-        inputs.error_type.as_deref(),
-        inputs.error_message.as_deref(),
-    );
+    let now_ms = util::now_ms();
+    let origin = if inputs.error_type.is_some() {
+        OutcomeOrigin::LocalTransport
+    } else {
+        OutcomeOrigin::UpstreamResponse
+    };
+    let scope = classify_failure_scope(cfg.http_status, origin);
+    let observed_latency_ms = inputs
+        .first_byte_ms
+        .or(inputs.first_token_ms)
+        .or(cfg.t_stream_ms)
+        .or_else(|| Some(cfg.start.elapsed().as_millis() as i64));
+    if let Some(reservation) = reservation.take() {
+        reservation.finish(
+            AttemptOutcome {
+                status: cfg.http_status,
+                origin,
+                error_type: inputs.error_type.as_deref(),
+                error_message: inputs.error_message.as_deref(),
+                observed_latency_ms,
+            },
+            &cfg.metrics,
+        );
+    }
+    if scope == FailureScope::Success {
+        if let (Some(identity), Some(binding)) =
+            (cfg.affinity_identity.as_ref(), cfg.affinity_binding)
+        {
+            if binding.provider_id == cfg.provider.id {
+                if binding.confirmed {
+                    let _ = cfg
+                        .affinity
+                        .refresh_if_provider(identity, cfg.provider.id, now_ms);
+                } else {
+                    let _ = cfg.affinity.confirm(identity, binding, now_ms);
+                }
+            } else if cfg.affinity_should_migrate {
+                cfg.affinity.migrate(identity, cfg.provider.id, now_ms);
+                cfg.metrics.record_affinity_migration();
+            }
+        }
+    } else if scope.should_avoid_affinity_immediately()
+        && let Some(identity) = cfg.affinity_identity.as_ref()
+    {
+        cfg.affinity.mark_provider_failed(
+            identity,
+            cfg.provider.id,
+            now_ms,
+            std::time::Duration::from_millis(cfg.provider.circuit_breaker_open_ms.max(1) as u64),
+        );
+    }
     let duration_ms = Some(cfg.start.elapsed().as_millis() as i64);
+    {
+        let mut trace = cfg.routing_trace.lock();
+        if trace.attempts.len() < 40 {
+            trace.attempts.push(serde_json::json!({
+                "provider_id": cfg.provider_id,
+                "endpoint_id": cfg.endpoint_id,
+                "upstream_key_id": cfg.upstream_key_id,
+                "status": cfg.http_status,
+                "error_type": inputs.error_type,
+                "duration_ms": duration_ms,
+            }));
+        }
+        trace.terminal = Some(serde_json::json!({
+            "status": cfg.http_status,
+            "error_type": inputs.error_type,
+        }));
+    }
     cfg.metrics.record_request_str(
         cfg.api_format,
         RequestMetric {
@@ -1740,6 +2509,7 @@ fn finalize_tap(
         transport: "http",
         parent_id: None,
         ws_session_id: None,
+        routing_trace: Some(routing_trace_value(&cfg.routing_trace)),
     };
 
     let Some(permit) = telemetry_permit.take() else {
@@ -1955,6 +2725,8 @@ fn scan_json_value_end(input: &[u8], start: usize) -> Option<usize> {
 #[derive(Default)]
 struct SsePushOut {
     saw_first_token: bool,
+    saw_valid_event: bool,
+    saw_error_event: bool,
     usage: Option<Usage>,
 }
 
@@ -2002,7 +2774,10 @@ impl SseParser {
                 continue;
             }
 
-            if let Some(after) = line.strip_prefix(b"data: ") {
+            if let Some(after) = line
+                .strip_prefix(b"data: ")
+                .or_else(|| line.strip_prefix(b"data:"))
+            {
                 if after == b"[DONE]" {
                     continue;
                 }
@@ -2014,6 +2789,21 @@ impl SseParser {
                 let Ok(v) = serde_json::from_slice::<Value>(after) else {
                     continue;
                 };
+                let event_type = self
+                    .event
+                    .as_deref()
+                    .or_else(|| v.get("type").and_then(Value::as_str));
+                if event_type.is_some_and(|value| {
+                    value == "error"
+                        || value.ends_with(".error")
+                        || value.ends_with(".failed")
+                        || value.ends_with("_error")
+                }) || v.get("error").is_some_and(|error| !error.is_null())
+                {
+                    out.saw_error_event = true;
+                    continue;
+                }
+                out.saw_valid_event = true;
 
                 if !self.done_first_token {
                     if self.api_format == "chat_completions" && chat_has_output_delta(&v) {
@@ -2171,11 +2961,16 @@ pub(crate) fn responses_has_delta(v: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        UsageCaptureBuffer, build_upstream_headers, extract_usage_from_capture, parse_chat_usage,
-        parse_responses_usage, record_endpoint_outcome_for_id, record_upstream_key_outcome_for_id,
-        should_avoid_endpoint_on_retry, should_avoid_key_on_retry, should_retry_response_status,
+        AttemptOutcome, FailureScope, OutcomeOrigin, ProviderRoute, SchedulableProvider, SseParser,
+        UpstreamAttemptReservation, UsageCaptureBuffer, build_scheduled_attempts,
+        build_upstream_headers, classify_failure_scope, effective_priority_from_memberships,
+        extract_usage_from_capture, parse_chat_usage, parse_responses_usage,
+        should_retry_response_status,
     };
-    use crate::health::{CircuitState, RuntimeHealthBook};
+    use crate::health::RuntimeHealthBook;
+    use crate::metrics::Metrics;
+    use crate::provider_runtime::ProviderRuntimeBook;
+    use crate::types::{UpstreamKey, UpstreamProvider};
     use bytes::Bytes;
     use hyper::header::{
         ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderName,
@@ -2183,6 +2978,8 @@ mod tests {
     };
     use hyper::http::HeaderMap;
     use serde_json::json;
+    use std::collections::HashSet;
+    use std::sync::Arc;
 
     #[test]
     fn parse_chat_usage_should_split_cached_and_cache_creation_tokens() {
@@ -2410,29 +3207,12 @@ mod tests {
     }
 
     #[test]
-    fn retry_429_should_avoid_key_without_avoiding_endpoint() {
+    fn retry_429_should_have_quota_scope() {
         assert!(should_retry_response_status(429));
-        assert!(should_avoid_key_on_retry(Some(429), None));
-        assert!(!should_avoid_endpoint_on_retry(Some(429), None));
-    }
-
-    #[test]
-    fn upstream_429_should_not_trip_endpoint_or_mark_key_success() {
-        let endpoint_health = RuntimeHealthBook::new(1, 30_000);
-        record_endpoint_outcome_for_id(&endpoint_health, Some(7), Some(429), Some(12), None, None);
-        let endpoint = endpoint_health.snapshot(7, crate::util::now_ms());
-
-        assert_eq!(endpoint.state, CircuitState::Closed);
-        assert_eq!(endpoint.failure_count, 0);
-        assert_eq!(endpoint.success_count, 0);
-
-        let key_health = RuntimeHealthBook::new(1, 30_000);
-        record_upstream_key_outcome_for_id(&key_health, Some(9), Some(429), Some(12), None, None);
-        let key = key_health.snapshot(9, crate::util::now_ms());
-
-        assert_eq!(key.state, CircuitState::Closed);
-        assert_eq!(key.failure_count, 0);
-        assert_eq!(key.success_count, 0);
+        assert_eq!(
+            classify_failure_scope(Some(429), OutcomeOrigin::UpstreamResponse),
+            FailureScope::Quota,
+        );
     }
 
     #[test]
@@ -2473,5 +3253,258 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 5);
         assert_eq!(usage.reasoning_output_tokens, 0);
+    }
+
+    fn test_provider(id: i64, priority: i32, max_attempts: i32) -> UpstreamProvider {
+        UpstreamProvider {
+            id,
+            name: format!("provider-{id}"),
+            provider_type: "openai".to_string(),
+            enabled: true,
+            priority,
+            weight: 1,
+            supports_include_usage: true,
+            websocket_enabled: true,
+            beta_features: Vec::new(),
+            key_selection_strategy: "round_robin".to_string(),
+            max_attempts,
+            max_concurrency: None,
+            circuit_breaker_enabled: true,
+            circuit_breaker_failure_threshold: 3,
+            circuit_breaker_open_ms: 30_000,
+            circuit_breaker_half_open_success_threshold: 2,
+        }
+    }
+
+    fn finish_attempt(
+        status: i32,
+    ) -> (
+        crate::health::RuntimeHealthView,
+        crate::health::RuntimeHealthView,
+        crate::provider_runtime::ProviderRuntimeView,
+    ) {
+        let provider = test_provider(7, 100, 2);
+        let provider_book = Arc::new(ProviderRuntimeBook::new());
+        let endpoint_book = Arc::new(RuntimeHealthBook::new(1, 30_000));
+        let key_book = Arc::new(RuntimeHealthBook::new(1, 30_000));
+        let now_ms = 1_000;
+        let reservation = UpstreamAttemptReservation {
+            capacity: None,
+            provider: Some(
+                provider_book
+                    .try_begin_attempt(&provider, now_ms)
+                    .expect("provider attempt"),
+            ),
+            endpoint: Some(
+                endpoint_book
+                    .try_begin_attempt(70, now_ms)
+                    .expect("endpoint attempt"),
+            ),
+            key: Some(key_book.try_begin_attempt(71, now_ms).expect("key attempt")),
+        };
+        let error = (status >= 400).then_some("upstream_status");
+        reservation.finish(
+            AttemptOutcome::upstream_response(status, error, error, Some(12)),
+            &Metrics::new(),
+        );
+        (
+            endpoint_book.snapshot(70, now_ms + 1),
+            key_book.snapshot(71, now_ms + 1),
+            provider_book.snapshot(&provider, now_ms + 1),
+        )
+    }
+
+    #[test]
+    fn key_failure_should_record_endpoint_and_key_once_without_provider_outcome() {
+        let (endpoint, key, provider) = finish_attempt(401);
+
+        assert_eq!((endpoint.success_count, endpoint.failure_count), (1, 0));
+        assert_eq!((key.success_count, key.failure_count), (0, 1));
+        assert_eq!((provider.success_count, provider.failure_count), (0, 0));
+    }
+
+    #[test]
+    fn provider_failure_should_record_endpoint_and_provider_once() {
+        let (endpoint, key, provider) = finish_attempt(503);
+
+        assert_eq!((endpoint.success_count, endpoint.failure_count), (0, 1));
+        assert_eq!((key.success_count, key.failure_count), (0, 0));
+        assert_eq!((provider.success_count, provider.failure_count), (0, 1));
+    }
+
+    #[test]
+    fn model_and_quota_failures_should_not_count_as_provider_outcomes() {
+        for status in [404, 429] {
+            let (_, _, provider) = finish_attempt(status);
+            assert_eq!(
+                (provider.success_count, provider.failure_count),
+                (0, 0),
+                "provider outcome changed for status {status}",
+            );
+        }
+    }
+
+    fn schedulable_provider(id: i64, priority: i32) -> SchedulableProvider {
+        let provider = test_provider(id, priority, 2);
+        SchedulableProvider {
+            route: ProviderRoute {
+                provider,
+                upstream_model: "model-a".to_string(),
+                route_priority: None,
+                route_weight: None,
+            },
+            effective_priority: priority,
+            effective_weight: 1,
+            keys: vec![
+                UpstreamKey {
+                    id: id * 10,
+                    provider_id: id,
+                    name: "key-a".to_string(),
+                    secret: "secret".to_string(),
+                    enabled: true,
+                    priority: 100,
+                    weight: 1,
+                },
+                UpstreamKey {
+                    id: id * 10 + 1,
+                    provider_id: id,
+                    name: "key-b".to_string(),
+                    secret: "secret".to_string(),
+                    enabled: true,
+                    priority: 100,
+                    weight: 1,
+                },
+            ],
+            endpoints: vec![crate::types::UpstreamEndpoint {
+                id: id * 100,
+                provider_id: id,
+                name: "endpoint".to_string(),
+                base_url: "https://example.com".to_string(),
+                enabled: true,
+                priority: 100,
+                weight: 1,
+            }],
+            price: None,
+            in_flight: 0,
+            max_concurrency: None,
+            latency_ewma_ms: None,
+        }
+    }
+
+    #[test]
+    fn affinity_provider_should_remain_first_after_higher_priority_provider_is_added() {
+        let attempts = build_scheduled_attempts(
+            vec![schedulable_provider(1, 10), schedulable_provider(2, 0)],
+            Some(1),
+        );
+
+        assert_eq!(attempts.first().map(|attempt| attempt.provider.id), Some(1));
+    }
+
+    #[test]
+    fn request_should_use_at_most_four_providers_and_each_provider_budget() {
+        let providers = (1..=6)
+            .map(|id| schedulable_provider(id, 100))
+            .collect::<Vec<_>>();
+        let attempts = build_scheduled_attempts(providers, None);
+        let provider_ids = attempts
+            .iter()
+            .map(|attempt| attempt.provider.id)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(provider_ids.len(), 4);
+        assert_eq!(attempts.len(), 8);
+        for provider_id in provider_ids {
+            assert_eq!(
+                attempts
+                    .iter()
+                    .filter(|attempt| attempt.provider.id == provider_id)
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn matching_group_priority_should_override_route_and_global_priority() {
+        let provider = test_provider(1, 100, 2);
+        let memberships = [
+            crate::types::ProviderGroupMembership {
+                group_id: 1,
+                group_name: "one".to_string(),
+                priority_override: Some(20),
+            },
+            crate::types::ProviderGroupMembership {
+                group_id: 2,
+                group_name: "two".to_string(),
+                priority_override: Some(5),
+            },
+        ];
+
+        assert_eq!(
+            effective_priority_from_memberships(&provider, memberships.iter(), Some(50)),
+            5
+        );
+        assert_eq!(
+            effective_priority_from_memberships(
+                &provider,
+                std::iter::empty::<&crate::types::ProviderGroupMembership>(),
+                Some(50),
+            ),
+            50
+        );
+    }
+
+    #[test]
+    fn sse_preflight_parser_should_ignore_keepalive_and_accept_first_json_event() {
+        let mut parser = SseParser::new("responses");
+        let keepalive = parser.push_bytes(&Bytes::from_static(b": keepalive\n\n"));
+        assert!(!keepalive.saw_valid_event);
+        assert!(!keepalive.saw_error_event);
+
+        let event = parser.push_bytes(&Bytes::from_static(
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+        ));
+        assert!(event.saw_valid_event);
+        assert!(!event.saw_error_event);
+    }
+
+    #[test]
+    fn sse_preflight_parser_should_reject_error_event() {
+        let mut parser = SseParser::new("responses");
+        let event = parser.push_bytes(&Bytes::from_static(
+            b"event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n",
+        ));
+
+        assert!(event.saw_error_event);
+        assert!(!event.saw_valid_event);
+    }
+
+    #[test]
+    fn failure_scope_should_follow_gateway_classification_table() {
+        for (status, expected) in [
+            (200, FailureScope::Success),
+            (302, FailureScope::Success),
+            (401, FailureScope::Key),
+            (403, FailureScope::Key),
+            (402, FailureScope::Quota),
+            (429, FailureScope::Quota),
+            (404, FailureScope::Model),
+            (408, FailureScope::Provider),
+            (409, FailureScope::Provider),
+            (425, FailureScope::Provider),
+            (503, FailureScope::Provider),
+            (422, FailureScope::Client),
+        ] {
+            assert_eq!(
+                classify_failure_scope(Some(status), OutcomeOrigin::UpstreamResponse),
+                expected,
+                "unexpected scope for status {status}",
+            );
+        }
+        assert_eq!(
+            classify_failure_scope(Some(400), OutcomeOrigin::LocalTransport),
+            FailureScope::Provider,
+        );
     }
 }
