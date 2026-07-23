@@ -13,7 +13,6 @@ import {
   deleteProviderModel,
   loadGatewayModelPolicies,
   loadProviderModelInventory,
-  syncProviderModels,
   updateGatewayModelPolicy,
   updateModelAlias,
   updateModelAliasTarget,
@@ -238,21 +237,6 @@ export function ModelsPage(props: ModelsPageProps) {
     }
   };
 
-  const syncSelectedProvider = async () => {
-    if (!providerId) return;
-    const id = Number(providerId);
-    setBusy(`sync-${id}`);
-    try {
-      const synced = await syncProviderModels(props.settings, id);
-      await loadModels();
-      props.onMessage(t('已同步 {{count}} 个模型。', { count: synced.length }));
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '同步模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const submitAliasCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -382,23 +366,6 @@ export function ModelsPage(props: ModelsPageProps) {
           <RefreshCw className="mr-2 size-3" aria-hidden="true" />
           {t('刷新')}
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          disabled={!providerId || busy !== null}
-          sx={{
-            '&.Mui-disabled': {
-              backgroundColor: 'transparent',
-              border: '1px solid',
-              borderColor: 'divider',
-              color: 'text.disabled',
-            },
-          }}
-          onClick={() => void syncSelectedProvider()}
-        >
-          <RefreshCw className="mr-2 size-3" aria-hidden="true" />
-          {t(busy === `sync-${providerId}` ? '同步中…' : '同步当前上游')}
-        </Button>
       </Box>}
     />
 
@@ -446,12 +413,34 @@ export function ModelsPage(props: ModelsPageProps) {
         </StatusBadge>
       </Box>
       <CardContent className="border-t border-border/40 p-0">
-        {filtered.length > 0 ? <TableContainer className="max-w-full overflow-x-auto">
-          <Table size="small" sx={{ minWidth: 1320 }}>
-            <TableHead>
+        {filtered.length > 0 ? <TableContainer
+          className="max-w-full overflow-auto"
+          data-testid="model-inventory-table-container"
+          sx={{ maxHeight: { xs: '65dvh', md: 'min(70dvh, 48rem)' } }}
+        >
+          <Table stickyHeader aria-label={t('模型库存')} size="small" sx={{ minWidth: 1320 }}>
+            <TableHead sx={{ '& .MuiTableCell-head': { bgcolor: 'background.default' } }}>
               <TableRow>
-                <TableCell className="min-w-[150px]">{t('上游')}</TableCell>
-                <TableCell className="min-w-[240px]">{t('模型')}</TableCell>
+                <TableCell data-sticky-column="provider" sx={{
+                  position: 'sticky',
+                  left: 0,
+                  zIndex: 5,
+                  width: 150,
+                  minWidth: 150,
+                  maxWidth: 150,
+                  bgcolor: 'background.default',
+                  boxShadow: { xs: '4px 0 8px -7px rgb(0 0 0 / 0.65)', md: 'none' },
+                }}>{t('上游')}</TableCell>
+                <TableCell data-sticky-column="model" sx={{
+                  position: 'sticky',
+                  left: { xs: 'auto', md: 150 },
+                  zIndex: 4,
+                  width: 240,
+                  minWidth: 240,
+                  maxWidth: 240,
+                  bgcolor: 'background.default',
+                  boxShadow: { xs: 'none', md: '4px 0 8px -7px rgb(0 0 0 / 0.65)' },
+                }}>{t('模型')}</TableCell>
                 <TableCell className="min-w-[190px]">{t('显示名称')}</TableCell>
                 <TableCell className="min-w-[180px]">{t('原生端点')}</TableCell>
                 <TableCell className="min-w-[120px]">{t('库存')}</TableCell>
@@ -465,11 +454,31 @@ export function ModelsPage(props: ModelsPageProps) {
               {filtered.map(model => {
                 const eligible = model.provider_type === 'openai_compatible';
                 return <TableRow key={model.id} hover>
-                  <TableCell>
+                  <TableCell data-sticky-column="provider" sx={{
+                    position: 'sticky',
+                    left: 0,
+                    zIndex: 2,
+                    width: 150,
+                    minWidth: 150,
+                    maxWidth: 150,
+                    bgcolor: 'background.default',
+                    boxShadow: { xs: '4px 0 8px -7px rgb(0 0 0 / 0.65)', md: 'none' },
+                    'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
+                  }}>
                     <Box className="font-medium">{model.provider_name}</Box>
                     <Box className="mt-1 font-mono text-[0.65rem] text-muted-foreground">{model.provider_type}</Box>
                   </TableCell>
-                  <TableCell className="break-all font-mono text-xs">{model.upstream_model}</TableCell>
+                  <TableCell className="break-all font-mono text-xs" data-sticky-column="model" sx={{
+                    position: 'sticky',
+                    left: { xs: 'auto', md: 150 },
+                    zIndex: 2,
+                    width: 240,
+                    minWidth: 240,
+                    maxWidth: 240,
+                    bgcolor: 'background.default',
+                    boxShadow: { xs: 'none', md: '4px 0 8px -7px rgb(0 0 0 / 0.65)' },
+                    'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
+                  }}>{model.upstream_model}</TableCell>
                   <TableCell className="min-w-[180px] p-2">
                     <InputBase
                       value={modelAliasDraft[model.id] ?? model.alias ?? ''}
@@ -547,7 +556,8 @@ export function ModelsPage(props: ModelsPageProps) {
           </Table>
         </TableContainer> : <EmptyState
           title={loading ? t('正在读取模型') : t('未找到模型')}
-          description={loading ? t('请稍候。') : t('尝试放宽筛选条件，或选择上游执行同步。')}
+          description={loading ? t('请稍候。') : t('尝试放宽筛选条件，或前往上游页同步模型。')}
+          action={loading ? undefined : <Button component="a" href="/upstreams" variant="outline">{t('前往上游')}</Button>}
         />}
       </CardContent>
     </Card>

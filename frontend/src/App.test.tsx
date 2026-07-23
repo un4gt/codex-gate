@@ -4,6 +4,7 @@ import { StyledEngineProvider, ThemeProvider } from '@mui/material/styles';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
 import Root from '@/App';
+import { LogsPage } from '@/components/LogsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { ModelsPage } from '@/components/ModelsPage';
 import { SettingsPage } from '@/components/SettingsPage';
@@ -52,6 +53,30 @@ function providerWorkspace(): ProviderWorkspace {
     },
     endpoints: [],
     keys: [],
+  };
+}
+
+function providerWorkspaceWithConnection(): ProviderWorkspace {
+  const workspace = providerWorkspace();
+  return {
+    ...workspace,
+    endpoints: [{
+      id: 71,
+      provider_id: workspace.provider.id,
+      name: 'Endpoint 1',
+      base_url: 'https://api.example.test',
+      enabled: true,
+      priority: 100,
+      weight: 1,
+    }],
+    keys: [{
+      id: 72,
+      provider_id: workspace.provider.id,
+      name: 'Key 1',
+      enabled: true,
+      priority: 100,
+      weight: 1,
+    }],
   };
 }
 
@@ -128,17 +153,20 @@ describe('admin console smoke test', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
-  it('sends custom priority and weight when creating a provider', async () => {
+  it('creates connection resources and syncs models in one provider workflow', async () => {
     let providerPayload: Record<string, unknown> | null = null;
+    const requests: string[] = [];
     fetchRequest.mockImplementation(async (input, init) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      requests.push(`${method} ${new URL(url).pathname}`);
       if (method === 'GET') return jsonResponse([]);
       if (method === 'POST' && url.endsWith('/api/v1/providers')) {
         providerPayload = JSON.parse(String(init?.body));
         return jsonResponse({ id: 9 });
       }
-      if (method === 'POST') return jsonResponse({ id: 1 });
+      if (method === 'POST' && url.endsWith('/models/sync')) return jsonResponse([{ id: 101 }]);
+      if (method === 'POST') return jsonResponse({ id: url.endsWith('/endpoints') ? 10 : 20 });
       return jsonResponse([]);
     });
 
@@ -157,11 +185,132 @@ describe('admin console smoke test', () => {
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Priority' }), { target: { value: '25' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '4' } });
-    fireEvent.click(screen.getByRole('button', { name: 'CREATE' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
 
     await waitFor(() => expect(providerPayload).toBeTruthy());
     expect(providerPayload).toMatchObject({ priority: 25, weight: 4 });
+    expect(await screen.findByText('Model Sync Complete')).toBeTruthy();
+    expect(requests).toContain('POST /api/v1/providers/9/endpoints');
+    expect(requests).toContain('POST /api/v1/providers/9/keys');
+    expect(requests).toContain('POST /api/v1/providers/9/models/sync');
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('reuses the created provider when model sync is retried', async () => {
+    let providerCreates = 0;
+    let syncAttempts = 0;
+    const patches: string[] = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const path = new URL(url).pathname;
+      const method = init?.method ?? 'GET';
+      if (method === 'GET') return jsonResponse([]);
+      if (method === 'POST' && path === '/api/v1/providers') {
+        providerCreates += 1;
+        return jsonResponse({ id: 9 });
+      }
+      if (method === 'POST' && path.endsWith('/endpoints')) return jsonResponse({ id: 10 });
+      if (method === 'POST' && path.endsWith('/keys')) return jsonResponse({ id: 20 });
+      if (method === 'POST' && path.endsWith('/models/sync')) {
+        syncAttempts += 1;
+        return syncAttempts === 1 ? new Response('sync failed', { status: 502 }) : jsonResponse([{ id: 101 }]);
+      }
+      if (method === 'PATCH') {
+        patches.push(path);
+        return jsonResponse({ ok: true });
+      }
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(
+      <ProvidersPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        items={[]}
+        onRefresh={async () => undefined}
+        onMessage={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
+    fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider Retry' } });
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://old.example.test' } });
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-old' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
+
+    expect(await screen.findByText('Sync Failed')).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://new.example.test' } });
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-new' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save and Retry Sync' }));
+
+    expect(await screen.findByText('Model Sync Complete')).toBeTruthy();
+    expect(providerCreates).toBe(1);
+    expect(syncAttempts).toBe(2);
+    expect(patches).toEqual(expect.arrayContaining([
+      '/api/v1/providers/9',
+      '/api/v1/endpoints/10',
+      '/api/v1/keys/20',
+    ]));
+  });
+
+  it('rolls back a new provider when connection setup fails', async () => {
+    const deleted: string[] = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const path = new URL(url).pathname;
+      const method = init?.method ?? 'GET';
+      if (method === 'GET') return jsonResponse([]);
+      if (method === 'POST' && path === '/api/v1/providers') return jsonResponse({ id: 9 });
+      if (method === 'POST' && path.endsWith('/endpoints')) return new Response('endpoint failed', { status: 500 });
+      if (method === 'POST' && path.endsWith('/keys')) return jsonResponse({ id: 20 });
+      if (method === 'DELETE') {
+        deleted.push(path);
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(
+      <ProvidersPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        items={[]}
+        onRefresh={async () => undefined}
+        onMessage={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
+    fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider Rollback' } });
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://api.example.test' } });
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
+
+    expect(await screen.findByText(/rolled back/i)).toBeTruthy();
+    expect(deleted).toEqual(['/api/v1/providers/9']);
+    expect(screen.getByRole('button', { name: 'Create and Sync' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('syncs models directly from the provider list', async () => {
+    let syncCount = 0;
+    fetchRequest.mockImplementation(async (input, init) => {
+      if (init?.method === 'POST' && String(input).endsWith('/api/v1/providers/7/models/sync')) {
+        syncCount += 1;
+        return jsonResponse([{ id: 101 }]);
+      }
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(
+      <ProvidersPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        items={[providerWorkspaceWithConnection()]}
+        onRefresh={async () => undefined}
+        onMessage={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sync models for provider Provider A' }));
+    await waitFor(() => expect(syncCount).toBe(1));
+    expect(screen.queryByRole('heading', { name: 'Provider A' })).toBeNull();
   });
 
   it('sends edited provider priority and weight', async () => {
@@ -382,6 +531,11 @@ describe('admin console smoke test', () => {
 
     expect(await screen.findByText('model-a')).toBeTruthy();
     expect(screen.getByText('model-b')).toBeTruthy();
+    const inventoryTable = screen.getByRole('table', { name: 'Model Inventory' });
+    expect(inventoryTable.className).toContain('MuiTable-stickyHeader');
+    expect(inventoryTable.querySelectorAll('[data-sticky-column="provider"]').length).toBeGreaterThan(0);
+    expect(inventoryTable.querySelectorAll('[data-sticky-column="model"]').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'Sync Provider' })).toBeNull();
     fireEvent.change(screen.getByPlaceholderText('Search models, aliases, or providers'), {
       target: { value: 'alpha' },
     });
@@ -457,5 +611,52 @@ describe('admin console smoke test', () => {
     fireEvent.click(checkbox);
     await waitFor(() => expect((checkbox as HTMLInputElement).checked).toBe(false));
     expect(messages.some(message => message.includes('500'))).toBe(true);
+  });
+
+  it('keeps the first selected log column sticky when preferences change', async () => {
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/v1/console-preferences')) {
+        if (init?.method === 'PATCH') {
+          const body = JSON.parse(String(init.body)) as { log_visible_columns: string[] };
+          return jsonResponse(body);
+        }
+        return jsonResponse({ log_visible_columns: ['provider', 'time'] });
+      }
+      if (url.includes('/api/v1/logs')) return jsonResponse([{
+        id: 'req-1',
+        time_ms: 1,
+        api_key_id: 1,
+        provider_id: 7,
+        endpoint_id: 71,
+        upstream_key_id: 72,
+        model: 'model-a',
+        http_status: 200,
+        duration_ms: 10,
+        api_format: 'responses',
+        upstream_api_format: 'chat_completions',
+        span_kind: 'http_request',
+        transport: 'http',
+        usage_observed: false,
+      }]);
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(<LogsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      providers={[providerWorkspaceWithConnection()]}
+      apiKeys={[]}
+      refreshKey={0}
+      onMessage={() => undefined}
+    />);
+
+    const table = await screen.findByRole('table', { name: 'Request Logs' });
+    expect(table.className).toContain('MuiTable-stickyHeader');
+    await waitFor(() => expect(table.querySelector('thead [data-sticky-column="first-visible"]')?.textContent).toContain('Provider'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Columns' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Providers' }));
+
+    await waitFor(() => expect(table.querySelector('thead [data-sticky-column="first-visible"]')?.textContent).toContain('Time'));
   });
 });

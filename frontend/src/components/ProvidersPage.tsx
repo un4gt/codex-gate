@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { AlertCircle, ChevronRight, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from "lucide-react";
+import { AlertCircle, Check, ChevronRight, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from "lucide-react";
 import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
-import { addUpstreamKeyModels, createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, loadUpstreamKeyModels, resetProviderCircuit, syncUpstreamKeyModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateUpstreamKeyModel, updateProviderKey } from '../lib/api';
+import { addUpstreamKeyModels, createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, loadUpstreamKeyModels, resetProviderCircuit, syncProviderModels, syncUpstreamKeyModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateUpstreamKeyModel, updateProviderKey } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
 import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, ProviderGroup, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpstreamKeyModel, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
 import Alert from "@mui/material/Alert";
@@ -33,6 +33,7 @@ import TableCell from "@mui/material/TableCell";
 import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import TableContainer from "@mui/material/TableContainer";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import { useTheme } from "@mui/material/styles";
@@ -46,6 +47,12 @@ interface ProvidersPageProps {
 interface DraftInputRow {
   id: string;
   value: string;
+}
+type ProviderCreateStage = 'editing' | 'provider' | 'connections' | 'models' | 'sync_failed' | 'complete' | 'partial';
+interface CreatedProviderResources {
+  providerId: number;
+  endpointIds: number[];
+  keyIds: number[];
 }
 const MAX_PROVIDER_ROUTING_VALUE = 2_147_483_647;
 const NON_NEGATIVE_INTEGER_PATTERN = /^\d+$/;
@@ -128,6 +135,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const [createBaseUrls, setCreateBaseUrls] = useState<DraftInputRow[]>([createDraftInputRow('url')]);
   const [createApiKeys, setCreateApiKeys] = useState<DraftInputRow[]>([createDraftInputRow('key')]);
   const [createSubmitError, setCreateSubmitError] = useState<string | null>(null);
+  const [createStage, setCreateStage] = useState<ProviderCreateStage>('editing');
+  const [createResources, setCreateResources] = useState<CreatedProviderResources | null>(null);
+  const [createSyncedCount, setCreateSyncedCount] = useState<number | null>(null);
+  const [createFormVersion, setCreateFormVersion] = useState(0);
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
   const [providerTypeDraft, setProviderTypeDraft] = useState('');
   const [providerPriorityDraft, setProviderPriorityDraft] = useState('');
@@ -168,6 +179,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setCreateBaseUrls([createDraftInputRow('url')]);
     setCreateApiKeys([createDraftInputRow('key')]);
     setCreateSubmitError(null);
+    setCreateStage('editing');
+    setCreateResources(null);
+    setCreateSyncedCount(null);
+    setCreateFormVersion(version => version + 1);
   };
   const createBaseUrlValues = () => createBaseUrls.map(row => row.value.trim()).filter(Boolean);
   const createApiKeyValues = () => createApiKeys.map(row => row.value.trim()).filter(Boolean);
@@ -230,13 +245,34 @@ export function ProvidersPage(props: ProvidersPageProps) {
     if (!isLive()) {
       return t('请先连接后台。');
     }
+    if (createStage === 'complete') {
+      return t('模型同步完成，可以关闭并查看上游详情。');
+    }
+    if (createStage === 'sync_failed') {
+      return t('上游已创建。可修改连接信息后保存并重试同步，也可以稍后继续。');
+    }
+    if (createStage === 'partial') {
+      return t('上游已部分创建，请关闭后在上游详情中修复。');
+    }
+    if (createStage === 'provider') {
+      return t('正在创建上游基本配置…');
+    }
+    if (createStage === 'connections') {
+      return t('正在保存服务地址和 API 密钥…');
+    }
+    if (createStage === 'models') {
+      return t('正在从上游同步模型…');
+    }
     if (createMissingFields().length === 0) {
-      return t('将按当前顺序创建服务地址和访问密钥。');
+      return t('将创建上游、保存连接信息并同步模型。');
     }
     return t('请先填写：{{fields}}。', {
       fields: createMissingFields().map(field => t(field)).join(', ')
     });
   };
+  const createIsBusy = ['provider', 'connections', 'models'].includes(createStage);
+  const createIsPersisted = createResources !== null;
+  const createFieldsDisabled = createIsBusy || createStage === 'complete' || createStage === 'partial';
   const [selectedUpstreamKeyId, setSelectedUpstreamKeyId] = useState<number | null>(null);
   const [upstreamKeyModels, setUpstreamKeyModels] = useState<UpstreamKeyModel[] | null>(null);
   const [upstreamKeyModelsError, setUpstreamKeyModelsError] = useState<string | null>(null);
@@ -269,19 +305,16 @@ export function ProvidersPage(props: ProvidersPageProps) {
       hint: '全部节点'
     }];
   };
-  const submitProviderCreate = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!ensureLive()) return;
-    const formData = new FormData(event.currentTarget);
+  const providerPayloadFromForm = (formData: FormData): CreateProviderInput | null => {
     if (createPriorityValue === null || createWeightValue === null) {
       const message = createPriorityValue === null
         ? '优先级必须是 0 到 2147483647 之间的整数。'
         : '权重必须是 1 到 2147483647 之间的整数。';
       setCreateSubmitError(message);
       props.onMessage(message);
-      return;
+      return null;
     }
-    const payload: CreateProviderInput = {
+    return {
       name: createName.trim(),
       provider_type: createProviderType || readString(formData, 'provider_type') || 'openai',
       enabled: readBool(formData, 'enabled'),
@@ -304,6 +337,69 @@ export function ProvidersPage(props: ProvidersPageProps) {
       circuit_breaker_open_ms: 30_000,
       circuit_breaker_half_open_success_threshold: 2
     };
+  };
+  const syncCreatedProvider = async (resources: CreatedProviderResources, providerName: string) => {
+    setCreateStage('models');
+    setCreateSubmitError(null);
+    try {
+      const models = await syncProviderModels(props.settings, resources.providerId);
+      setCreateSyncedCount(models.length);
+      setCreateStage('complete');
+      props.onMessage(t('上游 {{name}} 已创建并同步 {{count}} 个模型。', {
+        name: providerName,
+        count: models.length
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '同步模型失败。';
+      setCreateStage('sync_failed');
+      setCreateSubmitError(message);
+      props.onMessage(message);
+    }
+  };
+  const retryCreatedProviderSync = async (payload: CreateProviderInput, resources: CreatedProviderResources) => {
+    const baseUrls = createBaseUrlValues();
+    const apiKeys = createApiKeyValues();
+    if (baseUrls.length !== resources.endpointIds.length || apiKeys.length !== resources.keyIds.length) {
+      const message = '已创建的服务地址或 API 密钥数量发生变化，请在上游详情中调整。';
+      setCreateSubmitError(message);
+      props.onMessage(message);
+      return;
+    }
+    setCreateStage('connections');
+    setCreateSubmitError(null);
+    try {
+      await Promise.all([
+        updateProvider(props.settings, resources.providerId, payload),
+        ...resources.endpointIds.map((endpointId, index) => updateEndpoint(props.settings, endpointId, {
+          name: `地址 ${index + 1}`,
+          enabled: true,
+          base_url: baseUrls[index],
+          priority: priorityForIndex(index),
+          weight: 1
+        })),
+        ...resources.keyIds.map((keyId, index) => updateProviderKey(props.settings, keyId, {
+          name: `密钥 ${index + 1}`,
+          secret: apiKeys[index],
+          enabled: true,
+          priority: priorityForIndex(index),
+          weight: 1
+        }))
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '保存连接信息失败。';
+      setCreateStage('sync_failed');
+      setCreateSubmitError(message);
+      props.onMessage(message);
+      return;
+    }
+    await syncCreatedProvider(resources, payload.name);
+  };
+  const submitProviderCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!ensureLive()) return;
+    const formData = new FormData(event.currentTarget);
+    const payload = providerPayloadFromForm(formData);
+    if (!payload) return;
     setCreateSubmitError(null);
     if (!payload.name) {
       const message = '上游名称不能为空。';
@@ -325,46 +421,90 @@ export function ProvidersPage(props: ProvidersPageProps) {
       props.onMessage(message);
       return;
     }
-    setBusy('create-provider');
+    if (createResources) {
+      await retryCreatedProviderSync(payload, createResources);
+      return;
+    }
+    setCreateStage('provider');
     try {
       const created = await createProvider(props.settings, payload);
       const providerId = created.id;
-      const work: Promise<unknown>[] = [];
-      baseUrls.forEach((baseUrl, index) => {
-        const endpointPayload: CreateEndpointInput = {
-          name: `地址 ${index + 1}`,
-          enabled: true,
-          base_url: baseUrl,
-          priority: priorityForIndex(index),
-          weight: 1
-        };
-        work.push(createEndpoint(props.settings, providerId, endpointPayload));
-      });
-      apiKeys.forEach((apiKey, index) => {
-        const keyPayload: CreateProviderKeyInput = {
-          name: `密钥 ${index + 1}`,
-          secret: apiKey,
-          enabled: true,
-          priority: priorityForIndex(index),
-          weight: 1
-        };
-        work.push(createProviderKey(props.settings, providerId, keyPayload));
-      });
-      await Promise.all(work);
-      setCreateOpen(false);
-      resetCreateForm();
-      await props.onRefresh(t('上游 {{name}} 已创建。', {
-        name: payload.name
-      }));
-      setSelectedProviderId(providerId);
+      setCreateStage('connections');
+      const [endpointResults, keyResults] = await Promise.all([
+        Promise.allSettled(baseUrls.map((baseUrl, index) => {
+          const endpointPayload: CreateEndpointInput = {
+            name: `地址 ${index + 1}`,
+            enabled: true,
+            base_url: baseUrl,
+            priority: priorityForIndex(index),
+            weight: 1
+          };
+          return createEndpoint(props.settings, providerId, endpointPayload);
+        })),
+        Promise.allSettled(apiKeys.map((apiKey, index) => {
+          const keyPayload: CreateProviderKeyInput = {
+            name: `密钥 ${index + 1}`,
+            secret: apiKey,
+            enabled: true,
+            priority: priorityForIndex(index),
+            weight: 1
+          };
+          return createProviderKey(props.settings, providerId, keyPayload);
+        }))
+      ]);
+      const endpointIds = endpointResults.flatMap(result => result.status === 'fulfilled' ? [result.value.id] : []);
+      const keyIds = keyResults.flatMap(result => result.status === 'fulfilled' ? [result.value.id] : []);
+      const failure = [...endpointResults, ...keyResults].find(result => result.status === 'rejected');
+      const resources = {
+        providerId,
+        endpointIds,
+        keyIds
+      };
+      if (failure?.status === 'rejected') {
+        const failureMessage = failure.reason instanceof Error ? failure.reason.message : '保存连接信息失败。';
+        try {
+          await deleteProvider(props.settings, providerId);
+          setCreateStage('editing');
+          const message = t('保存连接信息失败，已回滚新建上游：{{message}}', {
+            message: failureMessage
+          });
+          setCreateSubmitError(message);
+          props.onMessage(message);
+        } catch (rollbackError) {
+          setCreateResources(resources);
+          setCreateStage('partial');
+          const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : '自动回滚失败。';
+          const message = t('上游已部分创建，自动回滚失败：{{message}}', {
+            message: rollbackMessage
+          });
+          setCreateSubmitError(message);
+          props.onMessage(message);
+        }
+        return;
+      }
+      setCreateBaseUrls(baseUrls.map(value => ({ id: createDraftInputRow('url').id, value })));
+      setCreateApiKeys(apiKeys.map(value => ({ id: createDraftInputRow('key').id, value })));
+      setCreateResources(resources);
+      await syncCreatedProvider(resources, payload.name);
     } catch (error) {
       console.error('Failed to create provider', error);
       const message = error instanceof Error ? error.message : '创建上游失败。';
+      setCreateStage('editing');
       setCreateSubmitError(message);
       props.onMessage(message);
-    } finally {
-      setBusy(null);
     }
+  };
+  const finishProviderCreate = async () => {
+    const resources = createResources;
+    const stage = createStage;
+    const name = createName.trim();
+    setCreateOpen(false);
+    resetCreateForm();
+    if (!resources) return;
+    await props.onRefresh(stage === 'complete'
+      ? t('上游 {{name}} 已创建并完成模型同步。', { name })
+      : t('上游 {{name}} 已创建，模型可稍后继续同步。', { name }));
+    setSelectedProviderId(resources.providerId);
   };
   const submitProviderUpdate = async (event: FormEvent<HTMLFormElement>, item: ProviderWorkspace) => {
     event.preventDefault();
@@ -870,6 +1010,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
       setBusy(null);
     }
   };
+  const syncModelsForProvider = async (providerId: number, providerName: string) => {
+    if (!ensureLive()) return;
+    setBusy(`models-sync-${providerId}`);
+    try {
+      const models = await syncProviderModels(props.settings, providerId);
+      props.onMessage(t('上游 {{name}} 已同步 {{count}} 个模型。', {
+        name: providerName,
+        count: models.length
+      }));
+    } catch (error) {
+      props.onMessage(error instanceof Error ? error.message : '同步模型失败。');
+    } finally {
+      setBusy(null);
+    }
+  };
   return <Box className="section-stack">
       <PageHeader title="上游" description="查看连接目标、流量去向与健康状态。" actions={<Button type="button" disabled={!isLive()} className="rounded-none text-xs tracking-wider" onClick={() => {
       resetCreateForm();
@@ -934,10 +1089,29 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         </TableCell>
                         <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest opacity-80">{item.provider.runtime?.last_error_type ?? item.provider.health?.last_error_type ?? '—'}</TableCell>
                         <TableCell className="text-right">
-                          <Button type="button" size="sm" variant="ghost" className="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={event => {
-                    event.stopPropagation();
-                    setSelectedProviderId(item.provider.id);
-                  }}>{t("[ DETAILS ]")}</Button>
+                          <Box className="flex items-center justify-end gap-1">
+                            <Tooltip title={t('同步模型')}>
+                              <span>
+                                <Button
+                                  type="button"
+                                  size="icon"
+                                  variant="ghost"
+                                  aria-label={t('同步上游 {{name}} 的模型', { name: item.provider.name })}
+                                  disabled={busy !== null || item.endpoints.length === 0 || item.keys.length === 0}
+                                  onClick={event => {
+                                    event.stopPropagation();
+                                    void syncModelsForProvider(item.provider.id, item.provider.name);
+                                  }}
+                                >
+                                  <RefreshCw className={`size-3.5 ${busy === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} />
+                                </Button>
+                              </span>
+                            </Tooltip>
+                            <Button type="button" size="sm" variant="ghost" className="font-mono text-xs hover:bg-transparent hover:text-primary px-0 shrink-0" onClick={event => {
+                              event.stopPropagation();
+                              setSelectedProviderId(item.provider.id);
+                            }}>{t("[ DETAILS ]")}</Button>
+                          </Box>
                         </TableCell>
                       </TableRow>;
             })}
@@ -949,15 +1123,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   item.provider.runtime?.available ?? item.provider.health?.available,
                 );
                 const lastError = item.provider.runtime?.last_error_type ?? item.provider.health?.last_error_type;
-                return <ButtonBase
-                  key={item.provider.id}
-                  component="button"
-                  type="button"
-                  aria-label={t('查看上游 {{name}} 详情', { name: item.provider.name })}
-                  className="w-full touch-manipulation items-stretch px-4 py-3 text-left"
-                  onClick={() => setSelectedProviderId(item.provider.id)}
-                >
-                  <Box className="flex min-w-0 flex-1 flex-col gap-2">
+                return <Box key={item.provider.id} className="flex min-w-0 items-stretch">
+                  <ButtonBase
+                    component="button"
+                    type="button"
+                    aria-label={t('查看上游 {{name}} 详情', { name: item.provider.name })}
+                    className="min-w-0 flex-1 touch-manipulation items-stretch px-4 py-3 text-left"
+                    onClick={() => setSelectedProviderId(item.provider.id)}
+                  >
+                    <Box className="flex min-w-0 flex-1 flex-col gap-2">
                     <Box className="flex min-w-0 items-center gap-2">
                       <Box className="min-w-0 flex-1 truncate text-sm font-medium text-foreground" component="strong">{item.provider.name}</Box>
                       <StatusBadge tone={health.tone}>{t(health.label)}</StatusBadge>
@@ -974,8 +1148,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       </Box>
                       {lastError ? <Box className="text-destructive" component="span">{lastError}</Box> : null}
                     </Box>
+                    </Box>
+                  </ButtonBase>
+                  <Box className="flex w-14 shrink-0 items-center justify-center border-l border-border/40">
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      aria-label={t('同步上游 {{name}} 的模型', { name: item.provider.name })}
+                      disabled={busy !== null || item.endpoints.length === 0 || item.keys.length === 0}
+                      onClick={() => void syncModelsForProvider(item.provider.id, item.provider.name)}
+                    >
+                      <RefreshCw className={`size-4 ${busy === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} />
+                    </Button>
                   </Box>
-                </ButtonBase>;
+                </Box>;
               })}
             </Box>}</> : <EmptyState title="NO PROVIDERS" description="先连接一个可用目标，再逐步补充更多目标和密钥。" action={<Button type="button" disabled={!isLive()} variant="ghost" onClick={() => {
           resetCreateForm();
@@ -1037,19 +1224,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
         </CardContent>
       </Card>
 
-      <DetailDrawer open={createOpen} title="NEW PROVIDER" description="填写必要信息即可创建。" onClose={() => setCreateOpen(false)}>
-        <Box className="flex flex-col gap-6" onSubmit={event => void submitProviderCreate(event)} component="form">
+      <DetailDrawer open={createOpen} title="NEW PROVIDER" description="填写连接信息并同步模型。" onClose={() => {
+        if (!createIsBusy) void finishProviderCreate();
+      }}>
+        <Box key={createFormVersion} className="flex flex-col gap-6" onSubmit={event => void submitProviderCreate(event)} component="form">
           <Box className="grid gap-6 md:grid-cols-2">
             <FormControl>
               <FormLabel>{t("名称")}</FormLabel>
-              <InputBase name="name" value={createName} onChange={event => {
+              <InputBase name="name" value={createName} disabled={createFieldsDisabled} onChange={event => {
               setCreateName(event.target.value);
               setCreateSubmitError(null);
             }} placeholder={t("openai-prod")} className="bg-background" />
             </FormControl>
             <FormControl>
               <FormLabel>{t("类型")}</FormLabel>
-              <Select name="provider_type" value={createProviderType} onChange={event => setCreateProviderType(event.target.value)}>
+              <Select name="provider_type" value={createProviderType} disabled={createFieldsDisabled} onChange={event => setCreateProviderType(event.target.value)}>
                 {PROVIDER_TYPE_OPTIONS.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
               </Select>
               <FormHelperText className="mt-2">{t(providerTypeDescription(createProviderType))}</FormHelperText>
@@ -1061,6 +1250,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                 name="priority"
                 type="number"
                 value={createPriority}
+                disabled={createFieldsDisabled}
                 slotProps={{
                   input: {
                     inputMode: 'numeric',
@@ -1084,6 +1274,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                 name="weight"
                 type="number"
                 value={createWeight}
+                disabled={createFieldsDisabled}
                 slotProps={{
                   input: {
                     inputMode: 'numeric',
@@ -1105,6 +1296,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <Select
                 multiple
                 value={createGroupIds}
+                disabled={createFieldsDisabled}
                 onChange={event => {
                   const value = event.target.value;
                   setCreateGroupIds(
@@ -1130,15 +1322,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
             <FormControl>
               <Box className="flex items-center justify-between gap-3">
                 <FormLabel>{t("服务地址")}</FormLabel>
-                <Button type="button" size="icon" variant="ghost" aria-label={t('添加服务地址')} onClick={addCreateBaseUrl}>
+                <Button type="button" size="icon" variant="ghost" aria-label={t('添加服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateBaseUrl}>
                   <Plus className="size-4" />
                 </Button>
               </Box>
               <Box className="grid gap-3">
                 {createBaseUrls.map((row, index) => <Box key={row.id} className="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
                       <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
-                      <InputBase type="url" value={row.value} autoComplete="off" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateBaseUrl(row.id, event.target.value)} placeholder={t("https://api.example.com")} className="bg-background" />
-                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除服务地址')} onClick={() => removeCreateBaseUrl(row.id)}>
+                      <InputBase type="url" value={row.value} disabled={createFieldsDisabled} autoComplete="off" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateBaseUrl(row.id, event.target.value)} placeholder={t("https://api.example.com")} className="bg-background" />
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateBaseUrl(row.id)}>
                         <Trash2 className="size-4" />
                       </Button>
                     </Box>)}
@@ -1147,15 +1339,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
             <FormControl>
               <Box className="flex items-center justify-between gap-3">
                 <FormLabel>{t("API 密钥")}</FormLabel>
-                <Button type="button" size="icon" variant="ghost" aria-label={t('添加 API 密钥')} onClick={addCreateApiKey}>
+                <Button type="button" size="icon" variant="ghost" aria-label={t('添加 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateApiKey}>
                   <Plus className="size-4" />
                 </Button>
               </Box>
               <Box className="grid gap-3">
                 {createApiKeys.map((row, index) => <Box key={row.id} className="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
                       <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
-                      <InputBase type="password" value={row.value} autoComplete="new-password" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateApiKey(row.id, event.target.value)} placeholder={t("sk-...")} className="bg-background" />
-                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除 API 密钥')} onClick={() => removeCreateApiKey(row.id)}>
+                      <InputBase type="password" value={row.value} disabled={createFieldsDisabled} autoComplete="new-password" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateApiKey(row.id, event.target.value)} placeholder={t("sk-...")} className="bg-background" />
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateApiKey(row.id)}>
                         <Trash2 className="size-4" />
                       </Button>
                     </Box>)}
@@ -1164,33 +1356,65 @@ export function ProvidersPage(props: ProvidersPageProps) {
           </Box>
           <Box className="grid gap-4 md:grid-cols-4">
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
-              <Checkbox name="enabled" defaultChecked />
+              <Checkbox name="enabled" defaultChecked disabled={createFieldsDisabled} />
               <Box component="span">{t('创建后启用')}</Box>
             </Box>
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
-              <Checkbox name="supports_include_usage" defaultChecked />
+              <Checkbox name="supports_include_usage" defaultChecked disabled={createFieldsDisabled} />
               <Box component="span">{t('补充用量')}</Box>
             </Box>
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
-              <Checkbox name="websocket_enabled" />
+              <Checkbox name="websocket_enabled" disabled={createFieldsDisabled} />
               <Box component="span">{t('WebSocket')}</Box>
             </Box>
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
-              <Checkbox name="responses_http_to_ws" />
+              <Checkbox name="responses_http_to_ws" disabled={createFieldsDisabled} />
               <Box component="span">{t('HTTP→WS Beta')}</Box>
             </Box>
           </Box>
-          <Box className="border border-border/40 bg-transparent p-4 text-sm text-muted-foreground font-mono">
+          <Box className="grid gap-2 sm:grid-cols-3" aria-label={t('创建进度')}>
+            {[t('基本配置'), t('连接信息'), t('模型同步')].map((label, index) => {
+              const activeIndex = createStage === 'provider' ? 0
+                : createStage === 'connections' || createStage === 'partial' ? 1
+                  : createStage === 'models' || createStage === 'sync_failed' ? 2
+                    : createStage === 'complete' ? 3 : -1;
+              const failed = (createStage === 'partial' && index === 1) || (createStage === 'sync_failed' && index === 2);
+              const complete = createStage === 'complete' || index < activeIndex;
+              const active = createIsBusy && index === activeIndex;
+              return <Box key={label} className="flex min-h-12 items-center justify-between gap-3 border border-border/40 bg-muted/5 px-3 py-2">
+                <Box className="flex min-w-0 items-center gap-2 text-sm">
+                  {complete ? <Check className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                    : active ? <RefreshCw className="size-4 shrink-0 animate-spin text-primary" aria-hidden="true" />
+                      : <Box className="size-2 shrink-0 rounded-full bg-muted-foreground/35" component="span" />}
+                  <Box className="truncate" component="span">{label}</Box>
+                </Box>
+                <StatusBadge tone={failed ? 'error' : complete ? 'normal' : active ? 'warning' : 'disabled'}>
+                  {t(failed ? '失败' : complete ? '完成' : active ? '进行中' : '等待')}
+                </StatusBadge>
+              </Box>;
+            })}
+          </Box>
+          <Box className="border border-border/40 bg-transparent p-4 text-sm text-muted-foreground font-mono" aria-live="polite">
             {createFormHint()}
           </Box>
+          {createStage === 'complete' ? <Alert className="rounded-none border-border/40 bg-muted/20" severity="success" variant="outlined">
+              <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t('模型同步完成')}</AlertTitle>
+              <Typography className="mt-2 text-[0.8rem] leading-relaxed text-muted-foreground opacity-80" component="div">
+                {t('已同步 {{count}} 个模型。', { count: createSyncedCount ?? 0 })}
+              </Typography>
+            </Alert> : null}
           {createSubmitError ? <Alert className="rounded-none border-border/40 bg-muted/20" severity="error" variant="outlined">
-              <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t("创建失败")}</AlertTitle>
+              <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t(createStage === 'sync_failed' ? '同步失败' : createStage === 'partial' ? '部分创建' : '创建失败')}</AlertTitle>
               <Typography className="text-[0.8rem] leading-relaxed text-muted-foreground mt-2 opacity-80" component="div">{createSubmitError}</Typography>
             </Alert> : null}
-          <Box className="flex justify-end border-t border-border/40 pt-6 mt-2">
-            <Button type="submit" disabled={busy === 'create-provider' || createMissingFields().length > 0} className="rounded-none font-mono text-xs tracking-widest px-8">
-              {busy === 'create-provider' ? 'CREATING...' : 'CREATE'}
-            </Button>
+          <Box className="flex flex-wrap justify-end gap-2 border-t border-border/40 pt-6 mt-2">
+            {createIsPersisted ? <Button type="button" variant="outline" disabled={createIsBusy} onClick={() => void finishProviderCreate()}>
+              {t('完成')}
+            </Button> : null}
+            {createStage !== 'complete' && createStage !== 'partial' ? <Button type="submit" disabled={createIsBusy || createMissingFields().length > 0} className="rounded-none font-mono text-xs tracking-widest px-8">
+              <RefreshCw className={`mr-2 size-3.5 ${createIsBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
+              {t(createStage === 'sync_failed' ? '保存并重试同步' : createIsBusy ? '处理中…' : '创建并同步')}
+            </Button> : null}
           </Box>
         </Box>
       </DetailDrawer>
@@ -1624,16 +1848,28 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t('可用模型')}</Typography>
                         <Typography className="text-sm leading-6 text-muted-foreground" component="p">{t('模型库存、显示名称、别名目标和协议能力已集中到模型页。')}</Typography>
                       </Box>
-                      <Button
-                        component="a"
-                        href={`/models?provider_id=${item.provider.id}`}
-                        size="sm"
-                        disabled={!isLive()}
-                        className="shrink-0 rounded-none text-xs tracking-wider"
-                      >
-                        {t('在模型页管理')}
-                        <ChevronRight className="ml-2 size-3" aria-hidden="true" />
-                      </Button>
+                      <Box className="flex shrink-0 flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null || item.endpoints.length === 0 || item.keys.length === 0}
+                          onClick={() => void syncModelsForProvider(item.provider.id, item.provider.name)}
+                        >
+                          <RefreshCw className={`mr-2 size-3 ${busy === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
+                          {t('同步模型')}
+                        </Button>
+                        <Button
+                          component="a"
+                          href={`/models?provider_id=${item.provider.id}`}
+                          size="sm"
+                          disabled={!isLive()}
+                          className="rounded-none text-xs tracking-wider"
+                        >
+                          {t('在模型页管理')}
+                          <ChevronRight className="ml-2 size-3" aria-hidden="true" />
+                        </Button>
+                      </Box>
                     </CardContent>
                   </Card>
                 </Box>

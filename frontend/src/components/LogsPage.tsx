@@ -473,16 +473,37 @@ export function LogsPage(props: LogsPageProps) {
             </Menu>
           </Box>
           <CardContent className="p-0 border-t border-border/40">
-            {rows.length > 0 ? <TableContainer className="max-w-full overflow-x-auto">
-              <Table size="small" sx={{ minWidth: Math.max(720, visibleColumns.reduce((sum, id) => {
+            {rows.length > 0 ? <TableContainer
+              className="max-w-full overflow-auto"
+              data-testid="request-log-table-container"
+              sx={{ maxHeight: { xs: '65dvh', md: 'min(70dvh, 48rem)' } }}
+            >
+              <Table stickyHeader aria-label={t('请求日志')} size="small" sx={{ minWidth: Math.max(720, visibleColumns.reduce((sum, id) => {
                 return sum + (LOG_COLUMN_DEFINITIONS.find(column => column.id === id)?.minWidth ?? 100);
               }, 56)) }}>
-                <TableHead>
+                <TableHead sx={{ '& .MuiTableCell-head': { bgcolor: 'background.default' } }}>
                   <TableRow>
-                    <TableCell aria-label={t('展开控制')} sx={{ width: 56, minWidth: 56 }} />
-                    {visibleColumns.map(id => {
+                    <TableCell aria-label={t('展开控制')} data-sticky-column="expand" sx={{
+                      position: 'sticky',
+                      left: { xs: 'auto', md: 0 },
+                      zIndex: 5,
+                      width: 56,
+                      minWidth: 56,
+                      maxWidth: 56,
+                      bgcolor: 'background.default',
+                    }} />
+                    {visibleColumns.map((id, index) => {
                       const column = LOG_COLUMN_DEFINITIONS.find(item => item.id === id)!;
-                      return <TableCell key={id} sx={{ minWidth: column.minWidth }}>{t(column.label)}</TableCell>;
+                      return <TableCell key={id} data-sticky-column={index === 0 ? 'first-visible' : undefined} sx={{
+                        minWidth: column.minWidth,
+                        ...(index === 0 ? {
+                          position: 'sticky',
+                          left: { xs: 0, md: 56 },
+                          zIndex: 4,
+                          bgcolor: 'background.default',
+                          boxShadow: '4px 0 8px -7px rgb(0 0 0 / 0.65)',
+                        } : {}),
+                      }}>{t(column.label)}</TableCell>;
                     })}
                   </TableRow>
                 </TableHead>
@@ -496,7 +517,17 @@ export function LogsPage(props: LogsPageProps) {
                       className={`cursor-pointer ${item.depth > 0 ? 'border-l-2 border-l-primary/30 bg-muted/10' : ''}`}
                       onClick={() => setSelected(row)}
                     >
-                      <TableCell sx={{ width: 56, minWidth: 56, pl: item.depth > 0 ? 3 : 1 }}>
+                      <TableCell data-sticky-column="expand" sx={{
+                        position: 'sticky',
+                        left: { xs: 'auto', md: 0 },
+                        zIndex: 2,
+                        width: 56,
+                        minWidth: 56,
+                        maxWidth: 56,
+                        pl: item.depth > 0 ? 3 : 1,
+                        bgcolor: item.depth > 0 ? 'color-mix(in oklab, var(--muted) 10%, var(--background))' : 'background.default',
+                        'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
+                      }}>
                         {hasChildren ? <Button
                           type="button"
                           size="icon"
@@ -513,7 +544,14 @@ export function LogsPage(props: LogsPageProps) {
                             : <ChevronRight className="size-3" aria-hidden="true" />}
                         </Button> : null}
                       </TableCell>
-                      {visibleColumns.map(id => <TableCell key={id}>
+                      {visibleColumns.map((id, index) => <TableCell key={id} data-sticky-column={index === 0 ? 'first-visible' : undefined} sx={index === 0 ? {
+                        position: 'sticky',
+                        left: { xs: 0, md: 56 },
+                        zIndex: 2,
+                        bgcolor: item.depth > 0 ? 'color-mix(in oklab, var(--muted) 10%, var(--background))' : 'background.default',
+                        boxShadow: '4px 0 8px -7px rgb(0 0 0 / 0.65)',
+                        'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
+                      } : undefined}>
                         <LogColumnValue
                           id={id}
                           row={row}

@@ -17,6 +17,7 @@ target
 .env
 .env.*
 !.env.example
+.opencode.env
 
 # Frontend (Vite / Solid / TypeScript)
 frontend/node_modules/
