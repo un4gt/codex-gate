@@ -13,7 +13,7 @@ use crate::types::{
     UpstreamKey, UpstreamProvider,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct UpstreamSnapshot {
     pub providers: Vec<UpstreamProvider>,
     pub keys_by_provider: HashMap<i64, Vec<UpstreamKey>>,
@@ -21,6 +21,7 @@ pub struct UpstreamSnapshot {
     pub groups_by_provider: HashMap<i64, Vec<ProviderGroupMembership>>,
     pub routes_by_model: HashMap<String, ModelRoute>,
     pub provider_models_by_provider: HashMap<i64, HashMap<String, bool>>,
+    pub responses_via_chat_by_provider: HashMap<i64, HashMap<String, bool>>,
     pub alias_to_provider_model: HashMap<String, ProviderModelAliasTarget>,
     pub model_aliases_by_name: HashMap<String, ModelAlias>,
     pub alias_targets_by_alias: HashMap<i64, Vec<ModelAliasTarget>>,
@@ -203,12 +204,24 @@ impl UpstreamCache {
         }
 
         let mut provider_models_by_provider: HashMap<i64, HashMap<String, bool>> = HashMap::new();
+        let mut responses_via_chat_by_provider: HashMap<i64, HashMap<String, bool>> =
+            HashMap::new();
         let mut alias_to_provider_model: HashMap<String, ProviderModelAliasTarget> = HashMap::new();
         for model in provider_models {
             provider_models_by_provider
                 .entry(model.provider_id)
                 .or_default()
-                .insert(model.upstream_model.clone(), model.enabled);
+                .insert(
+                    model.upstream_model.clone(),
+                    model.enabled && model.available,
+                );
+            responses_via_chat_by_provider
+                .entry(model.provider_id)
+                .or_default()
+                .insert(
+                    model.upstream_model.clone(),
+                    model.enabled && model.available && model.responses_via_chat_enabled,
+                );
 
             if let Some(alias) = model
                 .alias
@@ -221,7 +234,7 @@ impl UpstreamCache {
                     ProviderModelAliasTarget {
                         provider_id: model.provider_id,
                         upstream_model: model.upstream_model.clone(),
-                        enabled: model.enabled,
+                        enabled: model.enabled && model.available,
                     },
                 );
             }
@@ -295,6 +308,7 @@ impl UpstreamCache {
             groups_by_provider,
             routes_by_model,
             provider_models_by_provider,
+            responses_via_chat_by_provider,
             alias_to_provider_model,
             model_aliases_by_name,
             alias_targets_by_alias,
@@ -340,6 +354,7 @@ mod tests {
             groups_by_provider: HashMap::new(),
             routes_by_model: HashMap::new(),
             provider_models_by_provider: HashMap::new(),
+            responses_via_chat_by_provider: HashMap::new(),
             alias_to_provider_model: HashMap::new(),
             model_aliases_by_name: HashMap::new(),
             alias_targets_by_alias: HashMap::new(),

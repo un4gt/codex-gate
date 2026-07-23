@@ -6,9 +6,9 @@ import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
-import { addUpstreamKeyModels, createEndpoint, createModelAlias, createModelAliasTarget, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteModelAlias, deleteModelAliasTarget, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, deleteProviderModel, loadGatewayModelPolicies, loadProviderModels, loadUpstreamKeyModels, resetProviderCircuit, syncUpstreamKeyModels, syncProviderModels, testEndpointConnection, updateGatewayModelPolicy, updateEndpoint, updateProvider, updateProviderGroup, updateModelAlias, updateModelAliasTarget, updateUpstreamKeyModel, updateProviderModel, updateProviderKey } from '../lib/api';
+import { addUpstreamKeyModels, createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, loadUpstreamKeyModels, resetProviderCircuit, syncUpstreamKeyModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateUpstreamKeyModel, updateProviderKey } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
-import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, GatewayModelPolicy, ModelAlias, ProviderGroup, ProviderModel, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpstreamKeyModel, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
+import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, ProviderGroup, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpstreamKeyModel, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
@@ -39,7 +39,6 @@ import { useTheme } from "@mui/material/styles";
 interface ProvidersPageProps {
   settings: ConnectionSettings;
   items: ProviderWorkspace[];
-  aliases: ModelAlias[];
   groups?: ProviderGroup[];
   onRefresh: (successMessage?: string) => Promise<void>;
   onMessage: (message: string) => void;
@@ -238,19 +237,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
       fields: createMissingFields().map(field => t(field)).join(', ')
     });
   };
-  const [providerModels, setProviderModels] = useState<ProviderModel[] | null>(null);
-  const [providerModelsError, setProviderModelsError] = useState<string | null>(null);
-  const [modelAliasDraft, setModelAliasDraft] = useState<Record<number, string>>({});
   const [selectedUpstreamKeyId, setSelectedUpstreamKeyId] = useState<number | null>(null);
   const [upstreamKeyModels, setUpstreamKeyModels] = useState<UpstreamKeyModel[] | null>(null);
   const [upstreamKeyModelsError, setUpstreamKeyModelsError] = useState<string | null>(null);
   const [upstreamKeyModelsDraft, setUpstreamKeyModelsDraft] = useState('');
-  const [gatewayModelPolicies, setGatewayModelPolicies] = useState<GatewayModelPolicy[] | null>(null);
-  const [gatewayModelPoliciesError, setGatewayModelPoliciesError] = useState<string | null>(null);
-  const disabledGatewayModels = () => {
-    const policies = gatewayModelPolicies ?? [];
-    return new Set(policies.filter(policy => !policy.enabled).map(policy => policy.model_name));
-  };
   const providerTypeDescription = (value: string) => PROVIDER_TYPE_OPTIONS.find(option => option.value === value)?.description ?? '—';
   const stats = (): StatItem[] => {
     const totalEndpoints = props.items.reduce((sum, item) => sum + item.endpoints.length, 0);
@@ -687,9 +677,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }));
   };
   useEffect(() => {
-    setProviderModels(null);
-    setProviderModelsError(null);
-    setModelAliasDraft({});
     setSelectedUpstreamKeyId(null);
     setUpstreamKeyModels(null);
     setUpstreamKeyModelsError(null);
@@ -746,48 +733,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
       cancelled = true;
     };
   }, [selected?.provider.id, selectedUpstreamKeyId, props.settings]);
-  useEffect(() => {
-    const item = selected;
-    if (!item || !isLive()) return;
-    const providerId = item.provider.id;
-    let cancelled = false;
-    setProviderModels(null);
-    setProviderModelsError(null);
-    void loadProviderModels(props.settings, providerId).then(models => {
-      if (cancelled) return;
-      setProviderModels(models);
-      setModelAliasDraft(current => {
-        const next: Record<number, string> = {};
-        for (const model of models) {
-          next[model.id] = current[model.id] ?? model.alias ?? '';
-        }
-        return next;
-      });
-    }).catch(error => {
-      if (cancelled) return;
-      setProviderModels([]);
-      setProviderModelsError(error instanceof Error ? error.message : '加载模型失败。');
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [selected?.provider.id, props.settings]);
-  useEffect(() => {
-    if (!isLive()) return;
-    let cancelled = false;
-    setGatewayModelPoliciesError(null);
-    void loadGatewayModelPolicies(props.settings).then(policies => {
-      if (cancelled) return;
-      setGatewayModelPolicies(policies);
-    }).catch(error => {
-      if (cancelled) return;
-      setGatewayModelPolicies([]);
-      setGatewayModelPoliciesError(error instanceof Error ? error.message : '加载全局模型策略失败。');
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.settings]);
   const syncKeyModels = async (upstreamKeyId: number) => {
     if (!ensureLive()) return;
     setBusy(`key-models-sync-${upstreamKeyId}`);
@@ -859,244 +804,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
       props.onMessage('已删除密钥模型。');
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '删除密钥模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const syncModels = async (item: ProviderWorkspace) => {
-    if (!ensureLive()) return;
-    setBusy(`models-sync-${item.provider.id}`);
-    try {
-      const models = await syncProviderModels(props.settings, item.provider.id);
-      setProviderModels(models);
-      setProviderModelsError(null);
-      setModelAliasDraft(current => {
-        const next: Record<number, string> = {};
-        for (const model of models) {
-          next[model.id] = current[model.id] ?? model.alias ?? '';
-        }
-        return next;
-      });
-      props.onMessage(t('已同步 {{count}} 个模型。', {
-        count: models.length
-      }));
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '同步模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const saveModelAlias = async (model: ProviderModel) => {
-    const item = selected;
-    if (!item || !ensureLive()) return;
-    const trimmed = (modelAliasDraft[model.id] ?? '').trim();
-    const nextAlias = trimmed.length > 0 ? trimmed : null;
-    const existingAlias = (model.alias ?? '').trim() || null;
-    if (nextAlias === existingAlias) return;
-    setBusy(`provider-model-${model.id}`);
-    try {
-      await updateProviderModel(props.settings, model.id, {
-        alias: trimmed
-      });
-      setProviderModels(current => current ? current.map(row => row.id === model.id ? {
-        ...row,
-        alias: nextAlias
-      } : row) : current);
-      setModelAliasDraft(current => ({
-        ...current,
-        [model.id]: nextAlias ?? ''
-      }));
-      props.onMessage('已保存别名。');
-    } catch (error) {
-      setModelAliasDraft(current => ({
-        ...current,
-        [model.id]: model.alias ?? ''
-      }));
-      props.onMessage(error instanceof Error ? error.message : '保存别名失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const toggleModelEnabled = async (model: ProviderModel, enabled: boolean) => {
-    const item = selected;
-    if (!item || !ensureLive()) return;
-    setBusy(`provider-model-${model.id}`);
-    setProviderModels(current => current ? current.map(row => row.id === model.id ? {
-      ...row,
-      enabled
-    } : row) : current);
-    try {
-      await updateProviderModel(props.settings, model.id, {
-        enabled
-      });
-    } catch (error) {
-      setProviderModels(current => current ? current.map(row => row.id === model.id ? {
-        ...row,
-        enabled: model.enabled
-      } : row) : current);
-      props.onMessage(error instanceof Error ? error.message : '更新模型状态失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const toggleGatewayModelEnabled = async (upstreamModel: string, enabled: boolean) => {
-    if (!ensureLive()) return;
-    setBusy(`gateway-model-${upstreamModel}`);
-    try {
-      await updateGatewayModelPolicy(props.settings, {
-        model_name: upstreamModel,
-        enabled
-      });
-      const policies = await loadGatewayModelPolicies(props.settings);
-      setGatewayModelPolicies(policies);
-      setGatewayModelPoliciesError(null);
-      props.onMessage(enabled ? '已取消全局禁用。' : '已全局禁用该模型。');
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新全局模型策略失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const removeModel = async (model: ProviderModel) => {
-    const item = selected;
-    if (!item || !ensureLive()) return;
-    if (!window.confirm(t('确认删除模型 {{name}}？', {
-      name: model.upstream_model
-    }))) return;
-    setBusy(`provider-model-${model.id}`);
-    try {
-      await deleteProviderModel(props.settings, model.id);
-      setProviderModels(current => current ? current.filter(row => row.id !== model.id) : current);
-      setModelAliasDraft(current => {
-        const next = {
-          ...current
-        };
-        delete next[model.id];
-        return next;
-      });
-      props.onMessage('已删除模型。');
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const submitAliasCreate = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!ensureLive()) return;
-    const formData = new FormData(event.currentTarget as HTMLFormElement);
-    const name = readString(formData, 'alias_name');
-    if (!name) {
-      props.onMessage('模型名称不能为空。');
-      return;
-    }
-    setBusy('alias-create');
-    try {
-      await createModelAlias(props.settings, {
-        name,
-        enabled: readBool(formData, 'alias_enabled'),
-        mode: (readString(formData, 'alias_mode') || 'ordered') as 'ordered' | 'weighted'
-      });
-      (event.currentTarget as HTMLFormElement).reset();
-      await props.onRefresh(t('模型 {{name}} 已创建。', {
-        name
-      }));
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '创建模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const submitAliasUpdate = async (event: FormEvent<HTMLFormElement>, alias: ModelAlias) => {
-    event.preventDefault();
-    if (!ensureLive()) return;
-    const formData = new FormData(event.currentTarget as HTMLFormElement);
-    const name = readString(formData, `alias_name_${alias.id}`);
-    if (!name) {
-      props.onMessage('模型名称不能为空。');
-      return;
-    }
-    setBusy(`alias-${alias.id}`);
-    try {
-      await updateModelAlias(props.settings, alias.id, {
-        name,
-        enabled: readBool(formData, `alias_enabled_${alias.id}`),
-        mode: (readString(formData, `alias_mode_${alias.id}`) || alias.mode) as 'ordered' | 'weighted'
-      });
-      await props.onRefresh(t('模型 {{name}} 已更新。', {
-        name
-      }));
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const submitAliasTargetCreate = async (event: FormEvent<HTMLFormElement>, alias: ModelAlias) => {
-    event.preventDefault();
-    if (!ensureLive()) return;
-    const formData = new FormData(event.currentTarget as HTMLFormElement);
-    const upstreamModel = readString(formData, `alias_target_model_${alias.id}`);
-    const providerId = readInt(formData, `alias_target_provider_${alias.id}`, 0);
-    if (!upstreamModel || providerId <= 0) {
-      props.onMessage('请选择上游并填写模型。');
-      return;
-    }
-    setBusy(`alias-target-create-${alias.id}`);
-    try {
-      await createModelAliasTarget(props.settings, alias.id, {
-        provider_id: providerId,
-        upstream_model: upstreamModel,
-        enabled: true,
-        priority: readInt(formData, `alias_target_priority_${alias.id}`, 100),
-        weight: readInt(formData, `alias_target_weight_${alias.id}`, 1)
-      });
-      (event.currentTarget as HTMLFormElement).reset();
-      await props.onRefresh('模型目标已添加。');
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '添加模型目标失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const toggleAliasTarget = async (targetId: number, enabled: boolean) => {
-    if (!ensureLive()) return;
-    setBusy(`alias-target-${targetId}`);
-    try {
-      await updateModelAliasTarget(props.settings, targetId, {
-        enabled
-      });
-      await props.onRefresh(enabled ? '模型目标已启用。' : '模型目标已停用。');
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新模型目标失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const removeAliasTarget = async (targetId: number) => {
-    if (!ensureLive()) return;
-    if (!window.confirm('确认删除这个模型目标？')) return;
-    setBusy(`alias-target-${targetId}`);
-    try {
-      await deleteModelAliasTarget(props.settings, targetId);
-      await props.onRefresh('模型目标已删除。');
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除模型目标失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const removeAlias = async (alias: ModelAlias) => {
-    if (!ensureLive()) return;
-    if (!window.confirm(t('确认删除模型 {{name}}？', {
-      name: alias.name
-    }))) return;
-    setBusy(`alias-${alias.id}`);
-    try {
-      await deleteModelAlias(props.settings, alias.id);
-      await props.onRefresh('模型已删除。');
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除模型失败。');
     } finally {
       setBusy(null);
     }
@@ -1327,102 +1034,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
               </TableBody>
             </Table>
           </TableContainer>
-        </CardContent>
-      </Card>
-
-      <Card className="rounded-none border border-border bg-background shadow-none">
-        <Box className="flex flex-col gap-3 p-6 pb-6">
-          <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("模型配置")}</Typography>
-          <Typography className="mt-1 font-mono text-xs uppercase tracking-wider text-muted-foreground" component="div">{t('用一个模型名称管理多个上游目标。')}</Typography>
-        </Box>
-        <CardContent className="grid gap-6 border-t border-border/40 pt-6">
-          <Box className="grid gap-4 xl:grid-cols-[minmax(160px,1fr)_150px_120px_120px]" onSubmit={event => void submitAliasCreate(event)} component="form">
-            <InputBase name="alias_name" placeholder={t("gpt-5")} className="bg-background" />
-            <Select name="alias_mode" defaultValue="ordered">
-              <MenuItem value="ordered">{t('按顺序')}</MenuItem>
-              <MenuItem value="weighted">{t('按权重')}</MenuItem>
-            </Select>
-            <Box className="flex min-h-10 items-center gap-3 border border-border/40 px-3 text-sm text-muted-foreground" component="label">
-              <Checkbox name="alias_enabled" defaultChecked />
-              <Box component="span">{t('启用')}</Box>
-            </Box>
-            <Button type="submit" disabled={busy === 'alias-create'}>
-              {t(busy === 'alias-create' ? '创建中…' : '新增模型')}
-            </Button>
-          </Box>
-
-          {props.aliases.length > 0 ? <Box className="grid gap-5">
-              {props.aliases.map(alias => <Box key={alias.id} className="border border-border/40 bg-muted/5 p-5">
-                    <Box className="grid gap-4 xl:grid-cols-[minmax(160px,1fr)_150px_120px_160px]" onSubmit={event => void submitAliasUpdate(event, alias)} component="form">
-                      <InputBase name={`alias_name_${alias.id}`} defaultValue={alias.name} className="bg-background" />
-                      <Select name={`alias_mode_${alias.id}`} defaultValue={alias.mode}>
-                        <MenuItem value="ordered">{t('按顺序')}</MenuItem>
-                        <MenuItem value="weighted">{t('按权重')}</MenuItem>
-                      </Select>
-                      <Box className="check-row min-h-10 py-2" component="label">
-                        <Checkbox name={`alias_enabled_${alias.id}`} defaultChecked={alias.enabled} />
-                        <Box component="span">{t('启用')}</Box>
-                      </Box>
-                      <Box className="flex gap-2">
-                        <Button type="submit" size="sm" disabled={busy === `alias-${alias.id}`}>{t("保存")}</Button>
-                        <Button type="button" size="sm" variant="ghost" aria-label={t('删除模型')} onClick={() => void removeAlias(alias)}>
-                          <Trash2 className="size-4" />
-                        </Button>
-                      </Box>
-                    </Box>
-
-                    <Box className="mt-5 overflow-x-auto border border-border/30">
-                      <TableContainer><Table>
-                        <TableHead>
-                          <TableRow>
-                            <TableCell>{t("上游")}</TableCell>
-                            <TableCell>{t("模型")}</TableCell>
-                            <TableCell>{t("优先级")}</TableCell>
-                            <TableCell>{t("权重")}</TableCell>
-                            <TableCell>{t("状态")}</TableCell>
-                            <TableCell className="text-right">{t("操作")}</TableCell>
-                          </TableRow>
-                        </TableHead>
-                        <TableBody>
-                          {alias.targets.length > 0 ? alias.targets.map(target => <TableRow key={target.id}>
-                                  <TableCell>{props.items.find(item => item.provider.id === target.provider_id)?.provider.name ?? `#${target.provider_id}`}</TableCell>
-                                  <TableCell className="font-mono text-xs">{target.upstream_model}</TableCell>
-                                  <TableCell className="font-mono text-xs">{target.priority}</TableCell>
-                                  <TableCell className="font-mono text-xs">{target.weight}</TableCell>
-                                  <TableCell>
-                                    <StatusBadge tone={target.enabled ? 'normal' : 'warning'}>{t(target.enabled ? '启用' : '停用')}</StatusBadge>
-                                  </TableCell>
-                                  <TableCell className="text-right">
-                                    <Box className="flex justify-end gap-2">
-                                      <Button type="button" size="sm" variant="ghost" onClick={() => void toggleAliasTarget(target.id, !target.enabled)}>
-                                        {t(target.enabled ? '停用' : '启用')}
-                                      </Button>
-                                      <Button type="button" size="sm" variant="ghost" aria-label={t('删除目标')} onClick={() => void removeAliasTarget(target.id)}>
-                                        <Trash2 className="size-4" />
-                                      </Button>
-                                    </Box>
-                                  </TableCell>
-                                </TableRow>) : <TableRow>
-                                <TableCell colSpan={6} className="text-center text-muted-foreground">
-                                  {t('暂无目标。')}
-                                </TableCell>
-                              </TableRow>}
-                        </TableBody>
-                      </Table></TableContainer>
-                    </Box>
-
-                    <Box className="mt-4 grid gap-4 xl:grid-cols-[180px_minmax(160px,1fr)_110px_110px_120px]" onSubmit={event => void submitAliasTargetCreate(event, alias)} component="form">
-                      <Select displayEmpty name={`alias_target_provider_${alias.id}`} defaultValue="">
-                        <MenuItem value="">{t('选择上游')}</MenuItem>
-                        {props.items.map(item => <MenuItem key={item.provider.id} value={item.provider.id}>{item.provider.name}</MenuItem>)}
-                      </Select>
-                      <InputBase name={`alias_target_model_${alias.id}`} placeholder={t("上游模型名称")} className="bg-background" />
-                      <InputBase name={`alias_target_priority_${alias.id}`} type="number" defaultValue="100" className="bg-background" />
-                      <InputBase name={`alias_target_weight_${alias.id}`} type="number" defaultValue="1" className="bg-background" />
-                      <Button type="submit" disabled={busy === `alias-target-create-${alias.id}`}>{t("添加目标")}</Button>
-                    </Box>
-                  </Box>)}
-            </Box> : <EmptyState title={t('暂无模型配置')} description={t('新增一个模型名称后，再为它添加上游目标。')} />}
         </CardContent>
       </Card>
 
@@ -2007,82 +1618,24 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     </Box>
                   </Box>
 
-                  {isLive() ? <Card className="rounded-none border border-border bg-background shadow-none">
-                      <Box className="flex flex-row items-start justify-between gap-6 p-6 pb-6">
-                        <Box className="grid gap-2">
-                          <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("可用模型")}</Typography>
-                          <Typography className="mt-1 font-mono text-[0.65rem] uppercase leading-5 tracking-wider text-muted-foreground" component="div">{t('同步模型并管理显示名称与启用状态。')}</Typography>
-                        </Box>
-                        <Button type="button" size="sm" className="rounded-none text-xs tracking-wider" onClick={() => void syncModels(item)} disabled={busy === `models-sync-${item.provider.id}`}>
-                          <RefreshCw className="mr-2 size-3" />
-                          {t('SYNC MODELS')}
-                        </Button>
+                  <Card className="rounded-none border border-border bg-background shadow-none">
+                    <CardContent className="flex flex-col items-start justify-between gap-4 p-6 sm:flex-row sm:items-center">
+                      <Box className="grid gap-2">
+                        <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t('可用模型')}</Typography>
+                        <Typography className="text-sm leading-6 text-muted-foreground" component="p">{t('模型库存、显示名称、别名目标和协议能力已集中到模型页。')}</Typography>
                       </Box>
-                      <CardContent className="grid gap-0 border-t border-border/40 p-0">
-                        {providerModelsError ? (message => <Box className="border-b border-border/40 bg-background px-6 py-4 font-mono text-xs text-muted-foreground opacity-80">{message}</Box>)(providerModelsError) : null}
-                        {gatewayModelPoliciesError ? (message => <Box className="border-b border-border/40 bg-background px-6 py-4 font-mono text-xs text-muted-foreground opacity-80">
-                               {t('模型开关：{{message}}', {
-                    message: message
-                  })}
-                             </Box>)(gatewayModelPoliciesError) : null}
-
-                        {(() => {
-                  const models = providerModels;
-                  if (models === null) {
-                    return <Box className="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                {t('读取中…')}
-                              </Box>;
-                  }
-                  if (models.length === 0) {
-                    return <Box className="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                {t('NO MODELS. CLICK SYNC TO FETCH.')}
-                              </Box>;
-                  }
-                  return <TableContainer><Table>
-                              <TableHead>
-                                <TableRow className="border-b border-border/40 hover:bg-transparent bg-muted/5">
-                                  <TableCell className="h-10">{t("上游名称")}</TableCell>
-                                  <TableCell className="h-10 w-[240px]">{t("显示名称")}</TableCell>
-                                  <TableCell className="h-10 text-center w-[80px]">{t("启用")}</TableCell>
-                                  <TableCell className="h-10 text-center w-[80px]">{t("全局")}</TableCell>
-                                  <TableCell className="h-10 text-right w-[100px]">{t("操作")}</TableCell>
-                                </TableRow>
-                              </TableHead>
-                              <TableBody>
-                                {models.map(model => {
-                        const globallyDisabled = () => disabledGatewayModels().has(model.upstream_model);
-                        return <TableRow key={model.id} className={`border-b border-border/40 hover:bg-muted/30 transition-colors ${model.enabled && !globallyDisabled() ? '' : 'opacity-50'}`}>
-                                      <TableCell className="font-mono text-sm max-w-[200px] truncate" title={model.upstream_model}>{model.upstream_model}</TableCell>
-                                      <TableCell className="p-2">
-                                        <Box className="flex items-center">
-                                          <InputBase value={modelAliasDraft[model.id] ?? model.alias ?? ''} placeholder={t("无别名")} disabled={busy === `provider-model-${model.id}`} className="h-8 font-mono text-xs border-transparent bg-transparent hover:border-border/40 focus:border-primary px-2 transition-colors" onChange={event => setModelAliasDraft(current => ({
-                                ...current,
-                                [model.id]: (event.currentTarget as HTMLInputElement).value
-                              }))} onBlur={() => void saveModelAlias(model)} />
-                                        </Box>
-                                      </TableCell>
-                                      <TableCell className="text-center">
-                                        <Checkbox checked={model.enabled} disabled={busy === `provider-model-${model.id}`} onChange={event => void toggleModelEnabled(model, event.currentTarget.checked)} />
-                                      </TableCell>
-                                      <TableCell className="text-center">
-                                        <Checkbox checked={!globallyDisabled()} disabled={busy === `gateway-model-${model.upstream_model}` || gatewayModelPolicies === null} onChange={event => void toggleGatewayModelEnabled(model.upstream_model, event.currentTarget.checked)} />
-                                      </TableCell>
-                                      <TableCell className="text-right p-2">
-                                        <Button type="button" size="icon" variant="ghost" className="size-8 hover:text-destructive opacity-70 hover:opacity-100" aria-label={t('删除模型')} onClick={() => void removeModel(model)} disabled={busy === `provider-model-${model.id}`}>
-                                          <Trash2 className="size-3" />
-                                        </Button>
-                                      </TableCell>
-                                    </TableRow>;
-                      })}
-                              </TableBody>
-                            </Table></TableContainer>;
-                })()}
-                      </CardContent>
-                    </Card> : <Card className="rounded-none border border-border bg-background shadow-none">
-                        <CardContent className="p-6 font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">
-                          连接后台后可同步模型，并管理显示名称和启用状态。
-                        </CardContent>
-                      </Card>}
+                      <Button
+                        component="a"
+                        href={`/models?provider_id=${item.provider.id}`}
+                        size="sm"
+                        disabled={!isLive()}
+                        className="shrink-0 rounded-none text-xs tracking-wider"
+                      >
+                        {t('在模型页管理')}
+                        <ChevronRight className="ml-2 size-3" aria-hidden="true" />
+                      </Button>
+                    </CardContent>
+                  </Card>
                 </Box>
 
                 {testResult ? (result => <Card className="rounded-none border border-border bg-background shadow-none mb-8">

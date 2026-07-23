@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
 import Root from '@/App';
 import { ProvidersPage } from '@/components/ProvidersPage';
+import { ModelsPage } from '@/components/ModelsPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { initializeI18n } from '@/lib/i18n';
 import type { ProviderWorkspace } from '@/lib/types';
@@ -113,7 +114,6 @@ describe('admin console smoke test', () => {
       <ProvidersPage
         settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: '' }}
         items={[]}
-        aliases={[]}
         onRefresh={async () => undefined}
         onMessage={() => undefined}
       />,
@@ -146,7 +146,6 @@ describe('admin console smoke test', () => {
       <ProvidersPage
         settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
         items={[]}
-        aliases={[]}
         onRefresh={async () => undefined}
         onMessage={() => undefined}
       />,
@@ -181,7 +180,6 @@ describe('admin console smoke test', () => {
       <ProvidersPage
         settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
         items={[providerWorkspace()]}
-        aliases={[]}
         onRefresh={async () => undefined}
         onMessage={() => undefined}
       />,
@@ -208,7 +206,6 @@ describe('admin console smoke test', () => {
       <ProvidersPage
         settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
         items={[providerWorkspace()]}
-        aliases={[]}
         onRefresh={async () => undefined}
         onMessage={() => undefined}
       />,
@@ -233,7 +230,6 @@ describe('admin console smoke test', () => {
       <ProvidersPage
         settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
         items={[providerWorkspace()]}
-        aliases={[]}
         onRefresh={async () => undefined}
         onMessage={() => undefined}
       />,
@@ -263,7 +259,6 @@ describe('admin console smoke test', () => {
       <ProvidersPage
         settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
         items={[providerWorkspace()]}
-        aliases={[]}
         onRefresh={async message => {
           refreshMessages.push(message ?? '');
         }}
@@ -291,7 +286,6 @@ describe('admin console smoke test', () => {
       <ProvidersPage
         settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
         items={[providerWorkspace()]}
-        aliases={[]}
         onRefresh={async () => undefined}
         onMessage={() => undefined}
       />,
@@ -314,7 +308,7 @@ describe('admin console smoke test', () => {
     const navigation = await screen.findByRole('navigation', { name: 'Primary' });
     const links = within(navigation).getAllByRole('link');
 
-    expect(links).toHaveLength(5);
+    expect(links).toHaveLength(6);
     for (const link of links) {
       expect(link.getAttribute('data-nav-sortable')).toBe('true');
       expect(link.getAttribute('aria-describedby')).toBe('primary-nav-sort-instructions');
@@ -327,5 +321,141 @@ describe('admin console smoke test', () => {
 
     await waitFor(() => expect(window.location.pathname).toBe('/logs'));
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('inserts Models into an existing custom navigation order without resetting it', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.localStorage.setItem('little_gate_nav_order', JSON.stringify([
+      'logs', 'overview', 'upstreams', 'keys', 'settings',
+    ]));
+    window.history.replaceState({}, '', '/overview');
+
+    renderWithTheme(<Root />);
+
+    const navigation = await screen.findByRole('navigation', { name: 'Primary' });
+    expect(within(navigation).getAllByRole('link').map(link => link.getAttribute('href')))
+      .toEqual(['/logs', '/overview', '/upstreams', '/models', '/keys', '/settings']);
+  });
+
+  it('filters the aggregated model inventory by search text', async () => {
+    fetchRequest.mockImplementation(async input => {
+      if (String(input).endsWith('/api/v1/gateway-models')) return jsonResponse([]);
+      return jsonResponse([
+        {
+          id: 11,
+          provider_id: 7,
+          provider_name: 'Provider A',
+          provider_type: 'openai_compatible',
+          upstream_model: 'model-a',
+          alias: 'alpha',
+          enabled: true,
+          available: true,
+          responses_via_chat_enabled: false,
+          native_api_formats: ['chat_completions'],
+          created_at_ms: 1,
+          updated_at_ms: 1,
+        },
+        {
+          id: 12,
+          provider_id: 8,
+          provider_name: 'Provider B',
+          provider_type: 'openai_compatible_responses',
+          upstream_model: 'model-b',
+          alias: null,
+          enabled: true,
+          available: true,
+          responses_via_chat_enabled: false,
+          native_api_formats: ['responses'],
+          created_at_ms: 1,
+          updated_at_ms: 1,
+        },
+      ]);
+    });
+
+    renderWithTheme(<ModelsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      providers={[providerWorkspace()]}
+      aliases={[]}
+      onAliasesRefresh={async () => undefined}
+      onMessage={() => undefined}
+    />);
+
+    expect(await screen.findByText('model-a')).toBeTruthy();
+    expect(screen.getByText('model-b')).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText('Search models, aliases, or providers'), {
+      target: { value: 'alpha' },
+    });
+
+    expect(screen.getByText('model-a')).toBeTruthy();
+    expect(screen.queryByText('model-b')).toBeNull();
+  });
+
+  it('creates a model alias from the Models page and refreshes aliases', async () => {
+    let aliasPayload: Record<string, unknown> | null = null;
+    let aliasRefreshes = 0;
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (init?.method === 'POST' && url.endsWith('/api/v1/model-aliases')) {
+        aliasPayload = JSON.parse(String(init.body));
+        return jsonResponse({ id: 21 });
+      }
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(<ModelsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      providers={[providerWorkspace()]}
+      aliases={[]}
+      onAliasesRefresh={async () => {
+        aliasRefreshes += 1;
+      }}
+      onMessage={() => undefined}
+    />);
+
+    fireEvent.change(screen.getByPlaceholderText('gpt-5'), { target: { value: 'codex-route' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add Model' }));
+
+    await waitFor(() => expect(aliasPayload).toEqual({
+      name: 'codex-route',
+      enabled: true,
+      mode: 'ordered',
+    }));
+    await waitFor(() => expect(aliasRefreshes).toBe(1));
+  });
+
+  it('rolls back a model conversion toggle when saving fails', async () => {
+    const messages: string[] = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      if (init?.method === 'PATCH') return new Response('failed', { status: 500 });
+      if (String(input).endsWith('/api/v1/gateway-models')) return jsonResponse([]);
+      return jsonResponse([{
+        id: 11,
+        provider_id: 7,
+        provider_name: 'Provider A',
+        provider_type: 'openai_compatible',
+        upstream_model: 'model-a',
+        alias: null,
+        enabled: true,
+        available: true,
+        responses_via_chat_enabled: false,
+        native_api_formats: ['chat_completions'],
+        created_at_ms: 1,
+        updated_at_ms: 1,
+      }]);
+    });
+
+    renderWithTheme(<ModelsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      providers={[providerWorkspace()]}
+      aliases={[]}
+      onAliasesRefresh={async () => undefined}
+      onMessage={message => messages.push(message)}
+    />);
+
+    const checkbox = await screen.findByRole('checkbox', { name: /model-a.*Responses/i });
+    expect((checkbox as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(checkbox);
+    await waitFor(() => expect((checkbox as HTMLInputElement).checked).toBe(false));
+    expect(messages.some(message => message.includes('500'))).toBe(true);
   });
 });

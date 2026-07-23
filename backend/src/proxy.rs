@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::header::{
     ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, PROXY_AUTHENTICATE,
@@ -27,6 +27,10 @@ use crate::metrics::{FailoverKind, RequestMetric};
 use crate::openai::{OpenAiRequestInfo, ensure_include_usage, parse_request_info};
 use crate::pricing::{PriceVersion, PricingEvaluation, evaluate_price};
 use crate::provider_runtime::{BreakerTransition, ProviderAttemptGuard, ProviderCapacityPermit};
+use crate::responses_via_chat::{
+    ChatSseToResponses, ConversionContext, chat_response_to_responses, has_previous_response_id,
+    responses_request_to_chat,
+};
 use crate::selector;
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
@@ -91,7 +95,6 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
     let mut enabled_provider_ids = HashSet::new();
     for provider in &snap.providers {
         if provider.enabled
-            && provider_supports_api_format(&provider.provider_type, requested_api_format)
             && provider_matching_groups(&snap, provider.id, &authorized_group_ids)
                 .next()
                 .is_some()
@@ -128,6 +131,18 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
             return false;
         }
         if !provider_model_enabled(provider_id, upstream_model) {
+            return false;
+        }
+        let Some(provider) = snap
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+        else {
+            return false;
+        };
+        if provider_route_api_format(&snap, provider, requested_api_format, upstream_model, true)
+            .is_none()
+        {
             return false;
         }
         provider_has_usable_key_for_model(provider_id, upstream_model)
@@ -355,6 +370,7 @@ async fn proxy_openai(
                     ApiFormat::ChatCompletions => "chat_completions",
                     ApiFormat::Responses => "responses",
                 },
+                upstream_api_format: None,
                 model,
                 http_status: Some(status.as_u16() as i32),
                 error_type: Some(error_type.to_string()),
@@ -443,6 +459,7 @@ async fn proxy_openai(
         &model_name,
         &api_key,
         affinity_identity.as_ref(),
+        true,
     )
     .await
     {
@@ -465,6 +482,27 @@ async fn proxy_openai(
             return http::json_error(status, msg);
         }
     };
+    if api_format == ApiFormat::Responses && has_previous_response_id(&body_bytes) {
+        plan.attempts.retain(|attempt| !attempt.responses_via_chat);
+        if plan.attempts.is_empty() {
+            let message = "previous_response_id requires a native Responses upstream";
+            submit_err(
+                &mut telemetry_permit,
+                StatusCode::BAD_REQUEST,
+                "previous_response_id_unsupported",
+                message.to_string(),
+                None,
+                None,
+                None,
+                Some(model_name.clone()),
+            );
+            record_request_metric(
+                Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                Some("previous_response_id_unsupported"),
+            );
+            return http::json_error(StatusCode::BAD_REQUEST, message);
+        }
+    }
     let affinity_binding = apply_affinity_to_plan(
         &state,
         affinity_identity.as_ref(),
@@ -479,6 +517,8 @@ async fn proxy_openai(
                 "hash": identity.log_hash,
                 "hit": existing_affinity_binding.is_some(),
                 "bound_provider_id": affinity_binding.map(|binding| binding.provider_id),
+                "bound_upstream_key_id": affinity_binding.and_then(|binding| binding.upstream_key_id),
+                "bound_endpoint_id": affinity_binding.and_then(|binding| binding.endpoint_id),
             })
         });
         let mut seen = HashSet::new();
@@ -528,11 +568,45 @@ async fn proxy_openai(
         last_attempted_provider_id = Some(resolved.provider.id);
         state.metrics.record_upstream_attempt();
 
-        let mut out_body = if resolved.upstream_model == model_name {
-            body_bytes.clone()
+        let (mut out_body, conversion_context) = if resolved.responses_via_chat {
+            match responses_request_to_chat(
+                &body_bytes,
+                &resolved.upstream_model,
+                affinity_identity.as_ref(),
+            ) {
+                Ok(converted) => {
+                    routing_trace.lock().conversion = Some(serde_json::json!({
+                        "mode": "responses_via_chat",
+                        "client_api_format": "responses",
+                        "upstream_api_format": "chat_completions",
+                        "warnings": converted.context.warnings,
+                    }));
+                    (converted.body, Some(converted.context))
+                }
+                Err(error) => {
+                    reservation.neutral();
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_REQUEST,
+                        "responses_via_chat_request_failed",
+                        error.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                        Some("responses_via_chat_request_failed"),
+                    );
+                    return http::json_error(StatusCode::BAD_REQUEST, error);
+                }
+            }
+        } else if resolved.upstream_model == model_name {
+            (body_bytes.clone(), None)
         } else {
             match rewrite_model_name(body_bytes.clone(), &resolved.upstream_model) {
-                Ok(v) => v,
+                Ok(v) => (v, None),
                 Err(_) => {
                     submit_err(
                         &mut telemetry_permit,
@@ -553,7 +627,7 @@ async fn proxy_openai(
             }
         };
         if should_inject_include_usage(
-            api_format,
+            resolved.upstream_api_format,
             &info,
             resolved.provider.supports_include_usage,
             plan.runtime.inject_include_usage,
@@ -562,9 +636,11 @@ async fn proxy_openai(
             out_body = body;
         }
 
+        let upstream_path_and_query =
+            upstream_path_and_query(request_path_and_query.as_ref(), resolved.responses_via_chat);
         let upstream_uri = match build_upstream_uri(
             &resolved.endpoint.base_url,
-            request_path_and_query.as_ref(),
+            upstream_path_and_query.as_ref(),
         ) {
             Ok(uri) => uri,
             Err(error) => {
@@ -789,10 +865,11 @@ async fn proxy_openai(
             .and_then(|v| v.to_str().ok())
             .map(|ct| ct.contains("text/event-stream"))
             .unwrap_or(false);
+        let upstream_api_format_str = api_format_name(resolved.upstream_api_format);
         let body = if is_sse {
             match preflight_sse(
                 body,
-                api_format_str,
+                upstream_api_format_str,
                 state.config.stream_preflight_timeout,
                 state.config.stream_preflight_max_bytes,
             )
@@ -863,38 +940,171 @@ async fn proxy_openai(
             ReplayIncomingBody::new(body)
         };
 
-        let tap = ProxyTapBody::new(
-            body,
-            TapConfig {
-                api_key_id: api_key.id,
-                log_enabled: api_key.log_enabled,
-                provider_id: Some(resolved.provider.id),
-                endpoint_id: Some(resolved.endpoint.id),
-                upstream_key_id: Some(resolved.key.id),
-                api_format: api_format_str,
-                model: Some(model_name.clone()),
-                http_status: Some(resp_parts.status.as_u16() as i32),
-                t_stream_ms: Some(t_stream_ms),
-                start,
-                is_sse,
-                price: resolved.price.clone(),
-                usage_capture_bytes: plan.runtime.usage_capture_bytes,
-                usage_capture_tail_bytes: plan.runtime.usage_capture_tail_bytes,
-                provider: resolved.provider.clone(),
-                metrics: state.metrics.clone(),
-                affinity: state.affinity.clone(),
-                affinity_identity: affinity_identity.clone(),
-                affinity_binding,
-                affinity_should_migrate: affinity_binding.is_some_and(|binding| {
-                    binding.provider_id != resolved.provider.id
-                        && faulted_providers.contains(&binding.provider_id)
-                }),
-                routing_trace: routing_trace.clone(),
-            },
-            telemetry_permit.take(),
-            reservation,
-        );
+        let tap_config = TapConfig {
+            api_key_id: api_key.id,
+            log_enabled: api_key.log_enabled,
+            provider_id: Some(resolved.provider.id),
+            endpoint_id: Some(resolved.endpoint.id),
+            upstream_key_id: Some(resolved.key.id),
+            api_format: api_format_str,
+            upstream_api_format: upstream_api_format_str,
+            model: Some(model_name.clone()),
+            http_status: Some(resp_parts.status.as_u16() as i32),
+            t_stream_ms: Some(t_stream_ms),
+            start,
+            is_sse,
+            price: resolved.price.clone(),
+            usage_capture_bytes: plan.runtime.usage_capture_bytes,
+            usage_capture_tail_bytes: plan.runtime.usage_capture_tail_bytes,
+            provider: resolved.provider.clone(),
+            metrics: state.metrics.clone(),
+            affinity: state.affinity.clone(),
+            affinity_identity: affinity_identity.clone(),
+            affinity_binding,
+            affinity_should_migrate: affinity_binding.is_some_and(|binding| {
+                binding.provider_id != resolved.provider.id
+                    || binding.upstream_key_id != Some(resolved.key.id)
+                    || binding.endpoint_id != Some(resolved.endpoint.id)
+                    || faulted_providers.contains(&binding.provider_id)
+            }),
+            routing_trace: routing_trace.clone(),
+        };
 
+        if resolved.responses_via_chat {
+            resp_parts.headers.remove(CONTENT_LENGTH);
+            let context = conversion_context.unwrap_or_default();
+            if is_sse {
+                resp_parts.headers.insert(
+                    CONTENT_TYPE,
+                    hyper::header::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+                );
+                let converted =
+                    ConvertedSseBody::new(body, context, state.config.max_request_bytes);
+                let tap =
+                    ProxyTapBody::new(converted, tap_config, telemetry_permit.take(), reservation);
+                return Response::from_parts(resp_parts, http::boxed(tap));
+            }
+
+            let collected = match Limited::new(body, state.config.max_request_bytes)
+                .collect()
+                .await
+            {
+                Ok(collected) => collected.to_bytes(),
+                Err(error) => {
+                    let message = error.to_string();
+                    reservation.finish(
+                        AttemptOutcome::local_provider(
+                            Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                            "responses_via_chat_response_too_large",
+                            &message,
+                            Some(t_stream_ms),
+                        ),
+                        &state.metrics,
+                    );
+                    trace_attempt(
+                        &routing_trace,
+                        resolved,
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("responses_via_chat_response_too_large"),
+                        start.elapsed().as_millis() as i64,
+                    );
+                    exclusions.note_attempt(resolved);
+                    exclusions.avoid_endpoint(resolved.endpoint.id);
+                    last_failure = Some(AttemptFailure::new(
+                        resolved,
+                        StatusCode::BAD_GATEWAY,
+                        "responses_via_chat_response_too_large",
+                        message.clone(),
+                    ));
+                    if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
+                        state.metrics.record_failover(FailoverKind::Endpoint);
+                        continue;
+                    }
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_GATEWAY,
+                        "responses_via_chat_response_too_large",
+                        message,
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("responses_via_chat_response_too_large"),
+                    );
+                    return http::json_error(
+                        StatusCode::BAD_GATEWAY,
+                        "converted upstream response exceeded the configured buffer",
+                    );
+                }
+            };
+            let converted = match chat_response_to_responses(&collected, &context) {
+                Ok(converted) => converted,
+                Err(error) => {
+                    reservation.finish(
+                        AttemptOutcome::local_provider(
+                            Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                            "responses_via_chat_response_failed",
+                            &error,
+                            Some(t_stream_ms),
+                        ),
+                        &state.metrics,
+                    );
+                    trace_attempt(
+                        &routing_trace,
+                        resolved,
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("responses_via_chat_response_failed"),
+                        start.elapsed().as_millis() as i64,
+                    );
+                    exclusions.note_attempt(resolved);
+                    exclusions.avoid_endpoint(resolved.endpoint.id);
+                    last_failure = Some(AttemptFailure::new(
+                        resolved,
+                        StatusCode::BAD_GATEWAY,
+                        "responses_via_chat_response_failed",
+                        error.clone(),
+                    ));
+                    if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
+                        state.metrics.record_failover(FailoverKind::Endpoint);
+                        continue;
+                    }
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_GATEWAY,
+                        "responses_via_chat_response_failed",
+                        error.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("responses_via_chat_response_failed"),
+                    );
+                    return http::json_error(StatusCode::BAD_GATEWAY, error);
+                }
+            };
+            resp_parts.headers.insert(
+                CONTENT_TYPE,
+                hyper::header::HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            if let Ok(length) = hyper::header::HeaderValue::from_str(&converted.len().to_string()) {
+                resp_parts.headers.insert(CONTENT_LENGTH, length);
+            }
+            let tap = ProxyTapBody::new(
+                Full::new(converted),
+                tap_config,
+                telemetry_permit.take(),
+                reservation,
+            );
+            return Response::from_parts(resp_parts, http::boxed(tap));
+        }
+
+        let tap = ProxyTapBody::new(body, tap_config, telemetry_permit.take(), reservation);
         return Response::from_parts(resp_parts, http::boxed(tap));
     }
 
@@ -999,10 +1209,34 @@ pub(crate) fn dispatch_error_to_http(
     }
 }
 
-fn provider_supports_api_format(provider_type: &str, api_format: ApiFormat) -> bool {
-    match api_format {
-        ApiFormat::ChatCompletions => provider_type != "openai_compatible_responses",
-        ApiFormat::Responses => true,
+fn provider_route_api_format(
+    snap: &UpstreamSnapshot,
+    provider: &UpstreamProvider,
+    client_api_format: ApiFormat,
+    upstream_model: &str,
+    allow_responses_via_chat: bool,
+) -> Option<(ApiFormat, bool)> {
+    match (provider.provider_type.as_str(), client_api_format) {
+        ("openai", ApiFormat::ChatCompletions) => Some((ApiFormat::ChatCompletions, false)),
+        ("openai", ApiFormat::Responses) => Some((ApiFormat::Responses, false)),
+        ("openai_compatible", ApiFormat::ChatCompletions) => {
+            Some((ApiFormat::ChatCompletions, false))
+        }
+        ("openai_compatible", ApiFormat::Responses)
+            if allow_responses_via_chat
+                && snap
+                    .responses_via_chat_by_provider
+                    .get(&provider.id)
+                    .and_then(|models| models.get(upstream_model))
+                    .copied()
+                    .unwrap_or(false) =>
+        {
+            Some((ApiFormat::ChatCompletions, true))
+        }
+        ("openai_compatible_responses", ApiFormat::Responses) => {
+            Some((ApiFormat::Responses, false))
+        }
+        _ => None,
     }
 }
 
@@ -1076,6 +1310,8 @@ pub(crate) struct ResolvedUpstream {
     pub(crate) endpoint: crate::types::UpstreamEndpoint,
     pub(crate) key: crate::types::UpstreamKey,
     pub(crate) price: Option<PriceVersion>,
+    pub(crate) upstream_api_format: ApiFormat,
+    pub(crate) responses_via_chat: bool,
 }
 
 #[derive(Default)]
@@ -1130,6 +1366,7 @@ struct RoutingTrace {
     candidates: Vec<Value>,
     attempts: Vec<Value>,
     provider_switches: usize,
+    conversion: Option<Value>,
     terminal: Option<Value>,
 }
 
@@ -1154,6 +1391,8 @@ fn trace_attempt(
         "provider_id": resolved.provider.id,
         "endpoint_id": resolved.endpoint.id,
         "upstream_key_id": resolved.key.id,
+        "upstream_api_format": api_format_name(resolved.upstream_api_format),
+        "conversion_mode": resolved.responses_via_chat.then_some("responses_via_chat"),
         "status": status,
         "error_type": error_type,
         "duration_ms": duration_ms,
@@ -1185,16 +1424,28 @@ pub(crate) struct UpstreamPlan {
 }
 
 impl UpstreamPlan {
-    pub(crate) fn prefer_provider(&mut self, provider_id: i64) -> bool {
-        if !self
-            .attempts
-            .iter()
-            .any(|attempt| attempt.provider.id == provider_id)
-        {
+    fn prefer_target(&mut self, binding: AffinityBinding) -> bool {
+        if !self.attempts.iter().any(|attempt| {
+            attempt.provider.id == binding.provider_id
+                && binding
+                    .upstream_key_id
+                    .is_none_or(|key_id| attempt.key.id == key_id)
+                && binding
+                    .endpoint_id
+                    .is_none_or(|endpoint_id| attempt.endpoint.id == endpoint_id)
+        }) {
             return false;
         }
-        self.attempts
-            .sort_by_key(|attempt| (attempt.provider.id != provider_id) as u8);
+        self.attempts.sort_by_key(|attempt| {
+            let exact = attempt.provider.id == binding.provider_id
+                && binding
+                    .upstream_key_id
+                    .is_none_or(|key_id| attempt.key.id == key_id)
+                && binding
+                    .endpoint_id
+                    .is_none_or(|endpoint_id| attempt.endpoint.id == endpoint_id);
+            (!exact, attempt.provider.id != binding.provider_id)
+        });
         true
     }
 }
@@ -1207,7 +1458,7 @@ pub(crate) fn apply_affinity_to_plan(
 ) -> Option<AffinityBinding> {
     let identity = identity?;
     if let Some(binding) = existing {
-        if plan.prefer_provider(binding.provider_id)
+        if plan.prefer_target(binding)
             || plan
                 .transient_spill_provider_ids
                 .contains(&binding.provider_id)
@@ -1219,11 +1470,15 @@ pub(crate) fn apply_affinity_to_plan(
             .clear_if_provider(identity, binding.provider_id);
     }
 
-    let first_provider_id = plan.attempts.first()?.provider.id;
-    let binding = state
-        .affinity
-        .claim(identity, first_provider_id, util::now_ms());
-    let _ = plan.prefer_provider(binding.provider_id);
+    let first = plan.attempts.first()?;
+    let binding = state.affinity.claim_target(
+        identity,
+        first.provider.id,
+        Some(first.key.id),
+        Some(first.endpoint.id),
+        util::now_ms(),
+    );
+    let _ = plan.prefer_target(binding);
     Some(binding)
 }
 
@@ -1236,6 +1491,8 @@ struct ProviderRoute {
     upstream_model: String,
     route_priority: Option<i32>,
     route_weight: Option<i32>,
+    upstream_api_format: ApiFormat,
+    responses_via_chat: bool,
 }
 
 struct SchedulableProvider {
@@ -1256,6 +1513,7 @@ pub(crate) async fn build_upstream_plan(
     requested_model: &str,
     api_key: &ApiKeyAuth,
     affinity: Option<&AffinityIdentity>,
+    allow_responses_via_chat: bool,
 ) -> Result<UpstreamPlan, (StatusCode, String)> {
     let snap = state
         .caches
@@ -1270,7 +1528,8 @@ pub(crate) async fn build_upstream_plan(
 
     let runtime = state.runtime_settings.snapshot();
     let now_ms = util::now_ms();
-    let routes = collect_provider_routes(&snap, api_format, requested_model)?;
+    let routes =
+        collect_provider_routes(&snap, api_format, requested_model, allow_responses_via_chat)?;
     if routes.is_empty() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1442,6 +1701,8 @@ fn build_scheduled_attempts(
                     endpoint: endpoint.clone(),
                     key: key.clone(),
                     price: scheduled.price.clone(),
+                    upstream_api_format: scheduled.route.upstream_api_format,
+                    responses_via_chat: scheduled.route.responses_via_chat,
                 });
                 provider_attempts += 1;
                 if provider_attempts >= max_attempts {
@@ -1457,6 +1718,7 @@ fn collect_provider_routes(
     snap: &UpstreamSnapshot,
     api_format: ApiFormat,
     requested_model: &str,
+    allow_responses_via_chat: bool,
 ) -> Result<Vec<ProviderRoute>, (StatusCode, String)> {
     let mut routes = Vec::new();
     if let Some(alias) = snap.model_aliases_by_name.get(requested_model) {
@@ -1478,17 +1740,32 @@ fn collect_provider_routes(
             {
                 continue;
             }
-            if let Some(provider) = snap.providers.iter().find(|item| {
-                item.id == target.provider_id
-                    && provider_supports_api_format(&item.provider_type, api_format)
-                    && provider_model_enabled(snap, item.id, &target.upstream_model)
-            }) && seen.insert(target.provider_id)
+            if let Some((provider, (upstream_api_format, responses_via_chat))) = snap
+                .providers
+                .iter()
+                .find(|item| {
+                    item.id == target.provider_id
+                        && provider_model_enabled(snap, item.id, &target.upstream_model)
+                })
+                .and_then(|provider| {
+                    provider_route_api_format(
+                        snap,
+                        provider,
+                        api_format,
+                        &target.upstream_model,
+                        allow_responses_via_chat,
+                    )
+                    .map(|format| (provider, format))
+                })
+                && seen.insert(target.provider_id)
             {
                 routes.push(ProviderRoute {
                     provider: provider.clone(),
                     upstream_model: target.upstream_model.clone(),
                     route_priority: Some(target.priority),
                     route_weight: (alias.mode == "weighted").then_some(target.weight),
+                    upstream_api_format,
+                    responses_via_chat,
                 });
             }
         }
@@ -1510,16 +1787,26 @@ fn collect_provider_routes(
     for provider in &snap.providers {
         if forced_provider_id.is_some_and(|id| id != provider.id)
             || !route_allows_provider_for_model(snap, &upstream_model, provider.id)
-            || !provider_supports_api_format(&provider.provider_type, api_format)
             || !provider_model_enabled(snap, provider.id, &upstream_model)
         {
             continue;
         }
+        let Some((upstream_api_format, responses_via_chat)) = provider_route_api_format(
+            snap,
+            provider,
+            api_format,
+            &upstream_model,
+            allow_responses_via_chat,
+        ) else {
+            continue;
+        };
         routes.push(ProviderRoute {
             provider: provider.clone(),
             upstream_model: upstream_model.clone(),
             route_priority: None,
             route_weight: None,
+            upstream_api_format,
+            responses_via_chat,
         });
     }
     Ok(routes)
@@ -2026,6 +2313,27 @@ pub(crate) fn build_upstream_uri(
     out.parse::<Uri>().map_err(|e| e.to_string())
 }
 
+fn upstream_path_and_query(
+    original: Option<&hyper::http::uri::PathAndQuery>,
+    responses_via_chat: bool,
+) -> Option<hyper::http::uri::PathAndQuery> {
+    if !responses_via_chat {
+        return original.cloned();
+    }
+    let query = original
+        .and_then(|path| path.query())
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    format!("/v1/chat/completions{query}").parse().ok()
+}
+
+fn api_format_name(api_format: ApiFormat) -> &'static str {
+    match api_format {
+        ApiFormat::ChatCompletions => "chat_completions",
+        ApiFormat::Responses => "responses",
+    }
+}
+
 pub(crate) fn sanitize_hop_headers(headers: &mut hyper::HeaderMap) {
     headers.remove(CONNECTION);
     headers.remove(TRANSFER_ENCODING);
@@ -2092,6 +2400,74 @@ fn copy_allowed_upstream_headers_by_prefix(from: &HeaderMap, to: &mut HeaderMap,
 struct ReplayIncomingBody {
     buffered: VecDeque<Frame<Bytes>>,
     inner: Incoming,
+}
+
+pin_project! {
+    struct ConvertedSseBody {
+        #[pin]
+        inner: ReplayIncomingBody,
+        converter: ChatSseToResponses,
+        pending: VecDeque<Bytes>,
+        finished: bool,
+    }
+}
+
+impl ConvertedSseBody {
+    fn new(inner: ReplayIncomingBody, context: ConversionContext, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            converter: ChatSseToResponses::new(context, max_bytes),
+            pending: VecDeque::new(),
+            finished: false,
+        }
+    }
+}
+
+impl hyper::body::Body for ConvertedSseBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let mut this = self.project();
+        loop {
+            if let Some(data) = this.pending.pop_front() {
+                return Poll::Ready(Some(Ok(Frame::data(data))));
+            }
+            if *this.finished {
+                return Poll::Ready(None);
+            }
+            match this.inner.as_mut().poll_frame(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Some(data) = frame.data_ref() {
+                        this.pending.extend(this.converter.push(data));
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.pending.extend(
+                        this.converter
+                            .fail_stream(&format!("upstream stream interrupted: {error}")),
+                    );
+                    *this.finished = true;
+                }
+                Poll::Ready(None) => {
+                    this.pending.extend(this.converter.finish());
+                    *this.finished = true;
+                }
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.finished && self.pending.is_empty()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
+    }
 }
 
 impl ReplayIncomingBody {
@@ -2197,6 +2573,7 @@ struct TapConfig {
     endpoint_id: Option<i64>,
     upstream_key_id: Option<i64>,
     api_format: &'static str,
+    upstream_api_format: &'static str,
     model: Option<String>,
     http_status: Option<i32>,
     t_stream_ms: Option<i64>,
@@ -2225,9 +2602,9 @@ struct TapFinalizeInputs<'a> {
 }
 
 pin_project! {
-    struct ProxyTapBody {
+    struct ProxyTapBody<B> {
         #[pin]
-        inner: ReplayIncomingBody,
+        inner: B,
         cfg: TapConfig,
         telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
         reservation: Option<UpstreamAttemptReservation>,
@@ -2244,7 +2621,7 @@ pin_project! {
         sse: Option<SseParser>,
     }
 
-    impl PinnedDrop for ProxyTapBody {
+    impl<B> PinnedDrop for ProxyTapBody<B> {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
             finalize_tap(
@@ -2266,9 +2643,9 @@ pin_project! {
     }
 }
 
-impl ProxyTapBody {
+impl<B> ProxyTapBody<B> {
     fn new(
-        inner: ReplayIncomingBody,
+        inner: B,
         cfg: TapConfig,
         telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
         reservation: UpstreamAttemptReservation,
@@ -2298,9 +2675,13 @@ impl ProxyTapBody {
     }
 }
 
-impl hyper::body::Body for ProxyTapBody {
+impl<B> hyper::body::Body for ProxyTapBody<B>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: std::fmt::Display,
+{
     type Data = Bytes;
-    type Error = hyper::Error;
+    type Error = B::Error;
 
     fn poll_frame(
         self: Pin<&mut Self>,
@@ -2344,6 +2725,11 @@ impl hyper::body::Body for ProxyTapBody {
                         if let Some(u) = out.usage {
                             *this.usage = u;
                             *this.usage_observed = true;
+                        }
+                        if out.saw_error_event {
+                            *this.error_type = Some("upstream_stream_error".to_string());
+                            *this.error_message =
+                                Some("upstream stream failed before completion".to_string());
                         }
                     } else {
                         this.capture.push(data);
@@ -2432,16 +2818,30 @@ fn finalize_tap(
         if let (Some(identity), Some(binding)) =
             (cfg.affinity_identity.as_ref(), cfg.affinity_binding)
         {
-            if binding.provider_id == cfg.provider.id {
+            let resolved_target = AffinityBinding {
+                provider_id: cfg.provider.id,
+                upstream_key_id: cfg.upstream_key_id,
+                endpoint_id: cfg.endpoint_id,
+                generation: binding.generation,
+                confirmed: binding.confirmed,
+            };
+            if binding.provider_id == resolved_target.provider_id
+                && binding.upstream_key_id == resolved_target.upstream_key_id
+                && binding.endpoint_id == resolved_target.endpoint_id
+            {
                 if binding.confirmed {
-                    let _ = cfg
-                        .affinity
-                        .refresh_if_provider(identity, cfg.provider.id, now_ms);
+                    let _ = cfg.affinity.refresh_if_target(identity, binding, now_ms);
                 } else {
                     let _ = cfg.affinity.confirm(identity, binding, now_ms);
                 }
             } else if cfg.affinity_should_migrate {
-                cfg.affinity.migrate(identity, cfg.provider.id, now_ms);
+                cfg.affinity.migrate_target(
+                    identity,
+                    cfg.provider.id,
+                    cfg.upstream_key_id,
+                    cfg.endpoint_id,
+                    now_ms,
+                );
                 cfg.metrics.record_affinity_migration();
             }
         }
@@ -2463,6 +2863,9 @@ fn finalize_tap(
                 "provider_id": cfg.provider_id,
                 "endpoint_id": cfg.endpoint_id,
                 "upstream_key_id": cfg.upstream_key_id,
+                "upstream_api_format": cfg.upstream_api_format,
+                "conversion_mode": (cfg.api_format != cfg.upstream_api_format)
+                    .then_some("responses_via_chat"),
                 "status": cfg.http_status,
                 "error_type": inputs.error_type,
                 "duration_ms": duration_ms,
@@ -2492,6 +2895,7 @@ fn finalize_tap(
         endpoint_id: cfg.endpoint_id,
         upstream_key_id: cfg.upstream_key_id,
         api_format: cfg.api_format,
+        upstream_api_format: Some(cfg.upstream_api_format),
         model: cfg.model.clone(),
         http_status: cfg.http_status,
         error_type: inputs.error_type.clone(),
@@ -2870,11 +3274,20 @@ fn parse_chat_usage(v: &Value) -> Option<Usage> {
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|x| x.as_i64())
+        .or_else(|| v.get("cached_tokens").and_then(Value::as_i64))
         .unwrap_or(0);
     let cache_created = v
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cache_creation_tokens"))
         .and_then(|x| x.as_i64())
+        .or_else(|| {
+            v.get("prompt_tokens_details")
+                .and_then(|details| details.get("cache_write_tokens"))
+                .and_then(Value::as_i64)
+        })
+        .or_else(|| v.get("cache_creation_tokens").and_then(Value::as_i64))
+        .or_else(|| v.get("cached_creation_tokens").and_then(Value::as_i64))
+        .or_else(|| v.get("cache_write_tokens").and_then(Value::as_i64))
         .unwrap_or(0);
     let reasoning = v
         .get("completion_tokens_details")
@@ -2965,12 +3378,13 @@ mod tests {
         UpstreamAttemptReservation, UsageCaptureBuffer, build_scheduled_attempts,
         build_upstream_headers, classify_failure_scope, effective_priority_from_memberships,
         extract_usage_from_capture, parse_chat_usage, parse_responses_usage,
-        should_retry_response_status,
+        provider_route_api_format, should_retry_response_status,
     };
+    use crate::cache::upstream_cache::UpstreamSnapshot;
     use crate::health::RuntimeHealthBook;
     use crate::metrics::Metrics;
     use crate::provider_runtime::ProviderRuntimeBook;
-    use crate::types::{UpstreamKey, UpstreamProvider};
+    use crate::types::{ApiFormat, UpstreamKey, UpstreamProvider};
     use bytes::Bytes;
     use hyper::header::{
         ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderName,
@@ -3216,6 +3630,71 @@ mod tests {
     }
 
     #[test]
+    fn provider_protocol_routing_should_require_model_opt_in_for_conversion() {
+        let mut snapshot = UpstreamSnapshot::default();
+        let mut compatible = test_provider(7, 100, 2);
+        compatible.provider_type = "openai_compatible".to_string();
+
+        assert_eq!(
+            provider_route_api_format(
+                &snapshot,
+                &compatible,
+                ApiFormat::Responses,
+                "model-a",
+                true,
+            ),
+            None
+        );
+        snapshot.responses_via_chat_by_provider.insert(
+            compatible.id,
+            std::collections::HashMap::from([("model-a".to_string(), true)]),
+        );
+        assert_eq!(
+            provider_route_api_format(
+                &snapshot,
+                &compatible,
+                ApiFormat::Responses,
+                "model-a",
+                true,
+            ),
+            Some((ApiFormat::ChatCompletions, true))
+        );
+        assert_eq!(
+            provider_route_api_format(
+                &snapshot,
+                &compatible,
+                ApiFormat::Responses,
+                "model-a",
+                false,
+            ),
+            None
+        );
+
+        let mut native_responses = test_provider(8, 100, 2);
+        native_responses.provider_type = "openai_compatible_responses".to_string();
+        assert_eq!(
+            provider_route_api_format(
+                &snapshot,
+                &native_responses,
+                ApiFormat::Responses,
+                "model-a",
+                false,
+            ),
+            Some((ApiFormat::Responses, false))
+        );
+        assert_eq!(
+            provider_route_api_format(
+                &snapshot,
+                &native_responses,
+                ApiFormat::ChatCompletions,
+                "model-a",
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn usage_capture_should_parse_complete_chat_body_inside_window() {
         let body = Bytes::from_static(
             br#"{"id":"chatcmpl","choices":[],"usage":{"prompt_tokens":20,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":3,"cache_creation_tokens":5}}}"#,
@@ -3352,6 +3831,8 @@ mod tests {
                 upstream_model: "model-a".to_string(),
                 route_priority: None,
                 route_weight: None,
+                upstream_api_format: ApiFormat::ChatCompletions,
+                responses_via_chat: false,
             },
             effective_priority: priority,
             effective_weight: 1,

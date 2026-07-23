@@ -24,6 +24,7 @@ pub struct TelemetryEvent {
     pub upstream_key_id: Option<i64>,
 
     pub api_format: &'static str,
+    pub upstream_api_format: Option<&'static str>,
     pub model: Option<String>,
     pub http_status: Option<i32>,
     pub error_type: Option<String>,
@@ -371,6 +372,7 @@ impl TelemetryWorker {
                 endpoint_id,
                 upstream_key_id,
                 api_format,
+                upstream_api_format,
                 model,
                 http_status,
                 error_type,
@@ -406,6 +408,7 @@ impl TelemetryWorker {
                 endpoint_id,
                 upstream_key_id,
                 api_format: api_format.to_string(),
+                upstream_api_format: upstream_api_format.map(str::to_string),
                 model,
                 http_status,
                 error_type,

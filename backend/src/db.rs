@@ -18,7 +18,7 @@ use crate::types::{
 
 const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
   request_logs.id, request_logs.time_ms, request_logs.api_key_id, request_logs.provider_id, request_logs.endpoint_id, request_logs.upstream_key_id,
-  request_logs.api_format, request_logs.model, request_logs.http_status, request_logs.error_type, request_logs.error_message,
+  request_logs.api_format, request_logs.upstream_api_format, request_logs.model, request_logs.http_status, request_logs.error_type, request_logs.error_message,
   request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_input_tokens, request_logs.cache_creation_input_tokens,
   request_logs.reasoning_output_tokens, request_logs.usage_observed,
   request_logs.price_version_id, request_logs.price_tier_index,
@@ -1918,7 +1918,7 @@ ORDER BY provider_id ASC, priority ASC, id ASC
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 WHERE provider_id = ?
 ORDER BY upstream_model ASC, id ASC
@@ -1935,6 +1935,9 @@ ORDER BY upstream_model ASC, id ASC
                         upstream_model: row.get::<String, _>("upstream_model"),
                         alias: row.get::<Option<String>, _>("alias"),
                         enabled: row.get::<i64, _>("enabled") != 0,
+                        available: row.get::<i64, _>("available") != 0,
+                        responses_via_chat_enabled: row.get::<i64, _>("responses_via_chat_enabled")
+                            != 0,
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -1943,7 +1946,7 @@ ORDER BY upstream_model ASC, id ASC
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 WHERE provider_id = $1
 ORDER BY upstream_model ASC, id ASC
@@ -1960,6 +1963,9 @@ ORDER BY upstream_model ASC, id ASC
                         upstream_model: row.get::<String, _>("upstream_model"),
                         alias: row.get::<Option<String>, _>("alias"),
                         enabled: row.get::<bool, _>("enabled"),
+                        available: row.get::<bool, _>("available"),
+                        responses_via_chat_enabled: row
+                            .get::<bool, _>("responses_via_chat_enabled"),
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -1973,7 +1979,7 @@ ORDER BY upstream_model ASC, id ASC
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 ORDER BY provider_id ASC, upstream_model ASC, id ASC
 "#,
@@ -1988,6 +1994,9 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
                         upstream_model: row.get::<String, _>("upstream_model"),
                         alias: row.get::<Option<String>, _>("alias"),
                         enabled: row.get::<i64, _>("enabled") != 0,
+                        available: row.get::<i64, _>("available") != 0,
+                        responses_via_chat_enabled: row.get::<i64, _>("responses_via_chat_enabled")
+                            != 0,
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -1996,7 +2005,7 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 ORDER BY provider_id ASC, upstream_model ASC, id ASC
 "#,
@@ -2011,6 +2020,9 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
                         upstream_model: row.get::<String, _>("upstream_model"),
                         alias: row.get::<Option<String>, _>("alias"),
                         enabled: row.get::<bool, _>("enabled"),
+                        available: row.get::<bool, _>("available"),
+                        responses_via_chat_enabled: row
+                            .get::<bool, _>("responses_via_chat_enabled"),
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -2025,45 +2037,67 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
         upstream_models: &[String],
         now_ms: i64,
     ) -> Result<(), DbError> {
-        if upstream_models.is_empty() {
-            return Ok(());
-        }
-
         match self {
             Database::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("UPDATE provider_models SET available = 0, updated_at_ms = ? WHERE provider_id = ?")
+                    .bind(now_ms)
+                    .bind(provider_id)
+                    .execute(&mut *tx)
+                    .await?;
+                if upstream_models.is_empty() {
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 let mut builder: QueryBuilder<Sqlite> = QueryBuilder::new(
-                    "INSERT INTO provider_models (provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms) ",
+                    "INSERT INTO provider_models (provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, created_at_ms, updated_at_ms) ",
                 );
                 builder.push_values(upstream_models, |mut row, model| {
                     row.push_bind(provider_id);
                     row.push_bind(model);
                     row.push_bind(Option::<String>::None);
                     row.push_bind(1_i64);
+                    row.push_bind(1_i64);
+                    row.push_bind(0_i64);
                     row.push_bind(now_ms);
                     row.push_bind(now_ms);
                 });
                 builder.push(
-                    " ON CONFLICT(provider_id, upstream_model) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
+                    " ON CONFLICT(provider_id, upstream_model) DO UPDATE SET available = 1, updated_at_ms = excluded.updated_at_ms",
                 );
-                builder.build().execute(pool).await?;
+                builder.build().execute(&mut *tx).await?;
+                tx.commit().await?;
                 Ok(())
             }
             Database::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("UPDATE provider_models SET available = FALSE, updated_at_ms = $1 WHERE provider_id = $2")
+                    .bind(now_ms)
+                    .bind(provider_id)
+                    .execute(&mut *tx)
+                    .await?;
+                if upstream_models.is_empty() {
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
-                    "INSERT INTO provider_models (provider_id, upstream_model, alias, enabled, created_at_ms, updated_at_ms) ",
+                    "INSERT INTO provider_models (provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, created_at_ms, updated_at_ms) ",
                 );
                 builder.push_values(upstream_models, |mut row, model| {
                     row.push_bind(provider_id);
                     row.push_bind(model);
                     row.push_bind(Option::<String>::None);
                     row.push_bind(true);
+                    row.push_bind(true);
+                    row.push_bind(false);
                     row.push_bind(now_ms);
                     row.push_bind(now_ms);
                 });
                 builder.push(
-                    " ON CONFLICT (provider_id, upstream_model) DO UPDATE SET updated_at_ms = excluded.updated_at_ms",
+                    " ON CONFLICT (provider_id, upstream_model) DO UPDATE SET available = TRUE, updated_at_ms = excluded.updated_at_ms",
                 );
-                builder.build().execute(pool).await?;
+                builder.build().execute(&mut *tx).await?;
+                tx.commit().await?;
                 Ok(())
             }
         }
@@ -2074,9 +2108,10 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
         id: i64,
         alias: Option<Option<String>>,
         enabled: Option<bool>,
+        responses_via_chat_enabled: Option<bool>,
         now_ms: i64,
     ) -> Result<(), DbError> {
-        if alias.is_none() && enabled.is_none() {
+        if alias.is_none() && enabled.is_none() && responses_via_chat_enabled.is_none() {
             return Ok(());
         }
 
@@ -2121,6 +2156,16 @@ WHERE id = ?
                     .execute(pool)
                     .await?;
                 }
+                if let Some(responses_via_chat_enabled) = responses_via_chat_enabled {
+                    sqlx::query(
+                        "UPDATE provider_models SET responses_via_chat_enabled = ?, updated_at_ms = ? WHERE id = ?",
+                    )
+                    .bind(if responses_via_chat_enabled { 1_i64 } else { 0_i64 })
+                    .bind(now_ms)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
                 Ok(())
             }
             Database::Postgres(pool) => {
@@ -2147,6 +2192,16 @@ WHERE id = $3
 "#,
                     )
                     .bind(enabled)
+                    .bind(now_ms)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
+                if let Some(responses_via_chat_enabled) = responses_via_chat_enabled {
+                    sqlx::query(
+                        "UPDATE provider_models SET responses_via_chat_enabled = $1, updated_at_ms = $2 WHERE id = $3",
+                    )
+                    .bind(responses_via_chat_enabled)
                     .bind(now_ms)
                     .bind(id)
                     .execute(pool)
@@ -2788,6 +2843,64 @@ ON CONFLICT(key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms =
         }
         Ok(())
     }
+
+    pub async fn get_console_preference(&self, key: &str) -> Result<Option<String>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                let row = sqlx::query("SELECT value_json FROM console_preferences WHERE key = ?")
+                    .bind(key)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(row.map(|row| row.get::<String, _>("value_json")))
+            }
+            Database::Postgres(pool) => {
+                let row = sqlx::query("SELECT value_json FROM console_preferences WHERE key = $1")
+                    .bind(key)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(row.map(|row| row.get::<String, _>("value_json")))
+            }
+        }
+    }
+
+    pub async fn upsert_console_preference(
+        &self,
+        key: &str,
+        value_json: &str,
+        now_ms: i64,
+    ) -> Result<(), DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                sqlx::query(
+                    r#"
+INSERT INTO console_preferences (key, value_json, updated_at_ms)
+VALUES (?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms
+"#,
+                )
+                .bind(key)
+                .bind(value_json)
+                .bind(now_ms)
+                .execute(pool)
+                .await?;
+            }
+            Database::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+INSERT INTO console_preferences (key, value_json, updated_at_ms)
+VALUES ($1, $2, $3)
+ON CONFLICT(key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms
+"#,
+                )
+                .bind(key)
+                .bind(value_json)
+                .bind(now_ms)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn upsert_model_route_sqlite(
@@ -3185,7 +3298,7 @@ async fn insert_request_logs_sqlite(
             r#"
 INSERT INTO request_logs (
   id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
-  api_format, model, http_status, error_type, error_message,
+  api_format, upstream_api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
@@ -3194,7 +3307,7 @@ INSERT INTO request_logs (
   created_at_ms
 ) VALUES (
   ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?,
   ?, ?,
   ?, ?,
@@ -3211,6 +3324,7 @@ INSERT INTO request_logs (
         .bind(r.endpoint_id)
         .bind(r.upstream_key_id)
         .bind(&r.api_format)
+        .bind(&r.upstream_api_format)
         .bind(&r.model)
         .bind(r.http_status)
         .bind(&r.error_type)
@@ -3257,7 +3371,7 @@ async fn insert_request_logs_postgres(
             r#"
 INSERT INTO request_logs (
   id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
-  api_format, model, http_status, error_type, error_message,
+  api_format, upstream_api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
@@ -3266,13 +3380,13 @@ INSERT INTO request_logs (
   created_at_ms
 ) VALUES (
   $1, $2, $3, $4, $5, $6,
-  $7, $8, $9, $10, $11,
-  $12, $13, $14, $15,
-  $16, $17,
-  $18, $19,
-  $20, $21, $22, $23,
-  $24, $25, $26, $27, $28,
-  $29
+  $7, $8, $9, $10, $11, $12,
+  $13, $14, $15, $16,
+  $17, $18,
+  $19, $20,
+  $21, $22, $23, $24,
+  $25, $26, $27, $28, $29,
+  $30
 )
 "#,
         )
@@ -3283,6 +3397,7 @@ INSERT INTO request_logs (
         .bind(r.endpoint_id)
         .bind(r.upstream_key_id)
         .bind(&r.api_format)
+        .bind(&r.upstream_api_format)
         .bind(&r.model)
         .bind(r.http_status)
         .bind(&r.error_type)
@@ -3619,7 +3734,7 @@ async fn list_request_logs_before_sqlite(
         r#"
 SELECT
   id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
-  api_format, model, http_status, error_type, error_message,
+  api_format, upstream_api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
@@ -3694,7 +3809,7 @@ async fn list_request_logs_before_postgres(
         r#"
 SELECT
   id, time_ms, api_key_id, provider_id, endpoint_id, upstream_key_id,
-  api_format, model, http_status, error_type, error_message,
+  api_format, upstream_api_format, model, http_status, error_type, error_message,
   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
   reasoning_output_tokens, usage_observed,
   price_version_id, price_tier_index,
@@ -4234,6 +4349,7 @@ fn row_to_request_log_sqlite(row: sqlx::sqlite::SqliteRow) -> RequestLogRow {
         endpoint_id: row.get::<Option<i64>, _>("endpoint_id"),
         upstream_key_id: row.get::<Option<i64>, _>("upstream_key_id"),
         api_format: row.get::<String, _>("api_format"),
+        upstream_api_format: row.get::<Option<String>, _>("upstream_api_format"),
         model: row.get::<Option<String>, _>("model"),
         http_status: row.get::<Option<i32>, _>("http_status"),
         error_type: row.get::<Option<String>, _>("error_type"),
@@ -4270,6 +4386,7 @@ fn row_to_request_log_postgres(row: sqlx::postgres::PgRow) -> RequestLogRow {
         endpoint_id: row.get::<Option<i64>, _>("endpoint_id"),
         upstream_key_id: row.get::<Option<i64>, _>("upstream_key_id"),
         api_format: row.get::<String, _>("api_format"),
+        upstream_api_format: row.get::<Option<String>, _>("upstream_api_format"),
         model: row.get::<Option<String>, _>("model"),
         http_status: row.get::<Option<i32>, _>("http_status"),
         error_type: row.get::<Option<String>, _>("error_type"),
@@ -4755,6 +4872,8 @@ CREATE TABLE IF NOT EXISTS provider_models (
   upstream_model TEXT NOT NULL,
   alias TEXT,
   enabled INTEGER NOT NULL,
+  available INTEGER NOT NULL DEFAULT 1,
+  responses_via_chat_enabled INTEGER NOT NULL DEFAULT 0,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   FOREIGN KEY(provider_id) REFERENCES upstream_providers(id) ON DELETE CASCADE
@@ -4942,6 +5061,18 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
 
     sqlx::query(
         r#"
+CREATE TABLE IF NOT EXISTS console_preferences (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
 CREATE TABLE IF NOT EXISTS request_logs (
   id TEXT PRIMARY KEY,
   time_ms INTEGER NOT NULL,
@@ -4950,6 +5081,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   endpoint_id INTEGER,
   upstream_key_id INTEGER,
   api_format TEXT NOT NULL,
+  upstream_api_format TEXT,
   model TEXT,
   http_status INTEGER,
   error_type TEXT,
@@ -5017,9 +5149,11 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_sqlite_upstream_providers_resilience(pool).await?;
     ensure_sqlite_default_provider_group(pool).await?;
     ensure_sqlite_request_log_span_columns(pool).await?;
+    ensure_sqlite_responses_via_chat_columns(pool).await?;
     ensure_sqlite_model_prices_provider_scope(pool).await?;
     migrate_sqlite_provider_model_aliases(pool).await?;
     migrate_sqlite_pricing_storage(pool).await?;
+    ensure_sqlite_responses_via_chat_columns(pool).await?;
     Ok(())
 }
 
@@ -5146,6 +5280,8 @@ CREATE TABLE IF NOT EXISTS provider_models (
   upstream_model TEXT NOT NULL,
   alias TEXT,
   enabled BOOLEAN NOT NULL,
+  available BOOLEAN NOT NULL DEFAULT TRUE,
+  responses_via_chat_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL,
   UNIQUE(provider_id, upstream_model)
@@ -5327,6 +5463,18 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
 
     sqlx::query(
         r#"
+CREATE TABLE IF NOT EXISTS console_preferences (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
+"#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
 CREATE TABLE IF NOT EXISTS request_logs (
   id TEXT PRIMARY KEY,
   time_ms BIGINT NOT NULL,
@@ -5335,6 +5483,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   endpoint_id BIGINT,
   upstream_key_id BIGINT,
   api_format TEXT NOT NULL,
+  upstream_api_format TEXT,
   model TEXT,
   http_status INTEGER,
   error_type TEXT,
@@ -5402,6 +5551,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_postgres_upstream_providers_resilience(pool).await?;
     ensure_postgres_default_provider_group(pool).await?;
     ensure_postgres_request_log_span_columns(pool).await?;
+    ensure_postgres_responses_via_chat_columns(pool).await?;
     ensure_postgres_model_prices_provider_scope(pool).await?;
     migrate_postgres_provider_model_aliases(pool).await?;
     migrate_postgres_pricing_storage(pool).await?;
@@ -5675,6 +5825,27 @@ async fn ensure_sqlite_request_log_span_columns(pool: &SqlitePool) -> Result<(),
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn ensure_sqlite_responses_via_chat_columns(pool: &SqlitePool) -> Result<(), DbError> {
+    if !sqlite_column_exists(pool, "provider_models", "available").await? {
+        sqlx::query("ALTER TABLE provider_models ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
+            .execute(pool)
+            .await?;
+    }
+    if !sqlite_column_exists(pool, "provider_models", "responses_via_chat_enabled").await? {
+        sqlx::query(
+            "ALTER TABLE provider_models ADD COLUMN responses_via_chat_enabled INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "upstream_api_format").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN upstream_api_format TEXT")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -6429,6 +6600,23 @@ async fn ensure_postgres_request_log_span_columns(pool: &PgPool) -> Result<(), D
     Ok(())
 }
 
+async fn ensure_postgres_responses_via_chat_columns(pool: &PgPool) -> Result<(), DbError> {
+    sqlx::query(
+        "ALTER TABLE provider_models ADD COLUMN IF NOT EXISTS available BOOLEAN NOT NULL DEFAULT TRUE",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE provider_models ADD COLUMN IF NOT EXISTS responses_via_chat_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS upstream_api_format TEXT")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[expect(
     clippy::items_after_test_module,
@@ -6984,6 +7172,7 @@ CREATE TABLE stats_events (
             endpoint_id: Some(8),
             upstream_key_id: Some(9),
             api_format: "responses".to_string(),
+            upstream_api_format: Some("chat_completions".to_string()),
             model: Some("model-a".to_string()),
             http_status: Some(200),
             error_type: None,
@@ -7016,6 +7205,95 @@ CREATE TABLE stats_events (
             .expect("list request logs");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].routing_trace, Some(trace));
+        assert_eq!(
+            rows[0].upstream_api_format.as_deref(),
+            Some("chat_completions")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_model_sync_should_preserve_configuration_and_mark_missing_models() {
+        let db = sqlite_memory_db().await;
+        let provider_id = db
+            .insert_upstream_provider(
+                "provider-a",
+                "openai_compatible",
+                true,
+                100,
+                1,
+                true,
+                false,
+                &[],
+                "round_robin",
+                2,
+                None,
+                true,
+                3,
+                30_000,
+                2,
+                1,
+            )
+            .await
+            .expect("insert provider");
+        db.upsert_provider_models(
+            provider_id,
+            &["model-a".to_string(), "model-b".to_string()],
+            2,
+        )
+        .await
+        .expect("initial sync");
+        let model_a = db
+            .list_provider_models_by_provider(provider_id)
+            .await
+            .expect("list models")
+            .into_iter()
+            .find(|model| model.upstream_model == "model-a")
+            .expect("model-a");
+        db.update_provider_model(
+            model_a.id,
+            Some(Some("alias-a".to_string())),
+            Some(false),
+            Some(true),
+            3,
+        )
+        .await
+        .expect("configure model");
+
+        db.upsert_provider_models(provider_id, &["model-a".to_string()], 4)
+            .await
+            .expect("second sync");
+        let models = db
+            .list_provider_models_by_provider(provider_id)
+            .await
+            .expect("list models after sync");
+        let model_a = models
+            .iter()
+            .find(|model| model.upstream_model == "model-a")
+            .expect("model-a after sync");
+        let model_b = models
+            .iter()
+            .find(|model| model.upstream_model == "model-b")
+            .expect("model-b after sync");
+        assert_eq!(model_a.alias.as_deref(), Some("alias-a"));
+        assert!(!model_a.enabled);
+        assert!(model_a.available);
+        assert!(model_a.responses_via_chat_enabled);
+        assert!(!model_b.available);
+    }
+
+    #[tokio::test]
+    async fn console_preferences_should_round_trip() {
+        let db = sqlite_memory_db().await;
+        db.upsert_console_preference("log_visible_columns", "[\"time\",\"model\"]", 1)
+            .await
+            .expect("save preference");
+        assert_eq!(
+            db.get_console_preference("log_visible_columns")
+                .await
+                .expect("load preference")
+                .as_deref(),
+            Some("[\"time\",\"model\"]")
+        );
     }
 
     #[tokio::test]

@@ -41,9 +41,17 @@ pub struct AffinityIdentity {
     pub log_hash: String,
 }
 
+impl AffinityIdentity {
+    pub fn derived_prompt_cache_key(&self) -> String {
+        format!("lg_{}", hex::encode(self.key.0))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AffinityBinding {
     pub provider_id: i64,
+    pub upstream_key_id: Option<i64>,
+    pub endpoint_id: Option<i64>,
     pub generation: u64,
     pub confirmed: bool,
 }
@@ -51,6 +59,8 @@ pub struct AffinityBinding {
 #[derive(Clone, Copy, Debug)]
 struct AffinityEntry {
     provider_id: i64,
+    upstream_key_id: Option<i64>,
+    endpoint_id: Option<i64>,
     generation: u64,
     confirmed: bool,
     expires_at_ms: i64,
@@ -101,6 +111,8 @@ impl AffinityBook {
         entry.last_seen_ms = now_ms;
         Some(AffinityBinding {
             provider_id: entry.provider_id,
+            upstream_key_id: entry.upstream_key_id,
+            endpoint_id: entry.endpoint_id,
             generation: entry.generation,
             confirmed: entry.confirmed,
         })
@@ -110,6 +122,17 @@ impl AffinityBook {
         &self,
         identity: &AffinityIdentity,
         provider_id: i64,
+        now_ms: i64,
+    ) -> AffinityBinding {
+        self.claim_target(identity, provider_id, None, None, now_ms)
+    }
+
+    pub fn claim_target(
+        &self,
+        identity: &AffinityIdentity,
+        provider_id: i64,
+        upstream_key_id: Option<i64>,
+        endpoint_id: Option<i64>,
         now_ms: i64,
     ) -> AffinityBinding {
         let mut state = self.state.write();
@@ -125,6 +148,8 @@ impl AffinityBook {
             entry.last_seen_ms = now_ms;
             return AffinityBinding {
                 provider_id: entry.provider_id,
+                upstream_key_id: entry.upstream_key_id,
+                endpoint_id: entry.endpoint_id,
                 generation: entry.generation,
                 confirmed: entry.confirmed,
             };
@@ -137,6 +162,8 @@ impl AffinityBook {
             identity.key,
             AffinityEntry {
                 provider_id,
+                upstream_key_id,
+                endpoint_id,
                 generation,
                 confirmed: false,
                 expires_at_ms: now_ms.saturating_add(self.ttl_ms),
@@ -145,6 +172,8 @@ impl AffinityBook {
         );
         AffinityBinding {
             provider_id,
+            upstream_key_id,
+            endpoint_id,
             generation,
             confirmed: false,
         }
@@ -176,6 +205,17 @@ impl AffinityBook {
         provider_id: i64,
         now_ms: i64,
     ) -> AffinityBinding {
+        self.migrate_target(identity, provider_id, None, None, now_ms)
+    }
+
+    pub fn migrate_target(
+        &self,
+        identity: &AffinityIdentity,
+        provider_id: i64,
+        upstream_key_id: Option<i64>,
+        endpoint_id: Option<i64>,
+        now_ms: i64,
+    ) -> AffinityBinding {
         let mut state = self.state.write();
         if !state.entries.contains_key(&identity.key) {
             ensure_entry_capacity(&mut state, self.max_entries, now_ms);
@@ -186,6 +226,8 @@ impl AffinityBook {
             identity.key,
             AffinityEntry {
                 provider_id,
+                upstream_key_id,
+                endpoint_id,
                 generation,
                 confirmed: true,
                 expires_at_ms: now_ms.saturating_add(self.ttl_ms),
@@ -195,6 +237,8 @@ impl AffinityBook {
         state.avoided.remove(&identity.key);
         AffinityBinding {
             provider_id,
+            upstream_key_id,
+            endpoint_id,
             generation,
             confirmed: true,
         }
@@ -211,6 +255,29 @@ impl AffinityBook {
             return false;
         };
         if entry.provider_id != provider_id {
+            return false;
+        }
+        entry.confirmed = true;
+        entry.expires_at_ms = now_ms.saturating_add(self.ttl_ms);
+        entry.last_seen_ms = now_ms;
+        true
+    }
+
+    pub fn refresh_if_target(
+        &self,
+        identity: &AffinityIdentity,
+        binding: AffinityBinding,
+        now_ms: i64,
+    ) -> bool {
+        let mut state = self.state.write();
+        let Some(entry) = state.entries.get_mut(&identity.key) else {
+            return false;
+        };
+        if entry.provider_id != binding.provider_id
+            || entry.upstream_key_id != binding.upstream_key_id
+            || entry.endpoint_id != binding.endpoint_id
+            || entry.generation != binding.generation
+        {
             return false;
         }
         entry.confirmed = true;
@@ -286,6 +353,20 @@ impl AffinityBook {
         state
             .avoided
             .retain(|_, entry| entry.provider_id != provider_id);
+    }
+
+    pub fn purge_upstream_key(&self, upstream_key_id: i64) {
+        let mut state = self.state.write();
+        state
+            .entries
+            .retain(|_, entry| entry.upstream_key_id != Some(upstream_key_id));
+    }
+
+    pub fn purge_endpoint(&self, endpoint_id: i64) {
+        let mut state = self.state.write();
+        state
+            .entries
+            .retain(|_, entry| entry.endpoint_id != Some(endpoint_id));
     }
 
     pub fn binding_counts_by_provider(&self, now_ms: i64) -> HashMap<i64, usize> {
@@ -479,6 +560,23 @@ mod tests {
             book.lookup(&identity, 1_003).map(|item| item.provider_id),
             Some(22)
         );
+    }
+
+    #[test]
+    fn target_binding_should_keep_key_and_endpoint_until_successful_migration() {
+        let book = AffinityBook::new(Duration::from_secs(30), 10);
+        let identity = build_identity(7, "conversation-a", AffinitySource::SessionId);
+        let first = book.claim_target(&identity, 11, Some(21), Some(31), 1_000);
+        assert_eq!(first.upstream_key_id, Some(21));
+        assert_eq!(first.endpoint_id, Some(31));
+
+        let unchanged = book.claim_target(&identity, 11, Some(22), Some(32), 1_001);
+        assert_eq!(unchanged, first);
+
+        let migrated = book.migrate_target(&identity, 11, Some(22), Some(32), 1_002);
+        assert_eq!(migrated.upstream_key_id, Some(22));
+        assert_eq!(migrated.endpoint_id, Some(32));
+        assert!(book.refresh_if_target(&identity, migrated, 1_003));
     }
 
     #[test]

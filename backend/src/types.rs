@@ -107,6 +107,8 @@ pub struct ProviderModel {
     pub upstream_model: String,
     pub alias: Option<String>,
     pub enabled: bool,
+    pub available: bool,
+    pub responses_via_chat_enabled: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -169,7 +171,7 @@ pub struct Usage {
     pub reasoning_output_tokens: i64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiFormat {
     ChatCompletions,
     Responses,
@@ -290,6 +292,7 @@ pub struct RequestLogRow {
     pub endpoint_id: Option<i64>,
     pub upstream_key_id: Option<i64>,
     pub api_format: String,
+    pub upstream_api_format: Option<String>,
     pub model: Option<String>,
     pub http_status: Option<i32>,
     pub error_type: Option<String>,

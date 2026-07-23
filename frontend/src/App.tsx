@@ -4,13 +4,14 @@ import { KeyboardSensor, PointerActivationConstraints, PointerSensor } from '@dn
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router';
-import { Activity, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
+import { Activity, Boxes, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { LocaleSwitch } from '@/components/LocaleSwitch';
 import { ApiKeysPage } from '@/components/ApiKeysPage';
 import { LogsPage } from '@/components/LogsPage';
+import { ModelsPage } from '@/components/ModelsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
@@ -66,6 +67,11 @@ const NAV_ITEMS_BY_KEY = {
     label: '上游',
     icon: Server
   },
+  models: {
+    to: '/models',
+    label: '模型',
+    icon: Boxes
+  },
   logs: {
     to: '/logs',
     label: '日志',
@@ -83,7 +89,7 @@ const NAV_ITEMS_BY_KEY = {
   }
 } as const;
 type NavKey = keyof typeof NAV_ITEMS_BY_KEY;
-const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'logs', 'keys', 'settings'];
+const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'models', 'logs', 'keys', 'settings'];
 const NAVIGATION_SORTABLE_TYPE = 'primary-navigation';
 const NAVIGATION_SORT_INSTRUCTIONS_ID = 'primary-nav-sort-instructions';
 const NAVIGATION_SORT_TRANSITION = {
@@ -178,6 +184,12 @@ function normalizeNavOrder(values: string[]): NavKey[] {
     if (isNavKey(value) && !ordered.includes(value)) {
       ordered.push(value);
     }
+  }
+  if (!ordered.includes('models')) {
+    const upstreamIndex = ordered.indexOf('upstreams');
+    const logsIndex = ordered.indexOf('logs');
+    const insertAt = upstreamIndex >= 0 ? upstreamIndex + 1 : logsIndex >= 0 ? logsIndex : ordered.length;
+    ordered.splice(insertAt, 0, 'models');
   }
   for (const value of DEFAULT_NAV_ORDER) {
     if (!ordered.includes(value)) {
@@ -281,6 +293,7 @@ function pageDescription(pathname: string) {
   if (pathname.startsWith('/overview')) return '查看请求、用量与响应表现。';
   if (pathname.startsWith('/keys')) return '创建和管理访问密钥。';
   if (pathname.startsWith('/logs')) return '筛选并排查最近请求。';
+  if (pathname.startsWith('/models')) return '管理模型库存、别名与协议能力。';
   if (pathname.startsWith('/upstreams')) return '查看连接目标与健康状态。';
   if (pathname.startsWith('/settings')) return '维护连接信息与高级设置。';
   return '';
@@ -686,15 +699,10 @@ function UpstreamsPage(props: {
     if (props.data.providers.length === 0) {
       void props.data.loadProviders();
     }
-    if (props.data.modelAliases.length === 0) {
-      void props.data.loadModelAliases();
-    }
-  }, [props.data.loadModelAliases, props.data.loadProviders, props.data.modelAliases.length, props.data.providers.length]);
+  }, [props.data.loadProviders, props.data.providers.length]);
   return <Box className="section-stack">
       <PageHeader title="上游" description="查看连接目标与健康状态。" />
-      <ProvidersPage settings={props.data.settings} items={props.data.providers} aliases={props.data.modelAliases} groups={props.data.providerGroups} onRefresh={async (successMessage?: string) => {
-      await Promise.all([props.data.loadProviders(), props.data.loadModelAliases(successMessage)]);
-    }} onMessage={props.data.onMessage} />
+      <ProvidersPage settings={props.data.settings} items={props.data.providers} groups={props.data.providerGroups} onRefresh={props.data.loadProviders} onMessage={props.data.onMessage} />
     </Box>;
 }
 function KeysRoutePage(props: {
@@ -719,6 +727,23 @@ function LogsRoutePage(props: {
     }
   }, [props.data.apiKeys.length, props.data.loadApiKeys, props.data.loadProviders, props.data.providers.length]);
   return <LogsPage settings={props.data.settings} providers={props.data.providers} apiKeys={props.data.apiKeys} refreshKey={props.data.refreshKey} onMessage={props.data.onMessage} />;
+}
+function ModelsRoutePage(props: {
+  data: AppDataContext;
+}) {
+  useEffect(() => {
+    const tasks: Promise<void>[] = [];
+    if (props.data.providers.length === 0) tasks.push(props.data.loadProviders());
+    if (props.data.modelAliases.length === 0) tasks.push(props.data.loadModelAliases());
+    if (tasks.length > 0) void Promise.all(tasks);
+  }, [props.data.loadModelAliases, props.data.loadProviders, props.data.modelAliases.length, props.data.providers.length]);
+  return <ModelsPage
+    settings={props.data.settings}
+    providers={props.data.providers}
+    aliases={props.data.modelAliases}
+    onAliasesRefresh={props.data.loadModelAliases}
+    onMessage={props.data.onMessage}
+  />;
 }
 function SettingsRoutePage(props: {
   data: AppDataContext;
@@ -954,6 +979,7 @@ function Root() {
           <Route path="/keys" element={<KeysRoutePage data={data} />} />
           <Route path="/logs" element={<LogsRoutePage data={data} />} />
           <Route path="/upstreams" element={<UpstreamsPage data={data} />} />
+          <Route path="/models" element={<ModelsRoutePage data={data} />} />
           <Route path="/settings" element={<SettingsRoutePage data={data} />} />
           <Route path="/usage" element={<Navigate to="/overview" replace />} />
           <Route path="/prices" element={<Navigate to="/overview" replace />} />

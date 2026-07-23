@@ -21,6 +21,7 @@ export interface RequestLogRow {
   endpoint_id: number | null;
   upstream_key_id: number | null;
   api_format: string;
+  upstream_api_format: string | null;
   model: string | null;
   http_status: number | null;
   error_type: string | null;
@@ -51,6 +52,8 @@ export interface RoutingTrace {
     hash: string;
     hit: boolean;
     bound_provider_id: number | null;
+    bound_upstream_key_id?: number | null;
+    bound_endpoint_id?: number | null;
   } | null;
   candidates: Array<{
     provider_id: number;
@@ -67,6 +70,12 @@ export interface RoutingTrace {
     duration_ms: number;
   }>;
   provider_switches: number;
+  conversion?: {
+    mode: 'responses_via_chat' | string;
+    client_api_format: string;
+    upstream_api_format: string;
+    warnings: string[];
+  } | null;
   terminal: { status: number | null; error_type: string | null; message?: string } | null;
 }
 
@@ -288,8 +297,20 @@ export interface ProviderModel {
   upstream_model: string;
   alias: string | null;
   enabled: boolean;
+  available: boolean;
+  responses_via_chat_enabled: boolean;
   created_at_ms: number;
   updated_at_ms: number;
+}
+
+export interface ProviderModelInventory extends ProviderModel {
+  provider_name: string;
+  provider_type: string;
+  native_api_formats: Array<'chat_completions' | 'responses'>;
+}
+
+export interface ConsolePreferences {
+  log_visible_columns: string[];
 }
 
 export interface ModelAliasTarget {

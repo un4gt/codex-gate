@@ -2,6 +2,7 @@ import type {
   ApiKeySummary,
   ApiKeyWorkspace,
   ConnectionSettings,
+  ConsolePreferences,
   CreateApiKeyInput,
   CreateEndpointInput,
   CreatePriceInput,
@@ -13,6 +14,7 @@ import type {
   ModelAliasTarget,
   ModelPrice,
   ProviderModel,
+  ProviderModelInventory,
   ProviderGroup,
   ProviderSummary,
   ProviderWorkspace,
@@ -447,6 +449,11 @@ export async function loadProviderModels(settings: ConnectionSettings, providerI
   return fetchJson<ProviderModel[]>(apiBase, `/api/v1/providers/${providerId}/models`, adminToken);
 }
 
+export async function loadProviderModelInventory(settings: ConnectionSettings) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<ProviderModelInventory[]>(apiBase, '/api/v1/provider-models', adminToken);
+}
+
 export async function syncProviderModels(settings: ConnectionSettings, providerId: number) {
   const { apiBase, adminToken } = requireConnection(settings);
   return postJson<ProviderModel[]>(apiBase, `/api/v1/providers/${providerId}/models/sync`, adminToken, {});
@@ -455,10 +462,25 @@ export async function syncProviderModels(settings: ConnectionSettings, providerI
 export async function updateProviderModel(
   settings: ConnectionSettings,
   modelId: number,
-  payload: { alias?: string | null; enabled?: boolean },
+  payload: { alias?: string | null; enabled?: boolean; responses_via_chat_enabled?: boolean },
 ) {
   const { apiBase, adminToken } = requireConnection(settings);
   return patchJson<{ ok: boolean }>(apiBase, `/api/v1/provider-models/${modelId}`, adminToken, payload);
+}
+
+export async function loadConsolePreferences(settings: ConnectionSettings) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<ConsolePreferences>(apiBase, '/api/v1/console-preferences', adminToken);
+}
+
+export async function updateConsolePreferences(
+  settings: ConnectionSettings,
+  logVisibleColumns: string[],
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<ConsolePreferences>(apiBase, '/api/v1/console-preferences', adminToken, {
+    log_visible_columns: logVisibleColumns,
+  });
 }
 
 export async function deleteProviderModel(settings: ConnectionSettings, modelId: number) {

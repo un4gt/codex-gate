@@ -584,6 +584,7 @@ async fn connect_selected_upstream(
         requested_model,
         &ctx.api_key,
         affinity.as_ref(),
+        false,
     )
     .await
     .map_err(|(status, message)| WsBridgeError {
@@ -2154,6 +2155,7 @@ fn record_turn(
         endpoint_id: Some(resolved.endpoint.id),
         upstream_key_id: Some(resolved.key.id),
         api_format: "responses",
+        upstream_api_format: Some("responses"),
         model: Some(requested_model.to_string()),
         http_status: Some(status_i32),
         error_type: outcome.error_type.clone(),
@@ -2216,6 +2218,7 @@ fn record_ws_setup_failed_turn(
         endpoint_id: None,
         upstream_key_id: None,
         api_format: "responses",
+        upstream_api_format: None,
         model: requested_model.map(ToString::to_string),
         http_status: Some(status_i32),
         error_type: Some(error_type),
@@ -2250,6 +2253,7 @@ fn record_session_open(ctx: &WsContext) {
         endpoint_id: None,
         upstream_key_id: None,
         api_format: "responses",
+        upstream_api_format: None,
         model: None,
         http_status: Some(StatusCode::SWITCHING_PROTOCOLS.as_u16() as i32),
         error_type: None,
@@ -2289,6 +2293,7 @@ fn record_session_close(
         endpoint_id: None,
         upstream_key_id: None,
         api_format: "responses",
+        upstream_api_format: None,
         model: None,
         http_status: Some(status.as_u16() as i32),
         error_type,

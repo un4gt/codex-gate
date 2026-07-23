@@ -1,13 +1,21 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { ChevronDown, ChevronRight, Copy, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, Columns3, Copy, Search } from "lucide-react";
 import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { EmptyState } from '@/components/console/EmptyState';
 import { FilterBar } from '@/components/console/FilterBar';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { t } from '@/lib/i18n';
-import { loadRequestLogs } from '../lib/api';
-import { formatCompactInteger, formatDateTime, formatModelName, formatMs, formatRequestType } from '../lib/format';
+import { loadConsolePreferences, loadRequestLogs, updateConsolePreferences } from '../lib/api';
+import {
+  formatCompactInteger,
+  formatDateTime,
+  formatModelName,
+  formatMs,
+  formatRequestType,
+  formatRequestPath,
+  REQUEST_TYPE_OPTIONS,
+} from '../lib/format';
 import { calculateRequestPricing, describeUnpricedReason, formatUsd } from '../lib/pricing';
 import type { ApiKeyWorkspace, ConnectionSettings, ProviderWorkspace, RequestLogRow } from '../lib/types';
 import Box from "@mui/material/Box";
@@ -16,6 +24,9 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import InputBase from "@mui/material/InputBase";
 import MenuItem from "@mui/material/MenuItem";
+import Menu from "@mui/material/Menu";
+import Checkbox from "@mui/material/Checkbox";
+import ListItemText from "@mui/material/ListItemText";
 import Select from "@mui/material/Select";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
@@ -63,6 +74,50 @@ const EMPTY_FILTERS: LogFilters = {
   reasoningMin: '',
   reasoningMax: ''
 };
+export const LOG_COLUMN_DEFINITIONS = [
+  { id: 'time', label: '时间', minWidth: 168 },
+  { id: 'model', label: '模型', minWidth: 180 },
+  { id: 'request_path', label: '请求路径 / 转换', minWidth: 240 },
+  { id: 'status', label: '状态', minWidth: 88 },
+  { id: 'duration', label: '耗时', minWidth: 110 },
+  { id: 'total_tokens', label: '总用量', minWidth: 110 },
+  { id: 'api_key', label: '密钥', minWidth: 130 },
+  { id: 'provider', label: '上游', minWidth: 140 },
+  { id: 'endpoint', label: '目标', minWidth: 140 },
+  { id: 'transport', label: '传输', minWidth: 110 },
+  { id: 'first_byte', label: '首字节', minWidth: 100 },
+  { id: 'ttft', label: 'TTFT', minWidth: 100 },
+  { id: 'input_tokens', label: '输入用量', minWidth: 110 },
+  { id: 'output_tokens', label: '输出用量', minWidth: 110 },
+  { id: 'cache_read', label: '缓存读取', minWidth: 110 },
+  { id: 'cache_write', label: '缓存写入', minWidth: 110 },
+  { id: 'reasoning', label: '思考用量', minWidth: 110 },
+  { id: 'cost', label: '成本', minWidth: 110 },
+  { id: 'request_id', label: '请求 ID', minWidth: 190 },
+  { id: 'error_type', label: '错误类型', minWidth: 150 },
+] as const;
+export type LogColumnId = typeof LOG_COLUMN_DEFINITIONS[number]['id'];
+export const DEFAULT_LOG_COLUMNS: LogColumnId[] = [
+  'time',
+  'model',
+  'request_path',
+  'status',
+  'duration',
+  'total_tokens',
+  'api_key',
+];
+const LOG_COLUMN_IDS = new Set<LogColumnId>(LOG_COLUMN_DEFINITIONS.map(column => column.id));
+
+export function sanitizeLogColumns(columns: string[]): LogColumnId[] {
+  const seen = new Set<LogColumnId>();
+  const filtered: LogColumnId[] = [];
+  for (const column of columns) {
+    if (!LOG_COLUMN_IDS.has(column as LogColumnId) || seen.has(column as LogColumnId)) continue;
+    seen.add(column as LogColumnId);
+    filtered.push(column as LogColumnId);
+  }
+  return filtered.length > 0 ? filtered : [...DEFAULT_LOG_COLUMNS];
+}
 function totalTokens(row: RequestLogRow) {
   return row.input_tokens + row.output_tokens + row.cache_read_input_tokens + row.cache_creation_input_tokens;
 }
@@ -123,6 +178,8 @@ export function LogsPage(props: LogsPageProps) {
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<RequestLogRow | null>(null);
   const [expandedSessions, setExpandedSessions] = useState<Record<string, boolean>>({});
+  const [visibleColumns, setVisibleColumns] = useState<LogColumnId[]>(DEFAULT_LOG_COLUMNS);
+  const [columnMenuAnchor, setColumnMenuAnchor] = useState<HTMLElement | null>(null);
   const previousRefreshKey = useRef(props.refreshKey);
   const providerNameMap = useMemo(() => new Map(props.providers.map(item => [item.provider.id, item.provider.name])), [props.providers]);
   const endpointNameMap = useMemo(() => new Map(props.providers.flatMap(item => item.endpoints.map(endpoint => [endpoint.id, endpoint.name] as const))), [props.providers]);
@@ -173,6 +230,11 @@ export function LogsPage(props: LogsPageProps) {
   };
   useEffect(() => {
     void loadLogs();
+    if (props.settings.adminToken.trim()) {
+      void loadConsolePreferences(props.settings)
+        .then(preferences => setVisibleColumns(sanitizeLogColumns(preferences.log_visible_columns)))
+        .catch(error => props.onMessage(error instanceof Error ? error.message : '读取日志列偏好失败。'));
+    }
   }, []);
   useEffect(() => {
     if (previousRefreshKey.current === props.refreshKey) return;
@@ -235,6 +297,24 @@ export function LogsPage(props: LogsPageProps) {
       label: t(label)
     }));
   };
+  const saveVisibleColumns = async (next: LogColumnId[], previous: LogColumnId[]) => {
+    setVisibleColumns(next);
+    try {
+      const saved = await updateConsolePreferences(props.settings, next);
+      setVisibleColumns(sanitizeLogColumns(saved.log_visible_columns));
+    } catch (error) {
+      setVisibleColumns(previous);
+      props.onMessage(error instanceof Error ? error.message : '保存日志列偏好失败。');
+    }
+  };
+  const toggleColumn = (column: LogColumnId) => {
+    const previous = visibleColumns;
+    const next = previous.includes(column)
+      ? previous.filter(item => item !== column)
+      : [...previous, column];
+    if (next.length === 0) return;
+    void saveVisibleColumns(next, previous);
+  };
   return <Box className="flex flex-col gap-6">
       <PageHeader title="请求日志" description="筛选并排查最近请求。" />
 
@@ -268,8 +348,9 @@ export function LogsPage(props: LogsPageProps) {
         apiFormat: event.target.value as LogFilters['apiFormat']
       }))}>
               <MenuItem value="">{t('全部请求类型')}</MenuItem>
-              <MenuItem value="chat_completions">{t('对话请求')}</MenuItem>
-              <MenuItem value="responses">{t('响应请求')}</MenuItem>
+              {REQUEST_TYPE_OPTIONS.map(option => (
+                <MenuItem key={option.value} value={option.value}>{option.endpoint}</MenuItem>
+              ))}
             </Select>
           </>} advanced={<>
             <Select displayEmpty value={filters.providerId} onChange={event => setFilters(current => ({
@@ -322,7 +403,7 @@ export function LogsPage(props: LogsPageProps) {
           </>} advancedOpen={advancedOpen} onToggleAdvanced={() => setAdvancedOpen(value => !value)} actions={<Box className="flex gap-2">
             <Button type="button" size="sm" onClick={() => void loadLogs()} disabled={loading}>
               <Search className="mr-2 size-3" />
-              {loading ? '查询中' : '查询'}
+              {loading ? t('查询中') : t('查询')}
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => {
         setFilters(EMPTY_FILTERS);
@@ -338,61 +419,118 @@ export function LogsPage(props: LogsPageProps) {
                 <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("结果")}</Typography>
                 <Typography className="mt-1 font-mono text-xs uppercase tracking-wider text-muted-foreground" component="div">{t('默认按最近时间排序。')}</Typography>
               </Box>
-              <Box className="flex gap-2">
+              <Box className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  aria-haspopup="menu"
+                  aria-expanded={columnMenuAnchor ? 'true' : undefined}
+                  onClick={event => setColumnMenuAnchor(event.currentTarget)}
+                >
+                  <Columns3 className="mr-2 size-3" aria-hidden="true" />
+                  {t('列')}
+                </Button>
                 <StatusBadge tone={errorCount > 0 ? 'warning' : 'normal'}>{t('{{count}} 条异常', {
                   count: errorCount
                 })}</StatusBadge>
                 <BadgeSummary label="总数" value={filteredRows.length} />
               </Box>
             </Box>
+            <Menu
+              anchorEl={columnMenuAnchor}
+              open={!!columnMenuAnchor}
+              onClose={() => setColumnMenuAnchor(null)}
+              slotProps={{
+                paper: {
+                  sx: {
+                    maxHeight: 480,
+                    minWidth: 240,
+                    bgcolor: 'background.default',
+                    opacity: 1,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    boxShadow: 8,
+                  },
+                },
+              }}
+            >
+              {LOG_COLUMN_DEFINITIONS.map(column => <MenuItem
+                key={column.id}
+                dense
+                disabled={visibleColumns.length === 1 && visibleColumns.includes(column.id)}
+                onClick={() => toggleColumn(column.id)}
+              >
+                <Checkbox checked={visibleColumns.includes(column.id)} size="small" />
+                <ListItemText primary={t(column.label)} />
+              </MenuItem>)}
+              <MenuItem
+                divider
+                onClick={() => void saveVisibleColumns([...DEFAULT_LOG_COLUMNS], visibleColumns)}
+              >
+                <ListItemText primary={t('恢复默认')} />
+              </MenuItem>
+            </Menu>
           </Box>
           <CardContent className="p-0 border-t border-border/40">
-            {rows.length > 0 ? <Box className="logs-table">
-            <Box className="hidden xl:grid gap-4 px-4 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground bg-muted/20 py-3 mb-2" style={{
-              gridTemplateColumns: 'minmax(160px, 1.05fr) minmax(180px, 1fr) minmax(90px, 0.6fr) minmax(210px, 1.2fr) minmax(140px, 0.85fr) minmax(130px, 0.82fr)'
-            }}>
-              <Box>{t('时间')}</Box>
-              <Box>{t('模型')}</Box>
-              <Box>{t('状态')}</Box>
-              <Box>{t('耗时')}</Box>
-              <Box>{t('用量')}</Box>
-              <Box>{t('密钥')}</Box>
-            </Box>
-            {visibleRows.length > 0 ? visibleRows.map((item, _index4) => {
-              const row = item.row;
-              const status = rowStatus(row);
-              const hasChildren = item.children.length > 0;
-              return <Box key={row.id} className={`cursor-pointer border-b border-border bg-transparent px-4 py-5 transition-colors duration-200 ease-out hover:bg-muted/50 grid gap-4 xl:grid-cols-[minmax(160px,1.05fr)_minmax(180px,1fr)_minmax(90px,0.6fr)_minmax(210px,1.2fr)_minmax(140px,0.85fr)_minmax(130px,0.82fr)] ${item.depth > 0 ? 'border-l-2 border-l-primary/30 bg-muted/10' : ''}`} onClick={() => setSelected(row)}>
-                    <Box className="flex min-w-0 items-center gap-2 font-mono text-xs">
-                      {hasChildren ? <Button type="button" size="icon" variant="ghost" className="size-6" aria-label={expandedSessions[row.id] ? t('收起 WS 日志') : t('展开 WS 日志')} onClick={event => {
-                    event.stopPropagation();
-                    setExpandedSessions(current => ({
-                      ...current,
-                      [row.id]: !current[row.id]
-                    }));
-                  }}>
-                          {expandedSessions[row.id] ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-                        </Button> : <Box className="size-6 shrink-0" component="span" />}
-                      <Box className="truncate" component="span">{formatDateTime(row.time_ms)}</Box>
-                    </Box>
-                    <Box className="min-w-0 font-mono text-xs">
-                      <Box className="truncate max-w-[150px]" title={formatModelName(row.model)}>{isWsSession(row) ? t('WS 会话') : formatModelName(row.model)}</Box>
-                      <Box className="mt-1">
-                        <StatusBadge tone={transportTone(row)}>{transportLabel(row)}</StatusBadge>
-                      </Box>
-                    </Box>
-                    <Box>
-                      <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                    </Box>
-                    <LatencySummary row={row} />
-                    <TokenSummary row={row} />
-                    <Box className="font-mono text-xs text-muted-foreground">{apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`}</Box>
-                  </Box>;
-            }) : <EmptyState title="未找到日志" description="尝试放宽筛选条件。" action={<Button type="button" variant="ghost" onClick={() => {
-              setFilters(EMPTY_FILTERS);
-              void loadLogs(EMPTY_FILTERS);
-            }}>{t("清空筛选")}</Button>} />}
-          </Box> : <EmptyState title="暂无日志" description="有流量后会显示。" />}
+            {rows.length > 0 ? <TableContainer className="max-w-full overflow-x-auto">
+              <Table size="small" sx={{ minWidth: Math.max(720, visibleColumns.reduce((sum, id) => {
+                return sum + (LOG_COLUMN_DEFINITIONS.find(column => column.id === id)?.minWidth ?? 100);
+              }, 56)) }}>
+                <TableHead>
+                  <TableRow>
+                    <TableCell aria-label={t('展开控制')} sx={{ width: 56, minWidth: 56 }} />
+                    {visibleColumns.map(id => {
+                      const column = LOG_COLUMN_DEFINITIONS.find(item => item.id === id)!;
+                      return <TableCell key={id} sx={{ minWidth: column.minWidth }}>{t(column.label)}</TableCell>;
+                    })}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {visibleRows.map(item => {
+                    const row = item.row;
+                    const hasChildren = item.children.length > 0;
+                    return <TableRow
+                      key={row.id}
+                      hover
+                      className={`cursor-pointer ${item.depth > 0 ? 'border-l-2 border-l-primary/30 bg-muted/10' : ''}`}
+                      onClick={() => setSelected(row)}
+                    >
+                      <TableCell sx={{ width: 56, minWidth: 56, pl: item.depth > 0 ? 3 : 1 }}>
+                        {hasChildren ? <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="size-8"
+                          aria-label={expandedSessions[row.id] ? t('收起 WS 日志') : t('展开 WS 日志')}
+                          onClick={event => {
+                            event.stopPropagation();
+                            setExpandedSessions(current => ({ ...current, [row.id]: !current[row.id] }));
+                          }}
+                        >
+                          {expandedSessions[row.id]
+                            ? <ChevronDown className="size-3" aria-hidden="true" />
+                            : <ChevronRight className="size-3" aria-hidden="true" />}
+                        </Button> : null}
+                      </TableCell>
+                      {visibleColumns.map(id => <TableCell key={id}>
+                        <LogColumnValue
+                          id={id}
+                          row={row}
+                          providerNameMap={providerNameMap}
+                          endpointNameMap={endpointNameMap}
+                          apiKeyNameMap={apiKeyNameMap}
+                        />
+                      </TableCell>)}
+                    </TableRow>;
+                  })}
+                </TableBody>
+              </Table>
+              {visibleRows.length === 0 ? <EmptyState title="未找到日志" description="尝试放宽筛选条件。" action={<Button type="button" variant="ghost" onClick={() => {
+                setFilters(EMPTY_FILTERS);
+                void loadLogs(EMPTY_FILTERS);
+              }}>{t("清空筛选")}</Button>} /> : null}
+            </TableContainer> : <EmptyState title="暂无日志" description="有流量后会显示。" />}
           </CardContent>
         </Card>
 
@@ -423,7 +561,9 @@ export function LogsPage(props: LogsPageProps) {
                       <DetailItem label="时间" value={formatDateTime(row.time_ms)} onCopy={() => void copyField(String(row.time_ms), '时间')} />
                       <DetailItem label="模型" value={formatModelName(row.model)} onCopy={() => void copyField(formatModelName(row.model), '模型')} />
                       <DetailItem label="密钥" value={apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`} onCopy={() => void copyField(String(row.api_key_id), '密钥')} />
-                      <DetailItem label="请求类型" value={formatRequestType(row.api_format)} onCopy={() => void copyField(formatRequestType(row.api_format), '请求类型')} />
+                      <DetailItem label="请求路径" value={formatRequestPath(row.api_format, row.upstream_api_format)} onCopy={() => void copyField(formatRequestPath(row.api_format, row.upstream_api_format), '请求路径')} />
+                      <DetailItem label="客户端端点" value={formatRequestType(row.api_format)} onCopy={() => void copyField(formatRequestType(row.api_format), '客户端端点')} />
+                      <DetailItem label="上游端点" value={formatRequestType(row.upstream_api_format ?? row.api_format)} onCopy={() => void copyField(formatRequestType(row.upstream_api_format ?? row.api_format), '上游端点')} />
                       <DetailItem label="传输" value={transportLabel(row)} onCopy={() => void copyField(row.transport, '传输')} />
                       <DetailItem label="日志类型" value={row.span_kind} onCopy={() => void copyField(row.span_kind, '日志类型')} />
                       <DetailItem label="WS 会话" value={row.ws_session_id ?? '—'} onCopy={() => void copyField(row.ws_session_id ?? '', 'WS 会话')} />
@@ -454,6 +594,22 @@ export function LogsPage(props: LogsPageProps) {
                               hash: row.routing_trace.affinity.hash
                             })
                           : t('亲和：无会话标识')}</Box>
+                        {row.routing_trace.affinity ? <Box className="md:col-span-2">
+                          {t('完整目标：Provider #{{provider}} · Endpoint #{{endpoint}} · Key #{{key}}', {
+                            provider: row.routing_trace.affinity.bound_provider_id ?? '—',
+                            endpoint: row.routing_trace.affinity.bound_endpoint_id ?? '—',
+                            key: row.routing_trace.affinity.bound_upstream_key_id ?? '—'
+                          })}
+                        </Box> : null}
+                        {row.routing_trace.conversion ? <Box className="md:col-span-2">
+                          {formatRequestPath(
+                            row.routing_trace.conversion.client_api_format,
+                            row.routing_trace.conversion.upstream_api_format,
+                          )}
+                          {row.routing_trace.conversion.warnings.length > 0
+                            ? ` · ${t('转换警告')}：${row.routing_trace.conversion.warnings.join(', ')}`
+                            : ` · ${t('无转换警告')}`}
+                        </Box> : null}
                       </Box>
                       <TableContainer>
                         <Table size="small">
@@ -507,48 +663,71 @@ export function LogsPage(props: LogsPageProps) {
       </DetailDrawer>
     </Box>;
 }
+function LogColumnValue(props: {
+  id: LogColumnId;
+  row: RequestLogRow;
+  providerNameMap: Map<number, string>;
+  endpointNameMap: Map<number, string>;
+  apiKeyNameMap: Map<number, string>;
+}) {
+  const { id, row } = props;
+  const status = rowStatus(row);
+  const mono = 'font-mono text-xs';
+  switch (id) {
+    case 'time':
+      return <Box className={`${mono} whitespace-nowrap`}>{formatDateTime(row.time_ms)}</Box>;
+    case 'model':
+      return <Box className={`${mono} max-w-[260px] break-all`} title={formatModelName(row.model)}>
+        {isWsSession(row) ? t('WS 会话') : formatModelName(row.model)}
+      </Box>;
+    case 'request_path':
+      return <Box className={`${mono} whitespace-nowrap`}>{formatRequestPath(row.api_format, row.upstream_api_format)}</Box>;
+    case 'status':
+      return <StatusBadge tone={status.tone}>{status.label}</StatusBadge>;
+    case 'duration':
+      return <Box className={mono}>{formatMaybeMs(primaryLatency(row))}</Box>;
+    case 'total_tokens':
+      return row.usage_observed
+        ? <Box className={mono}>{formatCompactInteger(totalTokens(row))}</Box>
+        : <Box className={`${mono} text-muted-foreground`}>{t('未返回用量')}</Box>;
+    case 'api_key':
+      return <Box className={`${mono} break-all text-muted-foreground`}>{props.apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`}</Box>;
+    case 'provider':
+      return <Box className={`${mono} break-all`}>{row.provider_id ? props.providerNameMap.get(row.provider_id) ?? `#${row.provider_id}` : '—'}</Box>;
+    case 'endpoint':
+      return <Box className={`${mono} break-all`}>{row.endpoint_id ? props.endpointNameMap.get(row.endpoint_id) ?? `#${row.endpoint_id}` : '—'}</Box>;
+    case 'transport':
+      return <StatusBadge tone={transportTone(row)}>{transportLabel(row)}</StatusBadge>;
+    case 'first_byte':
+      return <Box className={mono}>{formatMaybeMs(row.t_first_byte_ms)}</Box>;
+    case 'ttft':
+      return <Box className={mono}>{formatMaybeMs(row.t_first_token_ms)}</Box>;
+    case 'input_tokens':
+      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.input_tokens) : '—'}</Box>;
+    case 'output_tokens':
+      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.output_tokens) : '—'}</Box>;
+    case 'cache_read':
+      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.cache_read_input_tokens) : '—'}</Box>;
+    case 'cache_write':
+      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.cache_creation_input_tokens) : '—'}</Box>;
+    case 'reasoning':
+      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.reasoning_output_tokens) : '—'}</Box>;
+    case 'cost': {
+      const pricing = calculateRequestPricing(row, row.usage_observed, row.pricing);
+      return <Box className={mono}>{pricing.status === 'priced' ? formatUsd(pricing.totalUsd) : '—'}</Box>;
+    }
+    case 'request_id':
+      return <Box className={`${mono} max-w-[240px] truncate`} title={row.id}>{row.id}</Box>;
+    case 'error_type':
+      return <Box className={`${mono} break-all text-muted-foreground`}>{row.error_type ?? '—'}</Box>;
+  }
+}
 function BadgeSummary(props: {
   label: string;
   value: number;
 }) {
   return <Box className="border border-border bg-transparent px-3 py-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
       {t(props.label)} {formatCompactInteger(props.value)}
-    </Box>;
-}
-function TokenSummary(props: {
-  row: RequestLogRow;
-}) {
-  return props.row.usage_observed ? <Box className="min-w-0 font-mono text-xs leading-5">
-        <Box className="text-foreground">{formatCompactInteger(totalTokens(props.row))}</Box>
-        <Box className="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-          {t('入 {{input}} · 出 {{output}}', {
-        input: formatCompactInteger(props.row.input_tokens),
-        output: formatCompactInteger(props.row.output_tokens)
-      })}
-        </Box>
-        {props.row.cache_read_input_tokens > 0 || props.row.cache_creation_input_tokens > 0 || props.row.reasoning_output_tokens > 0 ? <Box className="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-            {t('缓存 {{cache}} · 思考 {{reasoning}}', {
-        cache: formatCompactInteger(props.row.cache_read_input_tokens + props.row.cache_creation_input_tokens),
-        reasoning: formatCompactInteger(props.row.reasoning_output_tokens)
-      })}
-          </Box> : null}
-      </Box> : <Box className="font-mono text-xs text-muted-foreground">{t('未返回用量')}</Box>;
-}
-function LatencySummary(props: {
-  row: RequestLogRow;
-}) {
-  return <Box className="min-w-0 font-mono text-xs leading-5">
-      <Box className="text-foreground">{formatMaybeMs(primaryLatency(props.row))}</Box>
-      <Box className="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-        {t('首字节 {{value}}', {
-        value: formatMaybeMs(props.row.t_first_byte_ms)
-      })}
-      </Box>
-      <Box className="truncate text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-        {t('TTFT {{value}}', {
-        value: formatMaybeMs(props.row.t_first_token_ms)
-      })}
-      </Box>
     </Box>;
 }
 function MetricCard(props: {

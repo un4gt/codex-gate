@@ -13,6 +13,7 @@ mod openai;
 mod pricing;
 mod provider_runtime;
 mod proxy;
+mod responses_via_chat;
 mod responses_ws;
 mod runtime_settings;
 mod selector;

@@ -37,6 +37,7 @@ class MockState:
         self.default_route = default_route
         self.routes = routes
         self.lock = threading.Lock()
+        self.recent_requests = []
 
     def resolve(self, path):
         for route in self.routes:
@@ -47,6 +48,17 @@ class MockState:
     def note_hit(self, route):
         with self.lock:
             route.hits += 1
+
+    def note_request(self, path, payload, headers):
+        with self.lock:
+            self.recent_requests.append({
+                'path': path,
+                'model': payload.get('model'),
+                'stream': payload.get('stream', False),
+                'prompt_cache_key': payload.get('prompt_cache_key'),
+                'session_id': headers.get('session-id'),
+            })
+            self.recent_requests = self.recent_requests[-20:]
 
     def snapshot(self):
         with self.lock:
@@ -61,7 +73,10 @@ class MockState:
                     'response_format': route.response_format,
                     'hits': route.hits,
                 })
-            return items
+            return {
+                'routes': items,
+                'recent_requests': list(self.recent_requests),
+            }
 
 
 def parse_route(raw, default_format):
@@ -100,6 +115,11 @@ class MockHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', '0') or '0')
         body = self.rfile.read(content_length) if content_length > 0 else b''
         auth = self.headers.get('Authorization', '')
+        try:
+            payload = json.loads(body.decode('utf-8')) if body else {}
+        except Exception:
+            payload = {}
+        self.server.state.note_request(path, payload, self.headers)
 
         if route.delay_ms > 0:
             time.sleep(route.delay_ms / 1000.0)
@@ -123,7 +143,9 @@ class MockHandler(BaseHTTPRequestHandler):
             return
 
         response_format = route.response_format
-        if response_format == 'responses' or path.endswith('/responses'):
+        if payload.get('stream') and response_format == 'chat' and not path.endswith('/responses'):
+            self.respond_chat_sse(route.body_text, payload)
+        elif response_format == 'responses' or path.endswith('/responses'):
             self.respond_json(200, build_responses_body(route.body_text, body))
         else:
             self.respond_json(200, build_chat_body(route.body_text, body))
@@ -132,10 +154,9 @@ class MockHandler(BaseHTTPRequestHandler):
         return
 
     def handle_stats(self):
-        self.respond_json(200, {
-            'routes': self.server.state.snapshot(),
-            'time_ms': int(time.time() * 1000),
-        })
+        snapshot = self.server.state.snapshot()
+        snapshot['time_ms'] = int(time.time() * 1000)
+        self.respond_json(200, snapshot)
 
     def handle_models(self, query_raw):
         query = parse_qs(query_raw)
@@ -169,6 +190,101 @@ class MockHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def respond_chat_sse(self, body_text, payload):
+        model = payload.get('model') or 'unknown'
+        has_tool_output = any(
+            message.get('role') == 'tool'
+            for message in payload.get('messages', [])
+            if isinstance(message, dict)
+        )
+        tools = payload.get('tools') or []
+        chunks = [{
+            'id': 'chatcmpl-mock-stream',
+            'object': 'chat.completion.chunk',
+            'created': int(time.time()),
+            'model': model,
+            'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}],
+        }]
+        if tools and not has_tool_output:
+            function = tools[0].get('function', {})
+            name = function.get('name', 'mock_tool')
+            properties = function.get('parameters', {}).get('properties', {})
+            if 'cmd' in properties:
+                arguments = json.dumps({'cmd': 'echo mock'}, separators=(',', ':'))
+            elif 'command' in properties:
+                arguments = json.dumps({'command': 'echo mock'}, separators=(',', ':'))
+            else:
+                arguments = json.dumps({'input': 'echo mock'}, separators=(',', ':'))
+            midpoint = max(1, len(arguments) // 2)
+            chunks.extend([
+                {
+                    'id': 'chatcmpl-mock-stream',
+                    'object': 'chat.completion.chunk',
+                    'created': int(time.time()),
+                    'model': model,
+                    'choices': [{'index': 0, 'delta': {'tool_calls': [{
+                        'index': 0,
+                        'id': 'call_mock_1',
+                        'type': 'function',
+                        'function': {'name': name, 'arguments': arguments[:midpoint]},
+                    }]}, 'finish_reason': None}],
+                },
+                {
+                    'id': 'chatcmpl-mock-stream',
+                    'object': 'chat.completion.chunk',
+                    'created': int(time.time()),
+                    'model': model,
+                    'choices': [{'index': 0, 'delta': {'tool_calls': [{
+                        'index': 0,
+                        'function': {'arguments': arguments[midpoint:]},
+                    }]}, 'finish_reason': 'tool_calls'}],
+                },
+            ])
+        else:
+            midpoint = max(1, len(body_text) // 2)
+            for text in (body_text[:midpoint], body_text[midpoint:]):
+                if text:
+                    chunks.append({
+                        'id': 'chatcmpl-mock-stream',
+                        'object': 'chat.completion.chunk',
+                        'created': int(time.time()),
+                        'model': model,
+                        'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': None}],
+                    })
+            chunks.append({
+                'id': 'chatcmpl-mock-stream',
+                'object': 'chat.completion.chunk',
+                'created': int(time.time()),
+                'model': model,
+                'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
+            })
+        chunks.append({
+            'id': 'chatcmpl-mock-stream',
+            'object': 'chat.completion.chunk',
+            'created': int(time.time()),
+            'model': model,
+            'choices': [],
+            'usage': {
+                'prompt_tokens': 12,
+                'completion_tokens': 5,
+                'total_tokens': 17,
+                'prompt_tokens_details': {'cached_tokens': 2, 'cache_creation_tokens': 1},
+            },
+        })
+        events = ''.join(
+            f'data: {json.dumps(chunk, ensure_ascii=False)}\r\n\r\n'
+            for chunk in chunks
+        ) + 'data: [DONE]\r\n\r\n'
+        raw = events.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        for offset in range(0, len(raw), 17):
+            self.wfile.write(raw[offset:offset + 17])
+            self.wfile.flush()
 
 
 def build_chat_body(body_text, request_body):

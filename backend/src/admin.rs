@@ -32,6 +32,38 @@ const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const ASIA_SHANGHAI_OFFSET_MS: i64 = 8 * MILLIS_PER_HOUR;
+const DEFAULT_LOG_VISIBLE_COLUMNS: [&str; 7] = [
+    "time",
+    "model",
+    "request_path",
+    "status",
+    "duration",
+    "total_tokens",
+    "api_key",
+];
+const LOG_COLUMN_IDS: [&str; 20] = [
+    "time",
+    "model",
+    "request_path",
+    "status",
+    "duration",
+    "total_tokens",
+    "api_key",
+    "provider",
+    "endpoint",
+    "transport",
+    "first_byte",
+    "ttft",
+    "input_tokens",
+    "output_tokens",
+    "cache_read",
+    "cache_write",
+    "reasoning",
+    "cost",
+    "request_id",
+    "error_type",
+];
+const LOG_VISIBLE_COLUMNS_PREFERENCE: &str = "log_visible_columns";
 
 fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -95,6 +127,15 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
 
         (Method::GET, "/api/v1/providers") => return list_providers(req, state).await,
         (Method::POST, "/api/v1/providers") => return create_provider(req, state).await,
+        (Method::GET, "/api/v1/provider-models") => {
+            return list_all_provider_models(req, state).await;
+        }
+        (Method::GET, "/api/v1/console-preferences") => {
+            return console_preferences(req, state).await;
+        }
+        (Method::PATCH, "/api/v1/console-preferences") => {
+            return patch_console_preferences(req, state).await;
+        }
 
         (Method::GET, "/api/v1/routes") => return list_routes(req, state).await,
         (Method::GET, "/api/v1/prices") => return list_prices(req, state).await,
@@ -254,6 +295,88 @@ fn require_admin(req: &Request<Incoming>, state: &SharedState) -> Option<HttpRes
     None
 }
 
+async fn console_preferences(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let columns = match state
+        .db
+        .get_console_preference(LOG_VISIBLE_COLUMNS_PREFERENCE)
+        .await
+    {
+        Ok(Some(raw)) => serde_json::from_str::<Vec<String>>(&raw)
+            .ok()
+            .filter(|columns| validate_log_visible_columns(columns).is_ok())
+            .unwrap_or_else(default_log_visible_columns),
+        Ok(None) => default_log_visible_columns(),
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    http::json(
+        StatusCode::OK,
+        &serde_json::json!({ "log_visible_columns": columns }),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchConsolePreferencesReq {
+    log_visible_columns: Vec<String>,
+}
+
+async fn patch_console_preferences(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let (_, patch, _) = match http::read_json_limited::<PatchConsolePreferencesReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(message) = validate_log_visible_columns(&patch.log_visible_columns) {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
+    let value_json = match serde_json::to_string(&patch.log_visible_columns) {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::BAD_REQUEST, error.to_string());
+        }
+    };
+    if let Err(error) = state
+        .db
+        .upsert_console_preference(LOG_VISIBLE_COLUMNS_PREFERENCE, &value_json, util::now_ms())
+        .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    http::json(
+        StatusCode::OK,
+        &serde_json::json!({ "log_visible_columns": patch.log_visible_columns }),
+    )
+}
+
+fn validate_log_visible_columns(columns: &[String]) -> Result<(), &'static str> {
+    if columns.is_empty() {
+        return Err("log_visible_columns must not be empty");
+    }
+    let mut seen = std::collections::HashSet::with_capacity(columns.len());
+    for column in columns {
+        if !LOG_COLUMN_IDS.contains(&column.as_str()) {
+            return Err("log_visible_columns contains an unknown column");
+        }
+        if !seen.insert(column.as_str()) {
+            return Err("log_visible_columns contains duplicate columns");
+        }
+    }
+    Ok(())
+}
+
+fn default_log_visible_columns() -> Vec<String> {
+    DEFAULT_LOG_VISIBLE_COLUMNS
+        .iter()
+        .map(|column| (*column).to_string())
+        .collect()
+}
+
 async fn list_provider_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     let Some(provider_id) = parse_provider_id_with_suffix(path, "/models") else {
@@ -264,6 +387,49 @@ async fn list_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
         Ok(items) => http::json(StatusCode::OK, &items),
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+async fn list_all_provider_models(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let (models, providers) = match tokio::try_join!(
+        state.db.list_all_provider_models(),
+        state.db.list_upstream_providers(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let providers = providers
+        .into_iter()
+        .map(|provider| (provider.id, provider))
+        .collect::<HashMap<_, _>>();
+    let payload = models
+        .into_iter()
+        .filter_map(|model| {
+            let provider = providers.get(&model.provider_id)?;
+            let native_api_formats: &[&str] = match provider.provider_type.as_str() {
+                "openai" => &["chat_completions", "responses"],
+                "openai_compatible" => &["chat_completions"],
+                "openai_compatible_responses" => &["responses"],
+                _ => &[],
+            };
+            Some(serde_json::json!({
+                "id": model.id,
+                "provider_id": model.provider_id,
+                "provider_name": provider.name,
+                "provider_type": provider.provider_type,
+                "upstream_model": model.upstream_model,
+                "alias": model.alias,
+                "enabled": model.enabled,
+                "available": model.available,
+                "responses_via_chat_enabled": model.responses_via_chat_enabled,
+                "native_api_formats": native_api_formats,
+                "created_at_ms": model.created_at_ms,
+                "updated_at_ms": model.updated_at_ms,
+            }))
+        })
+        .collect::<Vec<_>>();
+    http::json(StatusCode::OK, &payload)
 }
 
 async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -412,6 +578,7 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
 struct PatchProviderModelReq {
     alias: Option<Option<String>>,
     enabled: Option<bool>,
+    responses_via_chat_enabled: Option<bool>,
 }
 
 async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -428,9 +595,39 @@ async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> Htt
             Err(resp) => return resp,
         };
 
+    if patch.responses_via_chat_enabled == Some(true) {
+        let (models, providers) = match tokio::try_join!(
+            state.db.list_all_provider_models(),
+            state.db.list_upstream_providers(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+            }
+        };
+        let Some(model) = models.iter().find(|model| model.id == model_id) else {
+            return http::json_error(StatusCode::NOT_FOUND, "model not found");
+        };
+        let compatible = providers.iter().any(|provider| {
+            provider.id == model.provider_id && provider.provider_type == "openai_compatible"
+        });
+        if !compatible {
+            return http::json_error(
+                StatusCode::BAD_REQUEST,
+                "responses_via_chat_enabled is only valid for openai_compatible models",
+            );
+        }
+    }
+
     if let Err(e) = state
         .db
-        .update_provider_model(model_id, patch.alias, patch.enabled, util::now_ms())
+        .update_provider_model(
+            model_id,
+            patch.alias,
+            patch.enabled,
+            patch.responses_via_chat_enabled,
+            util::now_ms(),
+        )
         .await
     {
         let message = e.to_string();
@@ -2209,6 +2406,7 @@ async fn delete_endpoint(req: Request<Incoming>, state: SharedState) -> HttpResp
     match state.db.delete_upstream_endpoint(endpoint_id).await {
         Ok(()) => {
             state.caches.upstream.invalidate();
+            state.affinity.purge_endpoint(endpoint_id);
             http::empty(StatusCode::NO_CONTENT)
         }
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -2455,6 +2653,7 @@ async fn delete_key(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         Ok(()) => {
             state.caches.upstream.invalidate();
             state.quota.purge_key(key_id);
+            state.affinity.purge_upstream_key(key_id);
             http::empty(StatusCode::NO_CONTENT)
         }
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),

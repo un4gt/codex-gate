@@ -118,10 +118,28 @@ export function formatModelName(value: string | null | undefined): string {
   return trimmed ? trimmed : t('未识别');
 }
 
+export const REQUEST_TYPE_OPTIONS = [
+  { value: 'chat_completions', endpoint: 'v1/chat/completions' },
+  { value: 'responses', endpoint: 'v1/responses' },
+] as const;
+
+const requestTypeEndpointMap = new Map<string, string>(
+  REQUEST_TYPE_OPTIONS.map(({ value, endpoint }) => [value, endpoint]),
+);
+
 export function formatRequestType(value: string | null | undefined): string {
-  if (value === 'responses') return t('响应请求');
-  if (value === 'chat_completions') return t('对话请求');
-  return '—';
+  return value ? requestTypeEndpointMap.get(value) ?? '—' : '—';
+}
+
+export function formatRequestPath(
+  clientApiFormat: string | null | undefined,
+  upstreamApiFormat: string | null | undefined,
+): string {
+  const client = formatRequestType(clientApiFormat);
+  const upstream = formatRequestType(upstreamApiFormat ?? clientApiFormat);
+  return upstream !== client && upstream !== '—' && client !== '—'
+    ? `${upstream} → ${client}`
+    : client;
 }
 
 export function formatRoutingStrategy(value: string | null | undefined): string {
