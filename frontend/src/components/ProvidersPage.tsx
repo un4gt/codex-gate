@@ -1321,7 +1321,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
           <Box className="grid gap-6">
             <FormControl>
               <Box className="flex items-center justify-between gap-3">
-                <FormLabel>{t("服务地址")}</FormLabel>
+                <FormLabel>{t("API Base URL")}</FormLabel>
                 <Button type="button" size="icon" variant="ghost" aria-label={t('添加服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateBaseUrl}>
                   <Plus className="size-4" />
                 </Button>
@@ -1329,7 +1329,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <Box className="grid gap-3">
                 {createBaseUrls.map((row, index) => <Box key={row.id} className="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
                       <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
-                      <InputBase type="url" value={row.value} disabled={createFieldsDisabled} autoComplete="off" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateBaseUrl(row.id, event.target.value)} placeholder={t("https://api.example.com")} className="bg-background" />
+                      <InputBase type="url" value={row.value} disabled={createFieldsDisabled} autoComplete="off" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateBaseUrl(row.id, event.target.value)} placeholder={t("https://api.example.com/v1")} className="bg-background" />
                       <Button type="button" size="icon" variant="ghost" aria-label={t('移除服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateBaseUrl(row.id)}>
                         <Trash2 className="size-4" />
                       </Button>
@@ -1661,7 +1661,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <Box className="grid gap-3 border border-dashed border-border/60 bg-transparent p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]" onSubmit={event => void submitEndpointCreate(event, item)} component="form">
                       <Box className="flex size-10 items-center justify-center font-mono text-xs text-muted-foreground">{item.endpoints.length + 1}</Box>
                       <InputBase name="endpoint_name" placeholder={`地址 ${item.endpoints.length + 1}`} autoComplete="off" />
-                      <InputBase name="endpoint_base_url" placeholder={t("https://api.example.com")} autoComplete="off" autoCapitalize="none" spellCheck={false} className="font-mono text-xs" />
+                      <InputBase name="endpoint_base_url" placeholder={t("https://api.example.com/v1")} autoComplete="off" autoCapitalize="none" spellCheck={false} className="font-mono text-xs" />
                       <Box className="check-row h-10 px-3 py-0" component="label">
                         <Checkbox name="endpoint_enabled" defaultChecked />
                         <Box component="span">{t('启用')}</Box>

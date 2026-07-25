@@ -18,6 +18,7 @@ use crate::state::SharedState;
 use crate::types::{
     ApiKeyAuth, ModelAlias, ModelAliasTarget, UpstreamEndpoint, UpstreamKeyMeta, UpstreamProvider,
 };
+use crate::upstream_url;
 use crate::util;
 use tokio::time as tokio_time;
 
@@ -93,17 +94,6 @@ fn stats_window(period: &str, now_ms: i64) -> Option<(i64, i64)> {
         "month" | "30d" => Some((now_ms.saturating_sub(30 * MILLIS_PER_DAY), now_ms)),
         _ => None,
     }
-}
-
-fn validate_upstream_base_url(value: &str) -> Result<(), &'static str> {
-    let uri: Uri = value.parse().map_err(|_| "invalid base_url")?;
-    if !matches!(uri.scheme_str(), Some("http" | "https")) {
-        return Err("invalid base_url");
-    }
-    if uri.authority().is_none() {
-        return Err("invalid base_url");
-    }
-    Ok(())
 }
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -432,6 +422,80 @@ async fn list_all_provider_models(_req: Request<Incoming>, state: SharedState) -
     http::json(StatusCode::OK, &payload)
 }
 
+async fn fetch_upstream_model_ids(
+    state: &SharedState,
+    base_url: &str,
+    key_secret: &str,
+) -> Result<Vec<String>, HttpResponse> {
+    let uri = upstream_url::build_upstream_uri(base_url, "/models")
+        .map_err(|error| http::json_error(StatusCode::BAD_REQUEST, error))?;
+    let upstream_req = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {key_secret}"))
+        .body(Full::new(Bytes::new()))
+        .map_err(|error| http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+
+    let response = match tokio_time::timeout(
+        state.config.upstream_request_timeout,
+        state.upstream.request(upstream_req),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(http::json_error(StatusCode::BAD_GATEWAY, error.to_string()));
+        }
+        Err(_) => {
+            return Err(http::json_error(
+                StatusCode::BAD_GATEWAY,
+                format!("timeout after {:?}", state.config.upstream_request_timeout),
+            ));
+        }
+    };
+
+    let status = response.status();
+    let body_bytes = Limited::new(response.into_body(), ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES)
+        .collect()
+        .await
+        .map_err(|error| http::json_error(StatusCode::BAD_GATEWAY, error.to_string()))?
+        .to_bytes();
+    if status != StatusCode::OK {
+        let body = String::from_utf8_lossy(&body_bytes).trim().to_string();
+        return Err(http::json_error(
+            StatusCode::BAD_GATEWAY,
+            format!("upstream /models failed: {} {}", status.as_u16(), body),
+        ));
+    }
+
+    let parsed: Value = serde_json::from_slice(&body_bytes).map_err(|error| {
+        http::json_error(StatusCode::BAD_GATEWAY, format!("invalid json: {error}"))
+    })?;
+    let mut models = parsed
+        .get("data")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    models.sort();
+    models.dedup();
+
+    if models.is_empty() {
+        return Err(http::json_error(
+            StatusCode::BAD_GATEWAY,
+            "empty model list",
+        ));
+    }
+    Ok(models)
+}
+
 async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     let Some(provider_id) = parse_provider_id_with_suffix(path, "/models/sync") else {
@@ -448,10 +512,13 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
-    let Some(provider) = snap.providers.iter().find(|p| p.id == provider_id) else {
+    if !snap
+        .providers
+        .iter()
+        .any(|provider| provider.id == provider_id)
+    {
         return http::json_error(StatusCode::NOT_FOUND, "provider not found");
-    };
-    let models_path = provider_models_sync_path(&provider.provider_type);
+    }
 
     let now_ms = util::now_ms();
 
@@ -481,82 +548,10 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
         return http::json_error(StatusCode::CONFLICT, "no available upstream endpoints");
     };
 
-    let uri = match build_upstream_uri(&endpoint.base_url, models_path) {
-        Ok(uri) => uri,
-        Err(e) => return http::json_error(StatusCode::BAD_REQUEST, e),
+    let models = match fetch_upstream_model_ids(&state, &endpoint.base_url, &key.secret).await {
+        Ok(models) => models,
+        Err(response) => return response,
     };
-
-    let upstream_req = match Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("Authorization", format!("Bearer {}", key.secret))
-        .body(Full::new(Bytes::new()))
-    {
-        Ok(req) => req,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
-    let response = match tokio_time::timeout(
-        state.config.upstream_request_timeout,
-        state.upstream.request(upstream_req),
-    )
-    .await
-    {
-        Ok(Ok(resp)) => resp,
-        Ok(Err(e)) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
-        Err(_) => {
-            return http::json_error(
-                StatusCode::BAD_GATEWAY,
-                format!("timeout after {:?}", state.config.upstream_request_timeout),
-            );
-        }
-    };
-
-    let status = response.status();
-    let body_bytes = match Limited::new(response.into_body(), ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES)
-        .collect()
-        .await
-    {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
-    };
-
-    if status != StatusCode::OK {
-        let body = String::from_utf8_lossy(&body_bytes).trim().to_string();
-        return http::json_error(
-            StatusCode::BAD_GATEWAY,
-            format!(
-                "upstream {models_path} failed: {} {}",
-                status.as_u16(),
-                body
-            ),
-        );
-    }
-
-    let parsed: Value = match serde_json::from_slice(&body_bytes) {
-        Ok(v) => v,
-        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, format!("invalid json: {e}")),
-    };
-
-    let mut models: Vec<String> = parsed
-        .get("data")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
-                .map(|id| id.trim().to_string())
-                .filter(|id| !id.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    models.sort();
-    models.dedup();
-
-    if models.is_empty() {
-        return http::json_error(StatusCode::BAD_GATEWAY, "empty model list");
-    }
 
     if let Err(e) = state
         .db
@@ -691,31 +686,24 @@ async fn sync_key_models(req: Request<Incoming>, state: SharedState) -> HttpResp
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
-    let mut provider_id: Option<i64> = None;
-    let mut key_secret: Option<String> = None;
-    for (pid, keys) in &snap.keys_by_provider {
-        for key in keys {
-            if key.id == upstream_key_id {
-                provider_id = Some(*pid);
-                key_secret = Some(key.secret.clone());
-                break;
-            }
-        }
-        if provider_id.is_some() {
-            break;
-        }
-    }
-
-    let Some(provider_id) = provider_id else {
+    let key_match = snap
+        .keys_by_provider
+        .iter()
+        .find_map(|(provider_id, keys)| {
+            keys.iter()
+                .find(|key| key.id == upstream_key_id)
+                .map(|key| (*provider_id, key))
+        });
+    let Some((provider_id, key)) = key_match else {
         return http::json_error(StatusCode::NOT_FOUND, "key not found");
     };
-    let Some(key_secret) = key_secret else {
-        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to resolve key");
-    };
-    let Some(provider) = snap.providers.iter().find(|p| p.id == provider_id) else {
+    if !snap
+        .providers
+        .iter()
+        .any(|provider| provider.id == provider_id)
+    {
         return http::json_error(StatusCode::NOT_FOUND, "provider not found");
-    };
-    let models_path = provider_models_sync_path(&provider.provider_type);
+    }
 
     let now_ms = util::now_ms();
     let endpoints = snap
@@ -733,80 +721,10 @@ async fn sync_key_models(req: Request<Incoming>, state: SharedState) -> HttpResp
         return http::json_error(StatusCode::CONFLICT, "no available upstream endpoints");
     };
 
-    let uri = match build_upstream_uri(&endpoint.base_url, models_path) {
-        Ok(uri) => uri,
-        Err(e) => return http::json_error(StatusCode::BAD_REQUEST, e),
+    let models = match fetch_upstream_model_ids(&state, &endpoint.base_url, &key.secret).await {
+        Ok(models) => models,
+        Err(response) => return response,
     };
-
-    let upstream_req = match Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("Authorization", format!("Bearer {}", key_secret))
-        .body(Full::new(Bytes::new()))
-    {
-        Ok(req) => req,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
-    let response = match tokio_time::timeout(
-        state.config.upstream_request_timeout,
-        state.upstream.request(upstream_req),
-    )
-    .await
-    {
-        Ok(Ok(resp)) => resp,
-        Ok(Err(e)) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
-        Err(_) => {
-            return http::json_error(
-                StatusCode::BAD_GATEWAY,
-                format!("timeout after {:?}", state.config.upstream_request_timeout),
-            );
-        }
-    };
-
-    let status = response.status();
-    let body_bytes = match Limited::new(response.into_body(), ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES)
-        .collect()
-        .await
-    {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, e.to_string()),
-    };
-    if status != StatusCode::OK {
-        let body = String::from_utf8_lossy(&body_bytes).trim().to_string();
-        return http::json_error(
-            StatusCode::BAD_GATEWAY,
-            format!(
-                "upstream {models_path} failed: {} {}",
-                status.as_u16(),
-                body
-            ),
-        );
-    }
-
-    let parsed: Value = match serde_json::from_slice(&body_bytes) {
-        Ok(v) => v,
-        Err(e) => return http::json_error(StatusCode::BAD_GATEWAY, format!("invalid json: {e}")),
-    };
-
-    let mut models: Vec<String> = parsed
-        .get("data")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
-                .map(|id| id.trim().to_string())
-                .filter(|id| !id.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    models.sort();
-    models.dedup();
-
-    if models.is_empty() {
-        return http::json_error(StatusCode::BAD_GATEWAY, "empty model list");
-    }
 
     if let Err(e) = state
         .db
@@ -1339,28 +1257,6 @@ async fn patch_gateway_model(req: Request<Incoming>, state: SharedState) -> Http
 
     state.caches.upstream.invalidate();
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
-}
-
-fn build_upstream_uri(base_url: &str, path: &str) -> Result<Uri, String> {
-    let trimmed_base = base_url.trim_end_matches('/');
-    let base = if path.starts_with("/v1/") {
-        trimmed_base.strip_suffix("/v1").unwrap_or(trimmed_base)
-    } else {
-        trimmed_base
-    };
-
-    let mut out = String::with_capacity(base_url.len() + 64);
-    out.push_str(base);
-    out.push_str(path);
-    out.parse::<Uri>().map_err(|e| e.to_string())
-}
-
-fn provider_models_sync_path(provider_type: &str) -> &'static str {
-    if provider_type == "openai_compatible_responses" {
-        "/v1/models?api_format=responses"
-    } else {
-        "/v1/models"
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2299,10 +2195,10 @@ async fn create_provider_endpoint(req: Request<Incoming>, state: SharedState) ->
     let enabled = body.enabled.unwrap_or(true);
     let priority = body.priority.unwrap_or(100);
     let weight = body.weight.unwrap_or(1);
-    let base_url = normalize_base_url(body.base_url.trim());
-    if let Err(message) = validate_upstream_base_url(&base_url) {
-        return http::json_error(StatusCode::BAD_REQUEST, message);
-    }
+    let base_url = match upstream_url::normalize_base_url(&body.base_url) {
+        Ok(base_url) => base_url,
+        Err(message) => return http::json_error(StatusCode::BAD_REQUEST, message),
+    };
 
     let now_ms = util::now_ms();
     let id = match state
@@ -2370,11 +2266,10 @@ async fn update_endpoint(req: Request<Incoming>, state: SharedState) -> HttpResp
         if b.trim().is_empty() {
             return http::json_error(StatusCode::BAD_REQUEST, "base_url is empty");
         }
-        let base_url = normalize_base_url(b.trim());
-        if let Err(message) = validate_upstream_base_url(&base_url) {
-            return http::json_error(StatusCode::BAD_REQUEST, message);
-        }
-        current.base_url = base_url;
+        current.base_url = match upstream_url::normalize_base_url(&b) {
+            Ok(base_url) => base_url,
+            Err(message) => return http::json_error(StatusCode::BAD_REQUEST, message),
+        };
     }
     if let Some(v) = patch.enabled {
         current.enabled = v;
@@ -2432,7 +2327,10 @@ async fn test_endpoint(req: Request<Incoming>, state: SharedState) -> HttpRespon
 
     // Probe the configured base URL directly. Many OpenAI-compatible upstreams do not expose /healthz.
     // Reachability matters more than "OK" response semantics here; 401/404 still prove the endpoint is alive.
-    let url = normalize_base_url(&endpoint.base_url);
+    let url = match upstream_url::normalize_base_url(&endpoint.base_url) {
+        Ok(url) => url,
+        Err(message) => return http::json_error(StatusCode::BAD_REQUEST, message),
+    };
     let uri: Uri = match url.parse() {
         Ok(uri) => uri,
         Err(_) => return http::json_error(StatusCode::BAD_REQUEST, "invalid endpoint url"),
@@ -3502,10 +3400,6 @@ fn query_string(q: Option<&str>, key: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn normalize_base_url(input: &str) -> String {
-    input.trim_end_matches('/').to_string()
 }
 
 fn generate_api_key_plaintext() -> String {

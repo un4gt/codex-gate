@@ -245,6 +245,19 @@ bash scripts/run-prek-checks.sh pre-push
 
 本地 hooks 可以被跳过，因此不是发布安全边界。二进制与 Docker tag workflow 都必须先通过 `.github/workflows/quality-gate.yml` 才能构建或发布；`scripts/git-push-with-next-tag.sh` 也会在创建 tag 前要求 clean worktree 并执行同一个 pre-push 门禁。
 
+### 上游 API Base URL
+
+管理台中的服务地址表示完整的 API Base URL。网关会在这个前缀后追加 `/models`、`/chat/completions` 或 `/responses`：
+
+| 配置值 | 模型列表地址 | Chat Completions 地址 |
+| --- | --- | --- |
+| `https://api.openai.com` | `https://api.openai.com/v1/models` | `https://api.openai.com/v1/chat/completions` |
+| `https://api.openai.com/v1` | `https://api.openai.com/v1/models` | `https://api.openai.com/v1/chat/completions` |
+| `https://gateway.example.com/openai/v2` | `https://gateway.example.com/openai/v2/models` | `https://gateway.example.com/openai/v2/chat/completions` |
+| `https://ark.cn-beijing.volces.com/api/coding/v3` | `https://ark.cn-beijing.volces.com/api/coding/v3/models` | `https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions` |
+
+只有裸域名会为了兼容自动补 `/v1`；只要配置值已有路径，网关就会完整保留该路径。Base URL 不接受查询参数，模型同步固定请求 API Base URL 下的纯 `/models`。
+
 ## 环境变量说明
 
 ### `MASTER_KEY` vs `ADMIN_TOKEN`
@@ -340,7 +353,7 @@ MOCK_PORT=19130 GW_PORT=18130 scripts/test_openai_compatible_responses.sh
 
 ## 本地验证与回归
 
-- `python3 scripts/mock_upstream.py`：本地模拟上游（支持 chat/responses 以及 `/v1/models`）
+- `python3 scripts/mock_upstream.py`：本地模拟上游（支持带任意 API 前缀的 chat/responses/models）
 - `python3 scripts/bench_gateway.py ...`：基础并发 / 长压 / RSS 采样
 - `python3 scripts/bench_failover.py ...`：endpoint / key failover 基线
 - `python3 scripts/run_regression.py --archive-compress`：一键跑 build / 长压 / failover / archive 回归

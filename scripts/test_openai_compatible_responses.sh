@@ -88,7 +88,7 @@ provider_id="$(json_get "$provider_json" "id")"
 curl -fsS -X POST "http://127.0.0.1:${GW_PORT}/api/v1/providers/${provider_id}/endpoints" \
   -H "$ADMIN_AUTH" \
   -H 'Content-Type: application/json' \
-  -d "{\"name\":\"mock-responses\",\"base_url\":\"http://127.0.0.1:${MOCK_PORT}/v1\",\"enabled\":true}" >/dev/null
+  -d "{\"name\":\"mock-responses\",\"base_url\":\"http://127.0.0.1:${MOCK_PORT}/api/coding/v3\",\"enabled\":true}" >/dev/null
 
 key_json="$(
   curl -fsS -X POST "http://127.0.0.1:${GW_PORT}/api/v1/providers/${provider_id}/keys" \
@@ -163,6 +163,8 @@ PY
   sleep 0.2
 done
 
+mock_stats="$(curl -fsS "http://127.0.0.1:${MOCK_PORT}/__admin/stats")"
+
 python3 - \
   "$resp_code" \
   "$chat_code" \
@@ -175,7 +177,8 @@ python3 - \
   "$GW_LOG" \
   "$DB_PATH" \
   "$sync_provider" \
-  "$sync_key" <<'PY'
+  "$sync_key" \
+  "$mock_stats" <<'PY'
 import json
 import sqlite3
 import sys
@@ -183,10 +186,11 @@ import sys
 resp_code, chat_code = sys.argv[1], sys.argv[2]
 resp_body_path, chat_body_path = sys.argv[3], sys.argv[4]
 chat_models_path, resp_models_path = sys.argv[5], sys.argv[6]
-result_log, mock_log, gw_log, db_path, sync_provider_raw, sync_key_raw = sys.argv[7:13]
+result_log, mock_log, gw_log, db_path, sync_provider_raw, sync_key_raw, mock_stats_raw = sys.argv[7:14]
 
 sync_provider = json.loads(sync_provider_raw)
 sync_key = json.loads(sync_key_raw)
+mock_stats = json.loads(mock_stats_raw)
 with open(resp_body_path, "r", encoding="utf-8") as f:
     resp_body = json.load(f)
 with open(chat_body_path, "r", encoding="utf-8") as f:
@@ -198,7 +202,7 @@ with open(resp_models_path, "r", encoding="utf-8") as f:
 
 assert resp_code == "200", f"/v1/responses expected 200, got {resp_code}"
 assert chat_code == "503", f"/v1/chat/completions expected 503, got {chat_code}"
-assert chat_body.get("error") == "no available providers", f"unexpected chat error: {chat_body}"
+assert chat_body.get("error") == "no providers can route this model", f"unexpected chat error: {chat_body}"
 assert isinstance(chat_models.get("data"), list) and len(chat_models["data"]) == 0, f"chat models should be empty: {chat_models}"
 
 responses_ids = [item.get("id") for item in resp_models.get("data", [])]
@@ -208,6 +212,13 @@ for expected in ("resp-sync-mini", "resp-sync-plus"):
     assert expected in responses_ids, f"responses models missing {expected}: {resp_models}"
     assert expected in provider_sync_ids, f"provider sync missing {expected}: {sync_provider}"
     assert expected in key_sync_ids, f"key sync missing {expected}: {sync_key}"
+
+upstream_requests = mock_stats.get("recent_requests", [])
+model_requests = [item for item in upstream_requests if item.get("method") == "GET"]
+assert len(model_requests) >= 2, f"expected provider/key model sync requests: {upstream_requests}"
+assert all(item.get("path") == "/api/coding/v3/models" for item in model_requests), f"unexpected models URL: {model_requests}"
+assert any(item.get("path") == "/api/coding/v3/responses" for item in upstream_requests), f"custom responses URL missing: {upstream_requests}"
+assert not any("/api/coding/v3/v1/" in str(item.get("path")) for item in upstream_requests), f"duplicated v1 path: {upstream_requests}"
 
 conn = sqlite3.connect(db_path)
 cur = conn.cursor()
@@ -250,6 +261,7 @@ result = {
     "responses_models": responses_ids,
     "provider_sync_models": provider_sync_ids,
     "key_sync_models": key_sync_ids,
+    "upstream_requests": upstream_requests,
     "request_logs": request_logs,
     "stats_daily": stats_daily,
     "artifacts": {

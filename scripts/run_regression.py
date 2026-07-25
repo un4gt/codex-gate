@@ -123,7 +123,7 @@ def bootstrap_main_provider(admin_token):
     }))
     request_json('POST', f'{BASE_URL}/api/v1/providers/{provider_id}/endpoints', admin_token, {
         'name': 'main-good',
-        'baseUrl': f'{MOCK_URL}/good',
+        'baseUrl': f'{MOCK_URL}/good/api/coding/v3',
         'enabled': True,
         'priority': 10,
         'weight': 1,
@@ -253,9 +253,9 @@ def main():
     mock_proc, mock_log = start_process([
         'python3', 'scripts/mock_upstream.py',
         '--listen', '127.0.0.1:19092',
-        '--route', '/bad/v1|429|rate limited||0|chat',
-        '--route', '/good/v1|200|good endpoint||0|chat',
-        '--route', '/key/v1|200|key ok|good-key|0|chat',
+        '--route', '/bad/api/coding/v3|429|rate limited||0|chat',
+        '--route', '/good/api/coding/v3|200|good endpoint||0|chat',
+        '--route', '/key/api/coding/v3|200|key ok|good-key|0|chat',
     ], log_name='regression_mock.log')
 
     gateway_env = os.environ.copy()
@@ -305,8 +305,8 @@ def main():
             '--admin-token', 'adm',
             '--scenario', 'endpoint',
             '--model', 'gpt-4o-mini',
-            '--endpoint-a-url', f'{MOCK_URL}/bad',
-            '--endpoint-b-url', f'{MOCK_URL}/good',
+            '--endpoint-a-url', f'{MOCK_URL}/bad/api/coding/v3',
+            '--endpoint-b-url', f'{MOCK_URL}/good/api/coding/v3',
             '--good-key-secret', 'good-key',
         ]).stdout)
 
@@ -316,10 +316,23 @@ def main():
             '--admin-token', 'adm',
             '--scenario', 'key',
             '--model', 'gpt-4o-mini',
-            '--endpoint-a-url', f'{MOCK_URL}/key',
+            '--endpoint-a-url', f'{MOCK_URL}/key/api/coding/v3',
             '--bad-key-secret', 'bad-key',
             '--good-key-secret', 'good-key',
         ]).stdout)
+
+        mock_stats = request_json('GET', f'{MOCK_URL}/__admin/stats')
+        upstream_requests = mock_stats.get('recent_requests', [])
+        proxy_requests = [item for item in upstream_requests if item.get('method') == 'POST']
+        if not proxy_requests:
+            raise RuntimeError('mock did not record upstream proxy requests')
+        unexpected_paths = [
+            item.get('path')
+            for item in proxy_requests
+            if not str(item.get('path')).endswith('/api/coding/v3/chat/completions')
+        ]
+        if unexpected_paths:
+            raise RuntimeError(f'unexpected custom-prefix upstream paths: {unexpected_paths}')
 
         logs_payload = request_json('GET', f'{BASE_URL}/api/v1/logs?page=1&page_size=5', 'adm')
         overview_payload = request_json('GET', f'{BASE_URL}/api/v1/stats/overview?period=24h', 'adm')
@@ -333,6 +346,7 @@ def main():
             'bench': bench_data,
             'failover_endpoint': failover_endpoint,
             'failover_key': failover_key,
+            'upstream_requests': upstream_requests,
             'pricing_contract': {
                 'logs_have_pricing': bool(logs_payload) and 'pricing' in logs_payload[0],
                 'logs_have_cost_fields': bool(logs_payload) and any(key.startswith('cost_') for key in logs_payload[0]),

@@ -22,6 +22,7 @@ mod system_status;
 mod telemetry;
 mod types;
 mod upstream;
+mod upstream_url;
 mod util;
 
 use std::convert::Infallible;

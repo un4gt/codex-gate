@@ -181,7 +181,7 @@ describe('admin console smoke test', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
     fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider B' } });
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://api.example.test' } });
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://api.example.test' } });
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Priority' }), { target: { value: '25' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '4' } });
@@ -233,12 +233,12 @@ describe('admin console smoke test', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
     fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider Retry' } });
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://old.example.test' } });
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://old.example.test' } });
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-old' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
 
     expect(await screen.findByText('Sync Failed')).toBeTruthy();
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://new.example.test' } });
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://new.example.test' } });
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-new' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save and Retry Sync' }));
 
@@ -280,7 +280,7 @@ describe('admin console smoke test', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
     fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider Rollback' } });
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com'), { target: { value: 'https://api.example.test' } });
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://api.example.test' } });
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
 

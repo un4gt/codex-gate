@@ -49,9 +49,10 @@ class MockState:
         with self.lock:
             route.hits += 1
 
-    def note_request(self, path, payload, headers):
+    def note_request(self, method, path, payload, headers):
         with self.lock:
             self.recent_requests.append({
+                'method': method,
                 'path': path,
                 'model': payload.get('model'),
                 'stream': payload.get('stream', False),
@@ -101,7 +102,8 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == '/v1/models':
+        if parsed.path.endswith('/models'):
+            self.server.state.note_request('GET', self.path, {}, self.headers)
             return self.handle_models(parsed.query)
         if self.path.startswith('/__admin/stats'):
             return self.handle_stats()
@@ -119,7 +121,7 @@ class MockHandler(BaseHTTPRequestHandler):
             payload = json.loads(body.decode('utf-8')) if body else {}
         except Exception:
             payload = {}
-        self.server.state.note_request(path, payload, self.headers)
+        self.server.state.note_request('POST', path, payload, self.headers)
 
         if route.delay_ms > 0:
             time.sleep(route.delay_ms / 1000.0)
@@ -160,7 +162,7 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def handle_models(self, query_raw):
         query = parse_qs(query_raw)
-        requested_format = (query.get('api_format') or ['chat'])[0]
+        requested_format = (query.get('api_format') or [self.server.default_model_format])[0]
         models = (
             self.server.responses_models
             if requested_format == 'responses'
@@ -372,6 +374,7 @@ def main():
     routes = [parse_route(item, args.default_format) for item in args.route]
     server = ThreadingHTTPServer((host, int(port)), MockHandler)
     server.state = MockState(default_route, routes)
+    server.default_model_format = args.default_format
     server.chat_models = parse_models(args.models_chat)
     server.responses_models = parse_models(args.models_responses)
     print(f'mock upstream listening on http://{args.listen}', flush=True)

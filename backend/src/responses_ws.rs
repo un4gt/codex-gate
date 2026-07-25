@@ -28,11 +28,12 @@ use crate::proxy::{self, ResolvedUpstream};
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
 use crate::types::{ApiFormat, ApiKeyAuth, Usage};
+use crate::upstream_url;
 use crate::util;
 
 type UpstreamWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-const RESPONSES_PATH: &str = "/v1/responses";
+const UPSTREAM_RESPONSES_PATH: &str = "/responses";
 const RESPONSES_WS_BETA: &str = "responses_websockets=2026-02-06";
 const BETA_FEATURE_RESPONSES_HTTP_TO_WS: &str = "responses-http-to-ws";
 
@@ -2612,29 +2613,11 @@ fn normalize_response_create(value: &mut Value, upstream_model: &str) {
 }
 
 fn build_upstream_http_responses_uri(base_url: &str) -> Result<Uri, String> {
-    let path = RESPONSES_PATH
-        .parse::<hyper::http::uri::PathAndQuery>()
-        .map_err(|err| err.to_string())?;
-    proxy::build_upstream_uri(base_url, Some(&path))
+    upstream_url::build_upstream_uri(base_url, UPSTREAM_RESPONSES_PATH)
 }
 
 fn build_upstream_ws_url(base_url: &str) -> Result<String, String> {
-    let trimmed_base = base_url.trim_end_matches('/');
-    let base = trimmed_base.strip_suffix("/v1").unwrap_or(trimmed_base);
-    let http_uri = format!("{base}{RESPONSES_PATH}")
-        .parse::<Uri>()
-        .map_err(|err| err.to_string())?;
-    let mut parts = http_uri.into_parts();
-    let next_scheme = match parts.scheme.as_ref().map(|scheme| scheme.as_str()) {
-        Some("http" | "ws") => "ws",
-        Some("https" | "wss") => "wss",
-        Some(other) => return Err(format!("unsupported upstream scheme: {other}")),
-        None => return Err("missing upstream scheme".to_string()),
-    };
-    parts.scheme = Some(next_scheme.parse().map_err(|err| format!("{err}"))?);
-    Uri::from_parts(parts)
-        .map(|uri| uri.to_string())
-        .map_err(|err| err.to_string())
+    upstream_url::build_upstream_websocket_url(base_url, UPSTREAM_RESPONSES_PATH)
 }
 
 fn build_upstream_http_bridge_headers(

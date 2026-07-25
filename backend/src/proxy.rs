@@ -35,6 +35,7 @@ use crate::selector;
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
 use crate::types::{ApiFormat, ApiKeyAuth, UpstreamKey, UpstreamProvider, Usage};
+use crate::upstream_url;
 use crate::util;
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -2299,32 +2300,28 @@ pub(crate) fn build_upstream_uri(
         return Err("missing path".to_string());
     };
 
-    let pq_str = pq.as_str();
-    let trimmed_base = base_url.trim_end_matches('/');
-    let base = if pq_str.starts_with("/v1/") {
-        trimmed_base.strip_suffix("/v1").unwrap_or(trimmed_base)
-    } else {
-        trimmed_base
-    };
-
-    let mut out = String::with_capacity(base_url.len() + 128);
-    out.push_str(base);
-    out.push_str(pq.as_str());
-    out.parse::<Uri>().map_err(|e| e.to_string())
+    upstream_url::build_upstream_uri(base_url, pq.as_str())
 }
 
 fn upstream_path_and_query(
     original: Option<&hyper::http::uri::PathAndQuery>,
     responses_via_chat: bool,
 ) -> Option<hyper::http::uri::PathAndQuery> {
-    if !responses_via_chat {
-        return original.cloned();
-    }
+    let original = original?;
+    let endpoint_path = if responses_via_chat {
+        "/chat/completions"
+    } else {
+        match original.path() {
+            "/v1/chat/completions" => "/chat/completions",
+            "/v1/responses" => "/responses",
+            _ => return None,
+        }
+    };
     let query = original
-        .and_then(|path| path.query())
+        .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
-    format!("/v1/chat/completions{query}").parse().ok()
+    format!("{endpoint_path}{query}").parse().ok()
 }
 
 fn api_format_name(api_format: ApiFormat) -> &'static str {
@@ -3378,7 +3375,7 @@ mod tests {
         UpstreamAttemptReservation, UsageCaptureBuffer, build_scheduled_attempts,
         build_upstream_headers, classify_failure_scope, effective_priority_from_memberships,
         extract_usage_from_capture, parse_chat_usage, parse_responses_usage,
-        provider_route_api_format, should_retry_response_status,
+        provider_route_api_format, should_retry_response_status, upstream_path_and_query,
     };
     use crate::cache::upstream_cache::UpstreamSnapshot;
     use crate::health::RuntimeHealthBook;
@@ -3394,6 +3391,39 @@ mod tests {
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    #[test]
+    fn upstream_path_should_remove_gateway_v1_prefix_for_chat() {
+        let original = "/v1/chat/completions?trace=true"
+            .parse::<hyper::http::uri::PathAndQuery>()
+            .expect("path");
+
+        let upstream = upstream_path_and_query(Some(&original), false).expect("upstream path");
+
+        assert_eq!(upstream, "/chat/completions?trace=true");
+    }
+
+    #[test]
+    fn upstream_path_should_remove_gateway_v1_prefix_for_responses() {
+        let original = "/v1/responses?trace=true"
+            .parse::<hyper::http::uri::PathAndQuery>()
+            .expect("path");
+
+        let upstream = upstream_path_and_query(Some(&original), false).expect("upstream path");
+
+        assert_eq!(upstream, "/responses?trace=true");
+    }
+
+    #[test]
+    fn upstream_path_should_target_chat_when_bridging_responses() {
+        let original = "/v1/responses?trace=true"
+            .parse::<hyper::http::uri::PathAndQuery>()
+            .expect("path");
+
+        let upstream = upstream_path_and_query(Some(&original), true).expect("upstream path");
+
+        assert_eq!(upstream, "/chat/completions?trace=true");
+    }
 
     #[test]
     fn parse_chat_usage_should_split_cached_and_cache_creation_tokens() {
