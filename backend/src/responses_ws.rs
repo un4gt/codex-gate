@@ -588,14 +588,17 @@ async fn connect_selected_upstream(
         false,
     )
     .await
-    .map_err(|(status, message)| WsBridgeError {
-        status,
-        error_type: "upstream_resolve_failed",
-        message,
-        scope: proxy::classify_failure_scope(
-            Some(status.as_u16() as i32),
-            proxy::OutcomeOrigin::Gateway,
-        ),
+    .map_err(|error| {
+        let status = error.status;
+        WsBridgeError {
+            status,
+            error_type: error.code,
+            message: error.message,
+            scope: proxy::classify_failure_scope(
+                Some(status.as_u16() as i32),
+                proxy::OutcomeOrigin::Gateway,
+            ),
+        }
     })?;
     let affinity_binding = proxy::apply_affinity_to_plan(
         &ctx.state,

@@ -1,10 +1,10 @@
 use base64::Engine;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::Uri;
-use hyper::body::Bytes;
-use hyper::body::Incoming;
-use hyper::{Method, Request, StatusCode};
-use serde::{Deserialize, Deserializer};
+use hyper::body::{Body, Bytes, Incoming};
+use hyper::header::{HeaderName, SET_COOKIE};
+use hyper::{Method, Request, Response, StatusCode};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -26,8 +26,8 @@ const ALLOWED_PROVIDER_TYPES: [&str; 3] =
     ["openai", "openai_compatible", "openai_compatible_responses"];
 const BETA_FEATURE_RESPONSES_HTTP_TO_WS: &str = "responses-http-to-ws";
 
-// Admin endpoints sometimes probe upstreams that can return arbitrary HTML/JSON.
-// Keep these payloads bounded to avoid untrusted memory spikes.
+// Successful model inventories and endpoint probes are buffered for inspection.
+// Keep those buffered payloads bounded; non-success model responses stream through unchanged.
 const ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES: usize = 1024 * 1024;
 const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
@@ -42,7 +42,7 @@ const DEFAULT_LOG_VISIBLE_COLUMNS: [&str; 7] = [
     "total_tokens",
     "api_key",
 ];
-const LOG_COLUMN_IDS: [&str; 20] = [
+const LOG_COLUMN_IDS: [&str; 15] = [
     "time",
     "model",
     "request_path",
@@ -55,16 +55,33 @@ const LOG_COLUMN_IDS: [&str; 20] = [
     "transport",
     "first_byte",
     "ttft",
+    "cost",
+    "request_id",
+    "error_type",
+];
+const LEGACY_LOG_USAGE_COLUMN_IDS: [&str; 5] = [
     "input_tokens",
     "output_tokens",
     "cache_read",
     "cache_write",
     "reasoning",
-    "cost",
-    "request_id",
-    "error_type",
+];
+const MODEL_COLUMN_IDS: [&str; 9] = [
+    "provider",
+    "model",
+    "alias",
+    "native_endpoint",
+    "availability",
+    "enabled",
+    "global",
+    "conversion",
+    "actions",
 ];
 const LOG_VISIBLE_COLUMNS_PREFERENCE: &str = "log_visible_columns";
+const LOG_COLUMN_WIDTHS_PREFERENCE: &str = "log_column_widths";
+const MODEL_COLUMN_WIDTHS_PREFERENCE: &str = "model_column_widths";
+const MIN_COLUMN_WIDTH: u16 = 64;
+const MAX_COLUMN_WIDTH: u16 = 640;
 
 fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -285,31 +302,26 @@ fn require_admin(req: &Request<Incoming>, state: &SharedState) -> Option<HttpRes
     None
 }
 
+#[derive(Debug, Serialize)]
+struct ConsolePreferencesResponse {
+    log_visible_columns: Vec<String>,
+    log_column_widths: HashMap<String, u16>,
+    model_column_widths: HashMap<String, u16>,
+}
+
 async fn console_preferences(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let columns = match state
-        .db
-        .get_console_preference(LOG_VISIBLE_COLUMNS_PREFERENCE)
-        .await
-    {
-        Ok(Some(raw)) => serde_json::from_str::<Vec<String>>(&raw)
-            .ok()
-            .filter(|columns| validate_log_visible_columns(columns).is_ok())
-            .unwrap_or_else(default_log_visible_columns),
-        Ok(None) => default_log_visible_columns(),
-        Err(error) => {
-            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
-        }
-    };
-    http::json(
-        StatusCode::OK,
-        &serde_json::json!({ "log_visible_columns": columns }),
-    )
+    match load_console_preferences(&state).await {
+        Ok(preferences) => http::json(StatusCode::OK, &preferences),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchConsolePreferencesReq {
-    log_visible_columns: Vec<String>,
+    log_visible_columns: Option<Vec<String>>,
+    log_column_widths: Option<HashMap<String, u16>>,
+    model_column_widths: Option<HashMap<String, u16>>,
 }
 
 async fn patch_console_preferences(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -322,39 +334,164 @@ async fn patch_console_preferences(req: Request<Incoming>, state: SharedState) -
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(message) = validate_log_visible_columns(&patch.log_visible_columns) {
-        return http::json_error(StatusCode::BAD_REQUEST, message);
-    }
-    let value_json = match serde_json::to_string(&patch.log_visible_columns) {
-        Ok(value) => value,
-        Err(error) => {
-            return http::json_error(StatusCode::BAD_REQUEST, error.to_string());
-        }
-    };
-    if let Err(error) = state
-        .db
-        .upsert_console_preference(LOG_VISIBLE_COLUMNS_PREFERENCE, &value_json, util::now_ms())
-        .await
+    if patch.log_visible_columns.is_none()
+        && patch.log_column_widths.is_none()
+        && patch.model_column_widths.is_none()
     {
-        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "at least one console preference is required",
+        );
     }
-    http::json(
-        StatusCode::OK,
-        &serde_json::json!({ "log_visible_columns": patch.log_visible_columns }),
-    )
+
+    if let Some(columns) = patch.log_visible_columns {
+        let columns = match normalize_log_visible_columns(&columns) {
+            Ok(columns) => columns,
+            Err(message) => return http::json_error(StatusCode::BAD_REQUEST, message),
+        };
+        let value_json = match serde_json::to_string(&columns) {
+            Ok(value) => value,
+            Err(error) => {
+                return http::json_error(StatusCode::BAD_REQUEST, error.to_string());
+            }
+        };
+        if let Err(error) = state
+            .db
+            .upsert_console_preference(LOG_VISIBLE_COLUMNS_PREFERENCE, &value_json, util::now_ms())
+            .await
+        {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    }
+
+    if let Some(widths) = patch.log_column_widths {
+        if let Err(message) = validate_column_widths(&widths, &LOG_COLUMN_IDS) {
+            return http::json_error(StatusCode::BAD_REQUEST, message);
+        }
+        if let Err(response) =
+            store_console_column_widths(&state, LOG_COLUMN_WIDTHS_PREFERENCE, &widths).await
+        {
+            return response;
+        }
+    }
+
+    if let Some(widths) = patch.model_column_widths {
+        if let Err(message) = validate_column_widths(&widths, &MODEL_COLUMN_IDS) {
+            return http::json_error(StatusCode::BAD_REQUEST, message);
+        }
+        if let Err(response) =
+            store_console_column_widths(&state, MODEL_COLUMN_WIDTHS_PREFERENCE, &widths).await
+        {
+            return response;
+        }
+    }
+
+    match load_console_preferences(&state).await {
+        Ok(preferences) => http::json(StatusCode::OK, &preferences),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
 }
 
-fn validate_log_visible_columns(columns: &[String]) -> Result<(), &'static str> {
+async fn load_console_preferences(
+    state: &SharedState,
+) -> Result<ConsolePreferencesResponse, String> {
+    let columns = match state
+        .db
+        .get_console_preference(LOG_VISIBLE_COLUMNS_PREFERENCE)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        Some(raw) => serde_json::from_str::<Vec<String>>(&raw)
+            .ok()
+            .and_then(|columns| normalize_log_visible_columns(&columns).ok())
+            .unwrap_or_else(default_log_visible_columns),
+        None => default_log_visible_columns(),
+    };
+    let log_column_widths =
+        load_console_column_widths(state, LOG_COLUMN_WIDTHS_PREFERENCE, &LOG_COLUMN_IDS).await?;
+    let model_column_widths =
+        load_console_column_widths(state, MODEL_COLUMN_WIDTHS_PREFERENCE, &MODEL_COLUMN_IDS)
+            .await?;
+
+    Ok(ConsolePreferencesResponse {
+        log_visible_columns: columns,
+        log_column_widths,
+        model_column_widths,
+    })
+}
+
+async fn load_console_column_widths(
+    state: &SharedState,
+    preference_key: &str,
+    allowed_columns: &[&str],
+) -> Result<HashMap<String, u16>, String> {
+    let Some(raw) = state
+        .db
+        .get_console_preference(preference_key)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(HashMap::new());
+    };
+    let widths = serde_json::from_str::<HashMap<String, u16>>(&raw).unwrap_or_default();
+    if validate_column_widths(&widths, allowed_columns).is_err() {
+        return Ok(HashMap::new());
+    }
+    Ok(widths)
+}
+
+async fn store_console_column_widths(
+    state: &SharedState,
+    preference_key: &str,
+    widths: &HashMap<String, u16>,
+) -> Result<(), HttpResponse> {
+    let value_json = serde_json::to_string(widths)
+        .map_err(|error| http::json_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    state
+        .db
+        .upsert_console_preference(preference_key, &value_json, util::now_ms())
+        .await
+        .map_err(|error| http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+fn normalize_log_visible_columns(columns: &[String]) -> Result<Vec<String>, &'static str> {
     if columns.is_empty() {
         return Err("log_visible_columns must not be empty");
     }
-    let mut seen = std::collections::HashSet::with_capacity(columns.len());
+    let mut seen_input = std::collections::HashSet::with_capacity(columns.len());
+    let mut seen_output = std::collections::HashSet::with_capacity(columns.len());
+    let mut normalized = Vec::with_capacity(columns.len());
     for column in columns {
-        if !LOG_COLUMN_IDS.contains(&column.as_str()) {
-            return Err("log_visible_columns contains an unknown column");
-        }
-        if !seen.insert(column.as_str()) {
+        if !seen_input.insert(column.as_str()) {
             return Err("log_visible_columns contains duplicate columns");
+        }
+        let canonical = if LEGACY_LOG_USAGE_COLUMN_IDS.contains(&column.as_str()) {
+            "total_tokens"
+        } else if LOG_COLUMN_IDS.contains(&column.as_str()) {
+            column.as_str()
+        } else {
+            return Err("log_visible_columns contains an unknown column");
+        };
+        if seen_output.insert(canonical) {
+            normalized.push(canonical.to_string());
+        }
+    }
+    if normalized.is_empty() {
+        return Err("log_visible_columns must not be empty");
+    }
+    Ok(normalized)
+}
+
+fn validate_column_widths(
+    widths: &HashMap<String, u16>,
+    allowed_columns: &[&str],
+) -> Result<(), &'static str> {
+    for (column, width) in widths {
+        if !allowed_columns.contains(&column.as_str()) {
+            return Err("column widths contain an unknown column");
+        }
+        if !(MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width) {
+            return Err("column width must be between 64 and 640");
         }
     }
     Ok(())
@@ -448,25 +585,20 @@ async fn fetch_upstream_model_ids(
         }
         Err(_) => {
             return Err(http::json_error(
-                StatusCode::BAD_GATEWAY,
+                StatusCode::GATEWAY_TIMEOUT,
                 format!("timeout after {:?}", state.config.upstream_request_timeout),
             ));
         }
     };
 
-    let status = response.status();
+    if response.status() != StatusCode::OK {
+        return Err(passthrough_upstream_response(response));
+    }
     let body_bytes = Limited::new(response.into_body(), ADMIN_UPSTREAM_MODELS_BODY_MAX_BYTES)
         .collect()
         .await
         .map_err(|error| http::json_error(StatusCode::BAD_GATEWAY, error.to_string()))?
         .to_bytes();
-    if status != StatusCode::OK {
-        let body = String::from_utf8_lossy(&body_bytes).trim().to_string();
-        return Err(http::json_error(
-            StatusCode::BAD_GATEWAY,
-            format!("upstream /models failed: {} {}", status.as_u16(), body),
-        ));
-    }
 
     let parsed: Value = serde_json::from_slice(&body_bytes).map_err(|error| {
         http::json_error(StatusCode::BAD_GATEWAY, format!("invalid json: {error}"))
@@ -494,6 +626,18 @@ async fn fetch_upstream_model_ids(
         ));
     }
     Ok(models)
+}
+
+fn passthrough_upstream_response<B>(response: Response<B>) -> HttpResponse
+where
+    B: Body<Data = Bytes> + Send + Sync + 'static,
+    B::Error: Into<http::BoxError>,
+{
+    let (mut parts, body) = response.into_parts();
+    crate::proxy::sanitize_hop_headers(&mut parts.headers);
+    parts.headers.remove(SET_COOKIE);
+    parts.headers.remove(HeaderName::from_static("set-cookie2"));
+    Response::from_parts(parts, http::boxed(body))
 }
 
 async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -3412,6 +3556,7 @@ fn generate_api_key_plaintext() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::header::{CONNECTION, CONTENT_TYPE};
 
     #[test]
     fn stats_window_today_should_start_at_asia_shanghai_midnight() {
@@ -3500,6 +3645,105 @@ mod tests {
         assert_eq!(
             parse_provider_id_with_suffix("/api/v1/providers/42/endpoints", ""),
             None
+        );
+    }
+
+    #[test]
+    fn log_columns_should_merge_legacy_usage_columns_into_usage_cell() {
+        let columns = vec![
+            "time".to_string(),
+            "input_tokens".to_string(),
+            "cache_read".to_string(),
+            "model".to_string(),
+        ];
+
+        assert_eq!(
+            normalize_log_visible_columns(&columns),
+            Ok(vec![
+                "time".to_string(),
+                "total_tokens".to_string(),
+                "model".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn column_widths_should_reject_unknown_columns() {
+        let widths = HashMap::from([("future_column".to_string(), 120)]);
+
+        assert_eq!(
+            validate_column_widths(&widths, &LOG_COLUMN_IDS),
+            Err("column widths contain an unknown column")
+        );
+    }
+
+    #[test]
+    fn column_widths_should_reject_values_outside_bounds() {
+        let widths = HashMap::from([("time".to_string(), 48)]);
+
+        assert_eq!(
+            validate_column_widths(&widths, &LOG_COLUMN_IDS),
+            Err("column width must be between 64 and 640")
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_error_passthrough_should_preserve_status_and_body() {
+        let response = Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from_static(
+                br#"{"error":"authentication failed"}"#,
+            )))
+            .expect("response");
+
+        let response = passthrough_upstream_response(response);
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::UNAUTHORIZED,
+                Bytes::from_static(br#"{"error":"authentication failed"}"#),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_error_passthrough_should_filter_unsafe_headers() {
+        let response = Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("x-request-id", "req-upstream")
+            .header(SET_COOKIE, "session=unsafe")
+            .header(CONNECTION, "keep-alive, x-remove-me")
+            .header("keep-alive", "timeout=5")
+            .header("x-remove-me", "unsafe")
+            .body(Full::new(Bytes::new()))
+            .expect("response");
+
+        let response = passthrough_upstream_response(response);
+
+        assert_eq!(
+            (
+                response.headers().get("x-request-id"),
+                response.headers().get(SET_COOKIE),
+                response.headers().get(CONNECTION),
+                response.headers().get("keep-alive"),
+                response.headers().get("x-remove-me"),
+            ),
+            (
+                Some(&"req-upstream".parse().expect("header")),
+                None,
+                None,
+                None,
+                None
+            )
         );
     }
 }

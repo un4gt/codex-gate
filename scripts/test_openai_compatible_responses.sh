@@ -201,14 +201,16 @@ with open(resp_models_path, "r", encoding="utf-8") as f:
     resp_models = json.load(f)
 
 assert resp_code == "200", f"/v1/responses expected 200, got {resp_code}"
-assert chat_code == "503", f"/v1/chat/completions expected 503, got {chat_code}"
-assert chat_body.get("error") == "no providers can route this model", f"unexpected chat error: {chat_body}"
-assert isinstance(chat_models.get("data"), list) and len(chat_models["data"]) == 0, f"chat models should be empty: {chat_models}"
+assert chat_code == "400", f"/v1/chat/completions expected 400, got {chat_code}"
+assert chat_body.get("error", {}).get("code") == "model_protocol_unsupported", f"unexpected chat error: {chat_body}"
 
+chat_ids = [item.get("id") for item in chat_models.get("data", [])]
 responses_ids = [item.get("id") for item in resp_models.get("data", [])]
+assert chat_ids == responses_ids, f"model registry must ignore api_format: chat={chat_models} responses={resp_models}"
 provider_sync_ids = [item.get("upstream_model") for item in sync_provider]
 key_sync_ids = [item.get("model_name") for item in sync_key]
 for expected in ("resp-sync-mini", "resp-sync-plus"):
+    assert expected in chat_ids, f"default models missing {expected}: {chat_models}"
     assert expected in responses_ids, f"responses models missing {expected}: {resp_models}"
     assert expected in provider_sync_ids, f"provider sync missing {expected}: {sync_provider}"
     assert expected in key_sync_ids, f"key sync missing {expected}: {sync_key}"
@@ -257,7 +259,7 @@ result = {
     "responses_model": resp_body.get("model"),
     "responses_output_text": (((resp_body.get("output") or [{}])[0].get("content") or [{}])[0].get("text")),
     "chat_error": chat_body.get("error"),
-    "chat_models_count": len(chat_models.get("data", [])),
+    "chat_models_count": len(chat_ids),
     "responses_models": responses_ids,
     "provider_sync_models": provider_sync_ids,
     "key_sync_models": key_sync_ids,

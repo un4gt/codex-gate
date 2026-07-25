@@ -316,6 +316,24 @@ bash scripts/run-prek-checks.sh pre-push
 
 Provider 调度先按 API Key 与 Provider 的调度组交集授权，再使用组内优先级覆盖（未设置时使用 Provider 全局优先级）。同一优先级使用权重采样加 power-of-two choices，根据并发占用与延迟 EWMA 选择。带 `session-id`、`session_id`、`x-session-id`、`thread-id`、`prompt_cache_key` 或支持的 `metadata` 会话标识的请求会保持 Provider 亲和；新增 Provider 不会让已有健康会话漂移。
 
+`GET /v1/models` 是协议无关的全局活动模型注册表：接口仍要求有效的客户端 Bearer Key，但不会按该 Key 的 Provider Group、`api_format` 查询参数、模型路由、Endpoint 健康、quota 或 circuit 状态过滤。模型只有在至少一个启用 Provider 下存在 `enabled=true && available=true` 的库存记录，并且至少一个启用上游 Key 允许该模型时才进入注册表；启用别名至少需要一个满足同样条件的目标。模型出现在注册表中不代表任意 API Key、协议或当前运行时状态下一定可执行，具体原因会由请求错误和日志中的路由决策链说明。
+
+网关在尚未请求上游时使用 OpenAI 风格结构化错误。常见 `error.code` 如下：
+
+| HTTP | `error.code` | 含义 |
+| ---: | --- | --- |
+| `404` | `model_not_found` | 没有 Provider 注册该模型，且不存在未同步库存的兼容 Provider。 |
+| `403` | `model_disabled` | Gateway 全局策略或模型别名禁用了模型。 |
+| `403` | `model_not_authorized` | 模型已注册，但客户端 Key 未授权匹配的 Provider Group。 |
+| `400` | `model_protocol_unsupported` | Provider 不支持客户端协议，或 Chat-only 模型未开启 Responses→Chat。 |
+| `503` | `model_not_available` | 同步库存中存在模型，但库存已禁用或不可用。 |
+| `503` | `model_route_unavailable` | 模型路由排除了所有匹配 Provider。 |
+| `503` | `no_upstream_key_for_model` | 没有启用且允许该模型的上游 Key。 |
+| `503` | `no_enabled_upstream_endpoint` | 没有启用的上游 Endpoint。 |
+| `503` | `all_upstreams_temporarily_unavailable` | 候选因熔断、quota、健康、并发或亲和回避而暂时不可用。 |
+
+一旦上游已经返回响应，网关不会使用上述本地错误包装它：上游状态码、正文和安全响应头直接透传；模型级 `model_not_found` 错误也不会累计 Provider 熔断。
+
 每个请求最多使用初始 Provider 加 3 次 Provider 切换，即最多 4 个不同 Provider；每个 Provider 默认尝试 2 次，可在管理界面单独调整。401/403 只影响 key，402/429 进入 key quota 冷却，404 会跨 Provider 重试但不累计 Provider 熔断，网络错误、408/409/425 和 5xx 才累计 Provider 熔断。SSE 只允许在首个有效事件发送给客户端之前故障转移，之后不会重放。
 
 会话亲和、Provider 并发、EWMA、熔断和 quota 冷却均为进程内内存状态：重启会清空，多副本之间不会自动共享。Provider/API Key 配置、调度组、路由和请求决策链日志仍持久化到 SQLite/Postgres。多副本部署如需全局一致亲和，应在网关前配置稳定的会话级负载分配。
@@ -344,9 +362,9 @@ MOCK_PORT=19130 GW_PORT=18130 scripts/test_openai_compatible_responses.sh
 该脚本会自动验证以下行为：
 
 - `/v1/responses` 正常返回（200）
-- `/v1/chat/completions` 不选 responses-only provider（503, `no available providers`）
-- `/v1/models` 不暴露 responses-only 模型
-- `/v1/models?api_format=responses` 暴露 responses 模型
+- `/v1/chat/completions` 不选 responses-only provider，并返回 `400 model_protocol_unsupported`
+- `/v1/models` 与 `/v1/models?api_format=responses` 返回相同的协议无关注册表
+- responses-only 模型同时出现在两个模型列表入口中
 - provider/key 的 models 同步链路可用
 
 测试产物写入 `data/tmp/`，脚本末尾会输出结果 JSON 路径。

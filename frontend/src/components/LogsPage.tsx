@@ -1,10 +1,14 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { ChevronDown, ChevronRight, Columns3, Copy, Search } from "lucide-react";
 import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { EmptyState } from '@/components/console/EmptyState';
 import { FilterBar } from '@/components/console/FilterBar';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import {
+  ColumnResizeHandle,
+  useResizableColumns,
+} from '@/components/console/ResizableTable';
 import { t } from '@/lib/i18n';
 import { loadConsolePreferences, loadRequestLogs, updateConsolePreferences } from '../lib/api';
 import {
@@ -75,28 +79,31 @@ const EMPTY_FILTERS: LogFilters = {
   reasoningMax: ''
 };
 export const LOG_COLUMN_DEFINITIONS = [
-  { id: 'time', label: '时间', minWidth: 168 },
-  { id: 'model', label: '模型', minWidth: 180 },
-  { id: 'request_path', label: '请求路径 / 转换', minWidth: 240 },
-  { id: 'status', label: '状态', minWidth: 88 },
-  { id: 'duration', label: '耗时', minWidth: 110 },
-  { id: 'total_tokens', label: '总用量', minWidth: 110 },
-  { id: 'api_key', label: '密钥', minWidth: 130 },
-  { id: 'provider', label: '上游', minWidth: 140 },
-  { id: 'endpoint', label: '目标', minWidth: 140 },
-  { id: 'transport', label: '传输', minWidth: 110 },
-  { id: 'first_byte', label: '首字节', minWidth: 100 },
-  { id: 'ttft', label: 'TTFT', minWidth: 100 },
-  { id: 'input_tokens', label: '输入用量', minWidth: 110 },
-  { id: 'output_tokens', label: '输出用量', minWidth: 110 },
-  { id: 'cache_read', label: '缓存读取', minWidth: 110 },
-  { id: 'cache_write', label: '缓存写入', minWidth: 110 },
-  { id: 'reasoning', label: '思考用量', minWidth: 110 },
-  { id: 'cost', label: '成本', minWidth: 110 },
-  { id: 'request_id', label: '请求 ID', minWidth: 190 },
-  { id: 'error_type', label: '错误类型', minWidth: 150 },
+  { id: 'time', label: '时间', defaultWidth: 160, minWidth: 112, maxWidth: 320 },
+  { id: 'model', label: '模型', defaultWidth: 180, minWidth: 120, maxWidth: 480 },
+  { id: 'request_path', label: '请求路径 / 转换', defaultWidth: 240, minWidth: 160, maxWidth: 480 },
+  { id: 'status', label: '状态', defaultWidth: 88, minWidth: 72, maxWidth: 180 },
+  { id: 'duration', label: '耗时', defaultWidth: 110, minWidth: 80, maxWidth: 240 },
+  { id: 'total_tokens', label: '用量', defaultWidth: 360, minWidth: 280, maxWidth: 640 },
+  { id: 'api_key', label: '密钥', defaultWidth: 130, minWidth: 96, maxWidth: 360 },
+  { id: 'provider', label: '上游', defaultWidth: 140, minWidth: 96, maxWidth: 360 },
+  { id: 'endpoint', label: '目标', defaultWidth: 140, minWidth: 96, maxWidth: 360 },
+  { id: 'transport', label: '传输', defaultWidth: 110, minWidth: 88, maxWidth: 240 },
+  { id: 'first_byte', label: '首字节', defaultWidth: 100, minWidth: 80, maxWidth: 240 },
+  { id: 'ttft', label: 'TTFT', defaultWidth: 100, minWidth: 80, maxWidth: 240 },
+  { id: 'cost', label: '成本', defaultWidth: 110, minWidth: 88, maxWidth: 240 },
+  { id: 'request_id', label: '请求 ID', defaultWidth: 190, minWidth: 140, maxWidth: 480 },
+  { id: 'error_type', label: '错误类型', defaultWidth: 150, minWidth: 112, maxWidth: 420 },
 ] as const;
 export type LogColumnId = typeof LOG_COLUMN_DEFINITIONS[number]['id'];
+const LOG_COLUMN_DEFINITION_MAP = new Map(LOG_COLUMN_DEFINITIONS.map(column => [column.id, column]));
+const LEGACY_LOG_USAGE_COLUMN_IDS = new Set([
+  'input_tokens',
+  'output_tokens',
+  'cache_read',
+  'cache_write',
+  'reasoning',
+]);
 export const DEFAULT_LOG_COLUMNS: LogColumnId[] = [
   'time',
   'model',
@@ -112,11 +119,22 @@ export function sanitizeLogColumns(columns: string[]): LogColumnId[] {
   const seen = new Set<LogColumnId>();
   const filtered: LogColumnId[] = [];
   for (const column of columns) {
-    if (!LOG_COLUMN_IDS.has(column as LogColumnId) || seen.has(column as LogColumnId)) continue;
-    seen.add(column as LogColumnId);
-    filtered.push(column as LogColumnId);
+    const normalized = LEGACY_LOG_USAGE_COLUMN_IDS.has(column) ? 'total_tokens' : column;
+    if (!LOG_COLUMN_IDS.has(normalized as LogColumnId) || seen.has(normalized as LogColumnId)) continue;
+    seen.add(normalized as LogColumnId);
+    filtered.push(normalized as LogColumnId);
   }
   return filtered.length > 0 ? filtered : [...DEFAULT_LOG_COLUMNS];
+}
+
+export function formatUpstreamEndpoint(apiFormat: RequestLogRow['upstream_api_format']): string {
+  return apiFormat ? formatRequestType(apiFormat) : '—';
+}
+export function formatRoutingProtocol(apiFormat: string | null | undefined, conversionMode: string | null | undefined): string {
+  const endpoint = formatRequestType(apiFormat);
+  return conversionMode === 'responses_via_chat'
+    ? `${endpoint} · Responses → Chat`
+    : endpoint;
 }
 function totalTokens(row: RequestLogRow) {
   return row.input_tokens + row.output_tokens + row.cache_read_input_tokens + row.cache_creation_input_tokens;
@@ -181,6 +199,22 @@ export function LogsPage(props: LogsPageProps) {
   const [visibleColumns, setVisibleColumns] = useState<LogColumnId[]>(DEFAULT_LOG_COLUMNS);
   const [columnMenuAnchor, setColumnMenuAnchor] = useState<HTMLElement | null>(null);
   const previousRefreshKey = useRef(props.refreshKey);
+  const commitLogColumnWidths = useCallback(async (widths: Record<string, number>) => {
+    await updateConsolePreferences(props.settings, { log_column_widths: widths });
+  }, [props.settings]);
+  const reportColumnWidthError = useCallback((error: unknown) => {
+    props.onMessage(error instanceof Error ? error.message : '保存日志列宽失败。');
+  }, [props.onMessage]);
+  const {
+    widths: columnWidths,
+    applyPersistedWidths,
+    resizeColumn,
+    resetColumn,
+  } = useResizableColumns(
+    LOG_COLUMN_DEFINITIONS,
+    commitLogColumnWidths,
+    reportColumnWidthError,
+  );
   const providerNameMap = useMemo(() => new Map(props.providers.map(item => [item.provider.id, item.provider.name])), [props.providers]);
   const endpointNameMap = useMemo(() => new Map(props.providers.flatMap(item => item.endpoints.map(endpoint => [endpoint.id, endpoint.name] as const))), [props.providers]);
   const apiKeyNameMap = useMemo(() => new Map(props.apiKeys.map(item => [item.apiKey.id, item.apiKey.name])), [props.apiKeys]);
@@ -232,7 +266,10 @@ export function LogsPage(props: LogsPageProps) {
     void loadLogs();
     if (props.settings.adminToken.trim()) {
       void loadConsolePreferences(props.settings)
-        .then(preferences => setVisibleColumns(sanitizeLogColumns(preferences.log_visible_columns)))
+        .then(preferences => {
+          setVisibleColumns(sanitizeLogColumns(preferences.log_visible_columns));
+          applyPersistedWidths(preferences.log_column_widths);
+        })
         .catch(error => props.onMessage(error instanceof Error ? error.message : '读取日志列偏好失败。'));
     }
   }, []);
@@ -287,6 +324,14 @@ export function LogsPage(props: LogsPageProps) {
     return out;
   }, [expandedSessions, filteredRows]);
   const errorCount = useMemo(() => filteredRows.filter(row => (row.http_status ?? 0) >= 400 || row.error_type).length, [filteredRows]);
+  const visibleColumnDefinitions = useMemo(
+    () => visibleColumns.map(id => LOG_COLUMN_DEFINITION_MAP.get(id)!),
+    [visibleColumns],
+  );
+  const tableWidth = useMemo(
+    () => 56 + visibleColumns.reduce((sum, id) => sum + columnWidths[id], 0),
+    [columnWidths, visibleColumns],
+  );
   const copyField = async (value: string, label: string) => {
     if (!navigator?.clipboard) {
       props.onMessage(t('当前环境不支持复制。'));
@@ -300,7 +345,7 @@ export function LogsPage(props: LogsPageProps) {
   const saveVisibleColumns = async (next: LogColumnId[], previous: LogColumnId[]) => {
     setVisibleColumns(next);
     try {
-      const saved = await updateConsolePreferences(props.settings, next);
+      const saved = await updateConsolePreferences(props.settings, { log_visible_columns: next });
       setVisibleColumns(sanitizeLogColumns(saved.log_visible_columns));
     } catch (error) {
       setVisibleColumns(previous);
@@ -478,9 +523,19 @@ export function LogsPage(props: LogsPageProps) {
               data-testid="request-log-table-container"
               sx={{ maxHeight: { xs: '65dvh', md: 'min(70dvh, 48rem)' } }}
             >
-              <Table stickyHeader aria-label={t('请求日志')} size="small" sx={{ minWidth: Math.max(720, visibleColumns.reduce((sum, id) => {
-                return sum + (LOG_COLUMN_DEFINITIONS.find(column => column.id === id)?.minWidth ?? 100);
-              }, 56)) }}>
+              <Table stickyHeader aria-label={t('请求日志')} size="small" sx={{
+                tableLayout: 'fixed',
+                width: tableWidth,
+                '& .MuiTableCell-root': { boxSizing: 'border-box' },
+              }}>
+                <colgroup>
+                  <col style={{ width: 56 }} />
+                  {visibleColumnDefinitions.map(column => <col
+                    key={column.id}
+                    data-column-id={column.id}
+                    style={{ width: columnWidths[column.id] }}
+                  />)}
+                </colgroup>
                 <TableHead sx={{ '& .MuiTableCell-head': { bgcolor: 'background.default' } }}>
                   <TableRow>
                     <TableCell aria-label={t('展开控制')} data-sticky-column="expand" sx={{
@@ -492,10 +547,19 @@ export function LogsPage(props: LogsPageProps) {
                       maxWidth: 56,
                       bgcolor: 'background.default',
                     }} />
-                    {visibleColumns.map((id, index) => {
-                      const column = LOG_COLUMN_DEFINITIONS.find(item => item.id === id)!;
-                      return <TableCell key={id} data-sticky-column={index === 0 ? 'first-visible' : undefined} sx={{
+                    {visibleColumnDefinitions.map((column, index) => {
+                      const width = columnWidths[column.id];
+                      return <TableCell
+                        key={column.id}
+                        aria-label={t(column.label)}
+                        data-column-id={column.id}
+                        data-sticky-column={index === 0 ? 'first-visible' : undefined}
+                        sx={{
+                        maxWidth: width,
                         minWidth: column.minWidth,
+                        overflow: 'visible',
+                        position: 'relative',
+                        width,
                         ...(index === 0 ? {
                           position: 'sticky',
                           left: { xs: 0, md: 56 },
@@ -503,7 +567,16 @@ export function LogsPage(props: LogsPageProps) {
                           bgcolor: 'background.default',
                           boxShadow: '4px 0 8px -7px rgb(0 0 0 / 0.65)',
                         } : {}),
-                      }}>{t(column.label)}</TableCell>;
+                      }}>
+                        {t(column.label)}
+                        <ColumnResizeHandle
+                          column={column}
+                          label={t('调整 {{column}} 列宽', { column: t(column.label) })}
+                          width={width}
+                          onResize={resizeColumn}
+                          onReset={resetColumn}
+                        />
+                      </TableCell>;
                     })}
                   </TableRow>
                 </TableHead>
@@ -544,14 +617,28 @@ export function LogsPage(props: LogsPageProps) {
                             : <ChevronRight className="size-3" aria-hidden="true" />}
                         </Button> : null}
                       </TableCell>
-                      {visibleColumns.map((id, index) => <TableCell key={id} data-sticky-column={index === 0 ? 'first-visible' : undefined} sx={index === 0 ? {
-                        position: 'sticky',
-                        left: { xs: 0, md: 56 },
-                        zIndex: 2,
-                        bgcolor: item.depth > 0 ? 'color-mix(in oklab, var(--muted) 10%, var(--background))' : 'background.default',
-                        boxShadow: '4px 0 8px -7px rgb(0 0 0 / 0.65)',
-                        'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
-                      } : undefined}>
+                      {visibleColumns.map((id, index) => {
+                        const column = LOG_COLUMN_DEFINITION_MAP.get(id)!;
+                        const width = columnWidths[id];
+                        return <TableCell
+                          key={id}
+                          data-column-id={id}
+                          data-sticky-column={index === 0 ? 'first-visible' : undefined}
+                          sx={{
+                            maxWidth: width,
+                            minWidth: column.minWidth,
+                            overflow: 'hidden',
+                            width,
+                            ...(index === 0 ? {
+                              position: 'sticky',
+                              left: { xs: 0, md: 56 },
+                              zIndex: 2,
+                              bgcolor: item.depth > 0 ? 'color-mix(in oklab, var(--muted) 10%, var(--background))' : 'background.default',
+                              boxShadow: '4px 0 8px -7px rgb(0 0 0 / 0.65)',
+                              'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
+                            } : {}),
+                          }}
+                        >
                         <LogColumnValue
                           id={id}
                           row={row}
@@ -559,7 +646,8 @@ export function LogsPage(props: LogsPageProps) {
                           endpointNameMap={endpointNameMap}
                           apiKeyNameMap={apiKeyNameMap}
                         />
-                      </TableCell>)}
+                      </TableCell>;
+                      })}
                     </TableRow>;
                   })}
                 </TableBody>
@@ -581,6 +669,8 @@ export function LogsPage(props: LogsPageProps) {
         const pricing = calculateRequestPricing(row, row.usage_observed, row.pricing);
         const pricingValue = pricing.status === 'priced' ? formatUsd(pricing.totalUsd) : t('未定价');
         const pricingReason = pricing.status === 'unpriced' ? t(describeUnpricedReason(pricing.reason)) : null;
+        const routeCandidates = row.routing_trace?.candidates ?? [];
+        const routeRejections = row.routing_trace?.rejections ?? [];
         return <Box className="grid gap-6">
                 <Box className="flex flex-col gap-6 md:flex-row border-t border-border/40 pt-8 mt-2 pb-6">
                   <MetricCard label="状态" value={status.label} badge={<StatusBadge tone={status.tone}>{status.label}</StatusBadge>} />
@@ -601,7 +691,7 @@ export function LogsPage(props: LogsPageProps) {
                       <DetailItem label="密钥" value={apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`} onCopy={() => void copyField(String(row.api_key_id), '密钥')} />
                       <DetailItem label="请求路径" value={formatRequestPath(row.api_format, row.upstream_api_format)} onCopy={() => void copyField(formatRequestPath(row.api_format, row.upstream_api_format), '请求路径')} />
                       <DetailItem label="客户端端点" value={formatRequestType(row.api_format)} onCopy={() => void copyField(formatRequestType(row.api_format), '客户端端点')} />
-                      <DetailItem label="上游端点" value={formatRequestType(row.upstream_api_format ?? row.api_format)} onCopy={() => void copyField(formatRequestType(row.upstream_api_format ?? row.api_format), '上游端点')} />
+                      <DetailItem label="上游端点" value={formatUpstreamEndpoint(row.upstream_api_format)} onCopy={() => void copyField(formatUpstreamEndpoint(row.upstream_api_format), '上游端点')} />
                       <DetailItem label="传输" value={transportLabel(row)} onCopy={() => void copyField(row.transport, '传输')} />
                       <DetailItem label="日志类型" value={row.span_kind} onCopy={() => void copyField(row.span_kind, '日志类型')} />
                       <DetailItem label="WS 会话" value={row.ws_session_id ?? '—'} onCopy={() => void copyField(row.ws_session_id ?? '', 'WS 会话')} />
@@ -649,25 +739,103 @@ export function LogsPage(props: LogsPageProps) {
                             : ` · ${t('无转换警告')}`}
                         </Box> : null}
                       </Box>
-                      <TableContainer>
-                        <Table size="small">
+                      {routeCandidates.length > 0 ? <>
+                        <Box className="flex items-center justify-between gap-4 border-b border-border/40 px-6 py-3">
+                          <Typography className="text-sm font-medium text-foreground" component="div">{t('候选 Provider')}</Typography>
+                          <Typography className="font-mono text-xs text-muted-foreground" component="span">
+                            {t('{{count}} 个候选', { count: routeCandidates.length })}
+                          </Typography>
+                        </Box>
+                        <TableContainer className="max-w-full overflow-x-auto">
+                          <Table size="small" aria-label={t('候选 Provider')}>
+                            <TableHead>
+                              <TableRow>
+                                <TableCell>{t('上游')}</TableCell>
+                                <TableCell>{t('上游模型')}</TableCell>
+                                <TableCell>{t('协议计划')}</TableCell>
+                                <TableCell>{t('优先级')}</TableCell>
+                                <TableCell>{t('权重')}</TableCell>
+                                <TableCell className="text-right">{t('尝试预算')}</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {routeCandidates.map((candidate, index) => <TableRow key={`${candidate.provider_id}-${candidate.upstream_model ?? 'model'}-${index}`}>
+                                  <TableCell className="text-xs">{providerNameMap.get(candidate.provider_id) ?? `#${candidate.provider_id}`}</TableCell>
+                                  <TableCell className="font-mono text-xs">{candidate.upstream_model ?? '—'}</TableCell>
+                                  <TableCell className="font-mono text-xs">{formatRoutingProtocol(candidate.upstream_api_format, candidate.conversion_mode)}</TableCell>
+                                  <TableCell className="font-mono text-xs">{candidate.priority}</TableCell>
+                                  <TableCell className="font-mono text-xs">{candidate.weight}</TableCell>
+                                  <TableCell className="text-right font-mono text-xs">{candidate.attempt_budget}</TableCell>
+                                </TableRow>)}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      </> : null}
+
+                      {routeRejections.length > 0 ? <>
+                        <Box className="flex items-center justify-between gap-4 border-y border-border/40 px-6 py-3">
+                          <Typography className="text-sm font-medium text-foreground" component="div">{t('排除原因')}</Typography>
+                          <Typography className="font-mono text-xs text-muted-foreground" component="span">
+                            {t('{{count}} 个排除', { count: routeRejections.length })}
+                          </Typography>
+                        </Box>
+                        <TableContainer className="max-w-full overflow-x-auto">
+                          <Table size="small" aria-label={t('排除原因')}>
+                            <TableHead>
+                              <TableRow>
+                                <TableCell>{t('上游')}</TableCell>
+                                <TableCell>{t('上游模型')}</TableCell>
+                                <TableCell>{t('阶段')}</TableCell>
+                                <TableCell>{t('原因码')}</TableCell>
+                                <TableCell>{t('说明')}</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {routeRejections.map((rejection, index) => <TableRow key={`${rejection.provider_id ?? 'gateway'}-${rejection.code}-${index}`}>
+                                  <TableCell className="text-xs">{rejection.provider_id === null
+                                    ? t('网关')
+                                    : providerNameMap.get(rejection.provider_id) ?? `#${rejection.provider_id}`}</TableCell>
+                                  <TableCell className="font-mono text-xs">{rejection.upstream_model}</TableCell>
+                                  <TableCell className="font-mono text-xs">{rejection.stage}</TableCell>
+                                  <TableCell className="font-mono text-xs text-foreground">{rejection.code}</TableCell>
+                                  <TableCell className="min-w-72 text-xs text-muted-foreground">{rejection.message}</TableCell>
+                                </TableRow>)}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      </> : null}
+
+                      <Box className="flex items-center justify-between gap-4 border-y border-border/40 px-6 py-3">
+                        <Typography className="text-sm font-medium text-foreground" component="div">{t('尝试记录')}</Typography>
+                        <Typography className="font-mono text-xs text-muted-foreground" component="span">
+                          {t('{{count}} 次尝试', { count: row.routing_trace.attempts.length })}
+                        </Typography>
+                      </Box>
+                      <TableContainer className="max-w-full overflow-x-auto">
+                        <Table size="small" aria-label={t('尝试记录')}>
                           <TableHead>
                             <TableRow>
                               <TableCell>{t('序号')}</TableCell>
                               <TableCell>{t('上游')}</TableCell>
                               <TableCell>{t('目标 / 密钥')}</TableCell>
+                              <TableCell>{t('协议计划')}</TableCell>
                               <TableCell>{t('结果')}</TableCell>
                               <TableCell className="text-right">{t('耗时')}</TableCell>
                             </TableRow>
                           </TableHead>
                           <TableBody>
-                            {row.routing_trace.attempts.map((attempt, index) => <TableRow key={`${attempt.provider_id}-${attempt.endpoint_id}-${attempt.upstream_key_id}-${index}`}>
-                                <TableCell className="font-mono text-xs">{index + 1}</TableCell>
-                                <TableCell className="text-xs">{providerNameMap.get(attempt.provider_id) ?? `#${attempt.provider_id}`}</TableCell>
-                                <TableCell className="font-mono text-xs">#{attempt.endpoint_id} / #{attempt.upstream_key_id}</TableCell>
-                                <TableCell className="font-mono text-xs">{attempt.status ?? '—'} {attempt.error_type ?? ''}</TableCell>
-                                <TableCell className="text-right font-mono text-xs">{formatMaybeMs(attempt.duration_ms)}</TableCell>
-                              </TableRow>)}
+                            {row.routing_trace.attempts.length > 0
+                              ? row.routing_trace.attempts.map((attempt, index) => <TableRow key={`${attempt.provider_id}-${attempt.endpoint_id}-${attempt.upstream_key_id}-${index}`}>
+                                  <TableCell className="font-mono text-xs">{index + 1}</TableCell>
+                                  <TableCell className="text-xs">{providerNameMap.get(attempt.provider_id) ?? `#${attempt.provider_id}`}</TableCell>
+                                  <TableCell className="font-mono text-xs">#{attempt.endpoint_id} / #{attempt.upstream_key_id}</TableCell>
+                                  <TableCell className="font-mono text-xs">{formatRoutingProtocol(attempt.upstream_api_format, attempt.conversion_mode)}</TableCell>
+                                  <TableCell className="font-mono text-xs">{attempt.status ?? '—'} {attempt.error_type ?? ''}</TableCell>
+                                  <TableCell className="text-right font-mono text-xs">{formatMaybeMs(attempt.duration_ms)}</TableCell>
+                                </TableRow>)
+                              : <TableRow>
+                                  <TableCell className="py-6 text-center text-sm text-muted-foreground" colSpan={6}>{t('未发起上游尝试')}</TableCell>
+                                </TableRow>}
                           </TableBody>
                         </Table>
                       </TableContainer>
@@ -713,7 +881,7 @@ function LogColumnValue(props: {
   const mono = 'font-mono text-xs';
   switch (id) {
     case 'time':
-      return <Box className={`${mono} whitespace-nowrap`}>{formatDateTime(row.time_ms)}</Box>;
+      return <Box className={`${mono} truncate whitespace-nowrap`} title={formatDateTime(row.time_ms)}>{formatDateTime(row.time_ms)}</Box>;
     case 'model':
       return <Box className={`${mono} max-w-[260px] break-all`} title={formatModelName(row.model)}>
         {isWsSession(row) ? t('WS 会话') : formatModelName(row.model)}
@@ -726,7 +894,7 @@ function LogColumnValue(props: {
       return <Box className={mono}>{formatMaybeMs(primaryLatency(row))}</Box>;
     case 'total_tokens':
       return row.usage_observed
-        ? <Box className={mono}>{formatCompactInteger(totalTokens(row))}</Box>
+        ? <UsageBreakdown row={row} />
         : <Box className={`${mono} text-muted-foreground`}>{t('未返回用量')}</Box>;
     case 'api_key':
       return <Box className={`${mono} break-all text-muted-foreground`}>{props.apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`}</Box>;
@@ -740,16 +908,6 @@ function LogColumnValue(props: {
       return <Box className={mono}>{formatMaybeMs(row.t_first_byte_ms)}</Box>;
     case 'ttft':
       return <Box className={mono}>{formatMaybeMs(row.t_first_token_ms)}</Box>;
-    case 'input_tokens':
-      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.input_tokens) : '—'}</Box>;
-    case 'output_tokens':
-      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.output_tokens) : '—'}</Box>;
-    case 'cache_read':
-      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.cache_read_input_tokens) : '—'}</Box>;
-    case 'cache_write':
-      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.cache_creation_input_tokens) : '—'}</Box>;
-    case 'reasoning':
-      return <Box className={mono}>{row.usage_observed ? formatCompactInteger(row.reasoning_output_tokens) : '—'}</Box>;
     case 'cost': {
       const pricing = calculateRequestPricing(row, row.usage_observed, row.pricing);
       return <Box className={mono}>{pricing.status === 'priced' ? formatUsd(pricing.totalUsd) : '—'}</Box>;
@@ -759,6 +917,28 @@ function LogColumnValue(props: {
     case 'error_type':
       return <Box className={`${mono} break-all text-muted-foreground`}>{row.error_type ?? '—'}</Box>;
   }
+}
+function UsageBreakdown(props: { row: RequestLogRow }) {
+  const items = [
+    { label: t('输入'), value: props.row.input_tokens },
+    { label: t('输出'), value: props.row.output_tokens },
+    { label: t('缓存读'), value: props.row.cache_read_input_tokens },
+    { label: t('缓存写'), value: props.row.cache_creation_input_tokens },
+    { label: t('思考'), value: props.row.reasoning_output_tokens },
+  ];
+  return <Box
+    className="grid grid-cols-5 gap-2 overflow-hidden"
+    aria-label={items.map(item => `${item.label} ${item.value}`).join('，')}
+  >
+    {items.map(item => <Box key={item.label} className="min-w-0">
+      <Box className="truncate font-mono text-[0.6rem] uppercase tracking-wide text-muted-foreground" title={item.label}>
+        {item.label}
+      </Box>
+      <Box className="mt-0.5 truncate font-mono text-xs" title={String(item.value)}>
+        {formatCompactInteger(item.value)}
+      </Box>
+    </Box>)}
+  </Box>;
 }
 function BadgeSummary(props: {
   label: string;

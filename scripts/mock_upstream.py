@@ -15,20 +15,26 @@ def parse_args():
     parser.add_argument('--default-body-text', default='mock-ok')
     parser.add_argument('--default-auth', default='')
     parser.add_argument('--default-delay-ms', type=int, default=0)
-    parser.add_argument('--route', action='append', default=[], help='path_prefix|status|body_text|auth|delay_ms|format')
+    parser.add_argument(
+        '--route',
+        action='append',
+        default=[],
+        help='path_prefix|status|body_text|auth|delay_ms|format|error_type',
+    )
     parser.add_argument('--models-chat', default='gpt-4o-mini,gpt-4.1-mini')
     parser.add_argument('--models-responses', default='gpt-4.1-mini')
     return parser.parse_args()
 
 
 class RouteConfig:
-    def __init__(self, path_prefix, status, body_text, auth, delay_ms, response_format):
+    def __init__(self, path_prefix, status, body_text, auth, delay_ms, response_format, error_type):
         self.path_prefix = path_prefix
         self.status = status
         self.body_text = body_text
         self.auth = auth
         self.delay_ms = delay_ms
         self.response_format = response_format
+        self.error_type = error_type
         self.hits = 0
 
 
@@ -72,6 +78,7 @@ class MockState:
                     'auth': route.auth,
                     'delay_ms': route.delay_ms,
                     'response_format': route.response_format,
+                    'error_type': route.error_type,
                     'hits': route.hits,
                 })
             return {
@@ -82,9 +89,9 @@ class MockState:
 
 def parse_route(raw, default_format):
     parts = raw.split('|')
-    while len(parts) < 6:
+    while len(parts) < 7:
         parts.append('')
-    path_prefix, status, body_text, auth, delay_ms, response_format = parts[:6]
+    path_prefix, status, body_text, auth, delay_ms, response_format, error_type = parts[:7]
     if not path_prefix:
         raise ValueError(f'invalid route, missing path_prefix: {raw}')
     return RouteConfig(
@@ -94,6 +101,7 @@ def parse_route(raw, default_format):
         auth=auth or '',
         delay_ms=int(delay_ms or 0),
         response_format=(response_format or default_format),
+        error_type=error_type or '',
     )
 
 
@@ -104,7 +112,7 @@ class MockHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.endswith('/models'):
             self.server.state.note_request('GET', self.path, {}, self.headers)
-            return self.handle_models(parsed.query)
+            return self.handle_models(parsed.path, parsed.query)
         if self.path.startswith('/__admin/stats'):
             return self.handle_stats()
         self.respond_not_found()
@@ -139,7 +147,7 @@ class MockHandler(BaseHTTPRequestHandler):
             self.respond_json(route.status, {
                 'error': {
                     'message': route.body_text,
-                    'type': f'http_{route.status}',
+                    'type': route.error_type or f'http_{route.status}',
                 }
             })
             return
@@ -160,9 +168,35 @@ class MockHandler(BaseHTTPRequestHandler):
         snapshot['time_ms'] = int(time.time() * 1000)
         self.respond_json(200, snapshot)
 
-    def handle_models(self, query_raw):
+    def handle_models(self, path, query_raw):
+        route = self.server.state.resolve(path)
+        self.server.state.note_hit(route)
+        if route.delay_ms > 0:
+            time.sleep(route.delay_ms / 1000.0)
+        auth = self.headers.get('Authorization', '')
+        if route.auth and auth != f'Bearer {route.auth}':
+            self.respond_json(401, {
+                'error': {
+                    'message': 'invalid upstream credential',
+                    'type': 'invalid_api_key',
+                }
+            }, {
+                'X-Upstream-Error': 'authentication-failed',
+                'Set-Cookie': 'upstream_session=unsafe',
+                'Connection': 'X-Remove-Me',
+                'X-Remove-Me': 'unsafe',
+            })
+            return
+        if route.status >= 400:
+            self.respond_json(route.status, {
+                'error': {
+                    'message': route.body_text,
+                    'type': route.error_type or f'http_{route.status}',
+                }
+            })
+            return
         query = parse_qs(query_raw)
-        requested_format = (query.get('api_format') or [self.server.default_model_format])[0]
+        requested_format = (query.get('api_format') or [route.response_format])[0]
         models = (
             self.server.responses_models
             if requested_format == 'responses'
@@ -185,11 +219,13 @@ class MockHandler(BaseHTTPRequestHandler):
     def respond_not_found(self):
         self.respond_json(404, {'error': {'message': 'not found', 'type': 'not_found'}})
 
-    def respond_json(self, status, payload):
+    def respond_json(self, status, payload, headers=None):
         raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(raw)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -370,7 +406,15 @@ def parse_models(raw):
 def main():
     args = parse_args()
     host, port = args.listen.rsplit(':', 1)
-    default_route = RouteConfig('/', args.default_status, args.default_body_text, args.default_auth, args.default_delay_ms, args.default_format)
+    default_route = RouteConfig(
+        '/',
+        args.default_status,
+        args.default_body_text,
+        args.default_auth,
+        args.default_delay_ms,
+        args.default_format,
+        '',
+    )
     routes = [parse_route(item, args.default_format) for item in args.route]
     server = ThreadingHTTPServer((host, int(port)), MockHandler)
     server.state = MockState(default_route, routes)

@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
@@ -7,8 +7,8 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::header::{
-    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, PROXY_AUTHENTICATE,
-    PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE, USER_AGENT,
+    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName,
+    PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE, USER_AGENT,
 };
 use hyper::http::HeaderMap;
 use hyper::{Method, Request, Response, StatusCode, Uri};
@@ -55,7 +55,6 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
 
 async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let now_ms = util::now_ms();
-    let requested_api_format = list_models_api_format(req.uri().query());
 
     let Some(api_key_plaintext) = http::bearer_token(&req) else {
         return http::json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
@@ -75,7 +74,7 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         Ok(v) => v,
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let Some(api_key) = auth else {
+    let Some(_api_key) = auth else {
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
     };
     let snap = match state
@@ -88,159 +87,9 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
-    let authorized_group_ids = api_key
-        .provider_groups
+    let data = snap
+        .model_registry_ids
         .iter()
-        .map(|group| group.id)
-        .collect::<HashSet<_>>();
-    let mut enabled_provider_ids = HashSet::new();
-    for provider in &snap.providers {
-        if provider.enabled
-            && provider_matching_groups(&snap, provider.id, &authorized_group_ids)
-                .next()
-                .is_some()
-        {
-            enabled_provider_ids.insert(provider.id);
-        }
-    }
-
-    let provider_model_enabled = |provider_id: i64, upstream_model: &str| -> bool {
-        snap.provider_models_by_provider
-            .get(&provider_id)
-            .and_then(|items| items.get(upstream_model).copied())
-            .unwrap_or(true)
-    };
-
-    let provider_has_usable_key_for_model = |provider_id: i64, upstream_model: &str| -> bool {
-        let Some(keys) = snap.keys_by_provider.get(&provider_id) else {
-            return false;
-        };
-
-        keys.iter().any(|key| {
-            if !key.enabled {
-                return false;
-            }
-            match snap.key_models_by_key.get(&key.id) {
-                Some(models) => models.get(upstream_model).copied().unwrap_or(false),
-                None => true,
-            }
-        })
-    };
-
-    let provider_can_serve_model = |provider_id: i64, upstream_model: &str| -> bool {
-        if !enabled_provider_ids.contains(&provider_id) {
-            return false;
-        }
-        if !provider_model_enabled(provider_id, upstream_model) {
-            return false;
-        }
-        let Some(provider) = snap
-            .providers
-            .iter()
-            .find(|provider| provider.id == provider_id)
-        else {
-            return false;
-        };
-        if provider_route_api_format(&snap, provider, requested_api_format, upstream_model, true)
-            .is_none()
-        {
-            return false;
-        }
-        provider_has_usable_key_for_model(provider_id, upstream_model)
-    };
-
-    let route_allows_provider = |upstream_model: &str, provider_id: i64| -> bool {
-        let Some(route) = snap.routes_by_model.get(upstream_model) else {
-            return true;
-        };
-        if !route.enabled || route.provider_ids.is_empty() {
-            return true;
-        }
-        route.provider_ids.contains(&provider_id)
-    };
-
-    let model_is_routable = |upstream_model: &str| -> bool {
-        if let Some(route) = snap.routes_by_model.get(upstream_model)
-            && route.enabled
-            && !route.provider_ids.is_empty()
-        {
-            return route
-                .provider_ids
-                .iter()
-                .copied()
-                .any(|provider_id| provider_can_serve_model(provider_id, upstream_model));
-        }
-
-        enabled_provider_ids
-            .iter()
-            .copied()
-            .any(|provider_id| provider_can_serve_model(provider_id, upstream_model))
-    };
-
-    let mut upstream_models = HashSet::new();
-    for models in snap.provider_models_by_provider.values() {
-        for (upstream_model, enabled) in models {
-            if !enabled {
-                continue;
-            }
-            if !snap.is_model_globally_enabled(upstream_model) {
-                continue;
-            }
-            upstream_models.insert(upstream_model.clone());
-        }
-    }
-
-    let mut ids: HashSet<String> = HashSet::new();
-    for upstream_model in upstream_models {
-        if !model_is_routable(&upstream_model) {
-            continue;
-        }
-        ids.insert(upstream_model);
-    }
-
-    for alias in snap.model_aliases_by_name.values() {
-        if !alias.enabled || !snap.is_model_globally_enabled(&alias.name) {
-            continue;
-        }
-        let Some(targets) = snap.alias_targets_by_alias.get(&alias.id) else {
-            continue;
-        };
-        let routable = targets.iter().any(|target| {
-            target.enabled
-                && snap.is_model_globally_enabled(&target.upstream_model)
-                && route_allows_provider(&target.upstream_model, target.provider_id)
-                && provider_can_serve_model(target.provider_id, &target.upstream_model)
-        });
-        if routable {
-            ids.insert(alias.name.clone());
-        }
-    }
-
-    // Keep legacy provider-model aliases routable while they are migrated into model_aliases.
-    for (alias, target) in &snap.alias_to_provider_model {
-        if !target.enabled {
-            continue;
-        }
-        if !snap.is_model_globally_enabled(alias) {
-            continue;
-        }
-        if !snap.is_model_globally_enabled(&target.upstream_model) {
-            continue;
-        }
-        if !route_allows_provider(&target.upstream_model, target.provider_id) {
-            continue;
-        }
-        if !provider_can_serve_model(target.provider_id, &target.upstream_model) {
-            continue;
-        }
-        ids.insert(alias.clone());
-    }
-
-    let mut models: Vec<String> = ids.into_iter().collect();
-    models.sort();
-
-    let data = models
-        .into_iter()
         .map(|id| {
             serde_json::json!({
                 "id": id,
@@ -465,33 +314,56 @@ async fn proxy_openai(
     .await
     {
         Ok(v) => v,
-        Err((status, msg)) => {
+        Err(error) => {
+            apply_route_diagnostics(&routing_trace, &error.diagnostics);
             submit_err(
                 &mut telemetry_permit,
-                status,
-                "upstream_resolve_failed",
-                msg.clone(),
+                error.status,
+                error.code,
+                error.message.clone(),
                 None,
                 None,
                 None,
                 Some(model_name.clone()),
             );
-            record_request_metric(
-                Some(status.as_u16() as i32),
-                Some("upstream_resolve_failed"),
-            );
-            return http::json_error(status, msg);
+            record_request_metric(Some(error.status.as_u16() as i32), Some(error.code));
+            return route_resolution_error_response(&error, &model_name, api_format);
         }
     };
+    apply_route_diagnostics(&routing_trace, &plan.diagnostics);
     if api_format == ApiFormat::Responses && has_previous_response_id(&body_bytes) {
-        plan.attempts.retain(|attempt| !attempt.responses_via_chat);
+        let mut rejected_conversion_candidates = HashSet::new();
+        plan.attempts.retain(|attempt| {
+            if !attempt.protocol.is_responses_via_chat() {
+                return true;
+            }
+            rejected_conversion_candidates
+                .insert((attempt.provider.id, attempt.upstream_model.clone()));
+            false
+        });
+        for (provider_id, upstream_model) in rejected_conversion_candidates {
+            plan.diagnostics.reject(
+                Some(provider_id),
+                &upstream_model,
+                "protocol",
+                "previous_response_id_unsupported",
+                "previous_response_id requires a native Responses upstream",
+            );
+        }
+        apply_route_diagnostics(&routing_trace, &plan.diagnostics);
         if plan.attempts.is_empty() {
-            let message = "previous_response_id requires a native Responses upstream";
+            let error = RouteResolutionError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "previous_response_id_unsupported",
+                "previous_response_id requires a native Responses upstream",
+                plan.diagnostics.clone(),
+            );
             submit_err(
                 &mut telemetry_permit,
-                StatusCode::BAD_REQUEST,
-                "previous_response_id_unsupported",
-                message.to_string(),
+                error.status,
+                error.code,
+                error.message.clone(),
                 None,
                 None,
                 None,
@@ -501,7 +373,7 @@ async fn proxy_openai(
                 Some(StatusCode::BAD_REQUEST.as_u16() as i32),
                 Some("previous_response_id_unsupported"),
             );
-            return http::json_error(StatusCode::BAD_REQUEST, message);
+            return route_resolution_error_response(&error, &model_name, api_format);
         }
     }
     let affinity_binding = apply_affinity_to_plan(
@@ -522,20 +394,6 @@ async fn proxy_openai(
                 "bound_endpoint_id": affinity_binding.and_then(|binding| binding.endpoint_id),
             })
         });
-        let mut seen = HashSet::new();
-        trace.candidates = plan
-            .attempts
-            .iter()
-            .filter(|attempt| seen.insert(attempt.provider.id))
-            .map(|attempt| {
-                serde_json::json!({
-                    "provider_id": attempt.provider.id,
-                    "priority": attempt.provider.priority,
-                    "weight": attempt.provider.weight,
-                    "attempt_budget": attempt.provider.max_attempts,
-                })
-            })
-            .collect();
     }
 
     let mut exclusions = AttemptExclusions::default();
@@ -569,7 +427,7 @@ async fn proxy_openai(
         last_attempted_provider_id = Some(resolved.provider.id);
         state.metrics.record_upstream_attempt();
 
-        let (mut out_body, conversion_context) = if resolved.responses_via_chat {
+        let (mut out_body, conversion_context) = if resolved.protocol.is_responses_via_chat() {
             match responses_request_to_chat(
                 &body_bytes,
                 &resolved.upstream_model,
@@ -628,7 +486,7 @@ async fn proxy_openai(
             }
         };
         if should_inject_include_usage(
-            resolved.upstream_api_format,
+            resolved.protocol.upstream_api_format,
             &info,
             resolved.provider.supports_include_usage,
             plan.runtime.inject_include_usage,
@@ -638,7 +496,7 @@ async fn proxy_openai(
         }
 
         let upstream_path_and_query =
-            upstream_path_and_query(request_path_and_query.as_ref(), resolved.responses_via_chat);
+            upstream_path_and_query(request_path_and_query.as_ref(), resolved.protocol);
         let upstream_uri = match build_upstream_uri(
             &resolved.endpoint.base_url,
             upstream_path_and_query.as_ref(),
@@ -866,7 +724,40 @@ async fn proxy_openai(
             .and_then(|v| v.to_str().ok())
             .map(|ct| ct.contains("text/event-stream"))
             .unwrap_or(false);
-        let upstream_api_format_str = api_format_name(resolved.upstream_api_format);
+        let upstream_api_format_str = api_format_name(resolved.protocol.upstream_api_format);
+        let tap_config = TapConfig {
+            api_key_id: api_key.id,
+            log_enabled: api_key.log_enabled,
+            provider_id: Some(resolved.provider.id),
+            endpoint_id: Some(resolved.endpoint.id),
+            upstream_key_id: Some(resolved.key.id),
+            api_format: api_format_str,
+            upstream_api_format: upstream_api_format_str,
+            model: Some(model_name.clone()),
+            http_status: Some(resp_parts.status.as_u16() as i32),
+            t_stream_ms: Some(t_stream_ms),
+            start,
+            is_sse,
+            price: resolved.price.clone(),
+            usage_capture_bytes: plan.runtime.usage_capture_bytes,
+            usage_capture_tail_bytes: plan.runtime.usage_capture_tail_bytes,
+            provider: resolved.provider.clone(),
+            metrics: state.metrics.clone(),
+            affinity: state.affinity.clone(),
+            affinity_identity: affinity_identity.clone(),
+            affinity_binding,
+            affinity_should_migrate: affinity_binding.is_some_and(|binding| {
+                binding.provider_id != resolved.provider.id
+                    || binding.upstream_key_id != Some(resolved.key.id)
+                    || binding.endpoint_id != Some(resolved.endpoint.id)
+                    || faulted_providers.contains(&binding.provider_id)
+            }),
+            routing_trace: routing_trace.clone(),
+        };
+        if !status_code.is_success() {
+            let tap = ProxyTapBody::new(body, tap_config, telemetry_permit.take(), reservation);
+            return Response::from_parts(resp_parts, http::boxed(tap));
+        }
         let body = if is_sse {
             match preflight_sse(
                 body,
@@ -941,37 +832,7 @@ async fn proxy_openai(
             ReplayIncomingBody::new(body)
         };
 
-        let tap_config = TapConfig {
-            api_key_id: api_key.id,
-            log_enabled: api_key.log_enabled,
-            provider_id: Some(resolved.provider.id),
-            endpoint_id: Some(resolved.endpoint.id),
-            upstream_key_id: Some(resolved.key.id),
-            api_format: api_format_str,
-            upstream_api_format: upstream_api_format_str,
-            model: Some(model_name.clone()),
-            http_status: Some(resp_parts.status.as_u16() as i32),
-            t_stream_ms: Some(t_stream_ms),
-            start,
-            is_sse,
-            price: resolved.price.clone(),
-            usage_capture_bytes: plan.runtime.usage_capture_bytes,
-            usage_capture_tail_bytes: plan.runtime.usage_capture_tail_bytes,
-            provider: resolved.provider.clone(),
-            metrics: state.metrics.clone(),
-            affinity: state.affinity.clone(),
-            affinity_identity: affinity_identity.clone(),
-            affinity_binding,
-            affinity_should_migrate: affinity_binding.is_some_and(|binding| {
-                binding.provider_id != resolved.provider.id
-                    || binding.upstream_key_id != Some(resolved.key.id)
-                    || binding.endpoint_id != Some(resolved.endpoint.id)
-                    || faulted_providers.contains(&binding.provider_id)
-            }),
-            routing_trace: routing_trace.clone(),
-        };
-
-        if resolved.responses_via_chat {
+        if resolved.protocol.is_responses_via_chat() {
             resp_parts.headers.remove(CONTENT_LENGTH);
             let context = conversion_context.unwrap_or_default();
             if is_sse {
@@ -1210,98 +1071,78 @@ pub(crate) fn dispatch_error_to_http(
     }
 }
 
-fn provider_route_api_format(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConversionMode {
+    ResponsesViaChat,
+}
+
+impl ConversionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ResponsesViaChat => "responses_via_chat",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProtocolPlan {
+    client_api_format: ApiFormat,
+    upstream_api_format: ApiFormat,
+    conversion: Option<ConversionMode>,
+}
+
+impl ProtocolPlan {
+    fn native(api_format: ApiFormat) -> Self {
+        Self {
+            client_api_format: api_format,
+            upstream_api_format: api_format,
+            conversion: None,
+        }
+    }
+
+    fn responses_via_chat() -> Self {
+        Self {
+            client_api_format: ApiFormat::Responses,
+            upstream_api_format: ApiFormat::ChatCompletions,
+            conversion: Some(ConversionMode::ResponsesViaChat),
+        }
+    }
+
+    fn is_responses_via_chat(self) -> bool {
+        self.conversion == Some(ConversionMode::ResponsesViaChat)
+    }
+
+    fn conversion_name(self) -> Option<&'static str> {
+        self.conversion.map(ConversionMode::as_str)
+    }
+}
+
+fn provider_protocol_plan(
     snap: &UpstreamSnapshot,
     provider: &UpstreamProvider,
     client_api_format: ApiFormat,
     upstream_model: &str,
     allow_responses_via_chat: bool,
-) -> Option<(ApiFormat, bool)> {
+) -> Option<ProtocolPlan> {
     match (provider.provider_type.as_str(), client_api_format) {
-        ("openai", ApiFormat::ChatCompletions) => Some((ApiFormat::ChatCompletions, false)),
-        ("openai", ApiFormat::Responses) => Some((ApiFormat::Responses, false)),
+        ("openai", api_format) => Some(ProtocolPlan::native(api_format)),
         ("openai_compatible", ApiFormat::ChatCompletions) => {
-            Some((ApiFormat::ChatCompletions, false))
+            Some(ProtocolPlan::native(ApiFormat::ChatCompletions))
         }
         ("openai_compatible", ApiFormat::Responses)
             if allow_responses_via_chat
                 && snap
-                    .responses_via_chat_by_provider
-                    .get(&provider.id)
-                    .and_then(|models| models.get(upstream_model))
-                    .copied()
+                    .provider_model_state(provider.id, upstream_model)
+                    .map(|state| state.is_active() && state.responses_via_chat_enabled)
                     .unwrap_or(false) =>
         {
-            Some((ApiFormat::ChatCompletions, true))
+            Some(ProtocolPlan::responses_via_chat())
         }
         ("openai_compatible_responses", ApiFormat::Responses) => {
-            Some((ApiFormat::Responses, false))
+            Some(ProtocolPlan::native(ApiFormat::Responses))
         }
         _ => None,
     }
-}
-
-fn list_models_api_format(query: Option<&str>) -> ApiFormat {
-    let value = query_param(query, "api_format").unwrap_or_else(|| "chat_completions".to_string());
-    match value.trim().to_ascii_lowercase().as_str() {
-        "responses" => ApiFormat::Responses,
-        "chat" | "chat_completions" | "chat-completions" => ApiFormat::ChatCompletions,
-        _ => ApiFormat::ChatCompletions,
-    }
-}
-
-fn query_param(query: Option<&str>, key: &str) -> Option<String> {
-    fn decode_component(raw: &str) -> String {
-        fn from_hex(byte: u8) -> Option<u8> {
-            match byte {
-                b'0'..=b'9' => Some(byte - b'0'),
-                b'a'..=b'f' => Some(byte - b'a' + 10),
-                b'A'..=b'F' => Some(byte - b'A' + 10),
-                _ => None,
-            }
-        }
-
-        let bytes = raw.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut idx = 0;
-        while idx < bytes.len() {
-            match bytes[idx] {
-                b'+' => {
-                    out.push(b' ');
-                    idx += 1;
-                }
-                b'%' if idx + 2 < bytes.len() => {
-                    let hi = from_hex(bytes[idx + 1]);
-                    let lo = from_hex(bytes[idx + 2]);
-                    if let (Some(hi), Some(lo)) = (hi, lo) {
-                        out.push((hi << 4) | lo);
-                        idx += 3;
-                    } else {
-                        out.push(bytes[idx]);
-                        idx += 1;
-                    }
-                }
-                byte => {
-                    out.push(byte);
-                    idx += 1;
-                }
-            }
-        }
-
-        String::from_utf8(out)
-            .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned())
-    }
-
-    let query = query?;
-    for part in query.split('&') {
-        let mut items = part.splitn(2, '=');
-        let key_name = items.next()?.trim();
-        let value = items.next().unwrap_or("").trim();
-        if key_name == key {
-            return Some(decode_component(value));
-        }
-    }
-    None
 }
 
 #[derive(Clone)]
@@ -1311,8 +1152,7 @@ pub(crate) struct ResolvedUpstream {
     pub(crate) endpoint: crate::types::UpstreamEndpoint,
     pub(crate) key: crate::types::UpstreamKey,
     pub(crate) price: Option<PriceVersion>,
-    pub(crate) upstream_api_format: ApiFormat,
-    pub(crate) responses_via_chat: bool,
+    protocol: ProtocolPlan,
 }
 
 #[derive(Default)]
@@ -1360,11 +1200,118 @@ struct AttemptFailure {
     error_message: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct RouteCandidateTrace {
+    provider_id: i64,
+    upstream_model: String,
+    priority: i32,
+    weight: i32,
+    attempt_budget: i32,
+    upstream_api_format: &'static str,
+    conversion_mode: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RouteRejection {
+    provider_id: Option<i64>,
+    upstream_model: String,
+    stage: &'static str,
+    code: &'static str,
+    message: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RouteDiagnostics {
+    candidates: Vec<RouteCandidateTrace>,
+    rejections: Vec<RouteRejection>,
+}
+
+impl RouteDiagnostics {
+    fn reject(
+        &mut self,
+        provider_id: Option<i64>,
+        upstream_model: &str,
+        stage: &'static str,
+        code: &'static str,
+        message: impl Into<String>,
+    ) {
+        if self.rejections.len() >= 100 {
+            return;
+        }
+        self.rejections.push(RouteRejection {
+            provider_id,
+            upstream_model: upstream_model.to_string(),
+            stage,
+            code,
+            message: message.into(),
+        });
+    }
+
+    fn public_reason_counts(&self, resolution_code: &'static str) -> Vec<Value> {
+        let mut counts = BTreeMap::new();
+        for rejection in &self.rejections {
+            let is_decisive = match resolution_code {
+                "model_disabled" => rejection.stage == "model_policy",
+                "model_protocol_unsupported" => rejection.stage == "protocol",
+                "model_not_authorized" => rejection.stage == "authorization",
+                "model_route_unavailable" => rejection.stage == "model_route",
+                "model_not_found" | "model_not_available" => rejection.stage == "model_inventory",
+                "no_enabled_upstream_provider" => rejection.code == "provider_disabled",
+                "no_upstream_key_for_model" => matches!(
+                    rejection.code,
+                    "no_upstream_key_for_model" | "no_enabled_upstream_key"
+                ),
+                "no_enabled_upstream_endpoint" => rejection.code == "no_enabled_upstream_endpoint",
+                "all_upstreams_temporarily_unavailable" => rejection.stage == "runtime",
+                _ => rejection.code == resolution_code,
+            };
+            if is_decisive {
+                *counts.entry(rejection.code).or_default() += 1;
+            }
+        }
+        if counts.is_empty() {
+            counts.insert(resolution_code, 1usize);
+        }
+        counts
+            .into_iter()
+            .map(|(code, count)| serde_json::json!({ "code": code, "count": count }))
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RouteResolutionError {
+    pub(crate) status: StatusCode,
+    pub(crate) error_type: &'static str,
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+    diagnostics: RouteDiagnostics,
+}
+
+impl RouteResolutionError {
+    fn new(
+        status: StatusCode,
+        error_type: &'static str,
+        code: &'static str,
+        message: impl Into<String>,
+        diagnostics: RouteDiagnostics,
+    ) -> Self {
+        Self {
+            status,
+            error_type,
+            code,
+            message: message.into(),
+            diagnostics,
+        }
+    }
+}
+
 #[derive(Default, Serialize)]
 struct RoutingTrace {
     authorized_groups: Vec<Value>,
     affinity: Option<Value>,
     candidates: Vec<Value>,
+    rejections: Vec<Value>,
     attempts: Vec<Value>,
     provider_switches: usize,
     conversion: Option<Value>,
@@ -1372,6 +1319,42 @@ struct RoutingTrace {
 }
 
 type SharedRoutingTrace = std::sync::Arc<parking_lot::Mutex<RoutingTrace>>;
+
+fn apply_route_diagnostics(trace: &SharedRoutingTrace, diagnostics: &RouteDiagnostics) {
+    let mut trace = trace.lock();
+    trace.candidates = diagnostics
+        .candidates
+        .iter()
+        .map(|candidate| serde_json::json!(candidate))
+        .collect();
+    trace.rejections = diagnostics
+        .rejections
+        .iter()
+        .map(|rejection| serde_json::json!(rejection))
+        .collect();
+}
+
+fn route_resolution_error_response(
+    error: &RouteResolutionError,
+    model: &str,
+    api_format: ApiFormat,
+) -> HttpResponse {
+    http::json(
+        error.status,
+        &serde_json::json!({
+            "error": {
+                "message": error.message,
+                "type": error.error_type,
+                "code": error.code,
+                "details": {
+                    "model": model,
+                    "client_api_format": api_format_name(api_format),
+                    "reasons": error.diagnostics.public_reason_counts(error.code),
+                }
+            }
+        }),
+    )
+}
 
 fn routing_trace_value(trace: &SharedRoutingTrace) -> Value {
     serde_json::to_value(&*trace.lock()).unwrap_or(Value::Null)
@@ -1392,8 +1375,8 @@ fn trace_attempt(
         "provider_id": resolved.provider.id,
         "endpoint_id": resolved.endpoint.id,
         "upstream_key_id": resolved.key.id,
-        "upstream_api_format": api_format_name(resolved.upstream_api_format),
-        "conversion_mode": resolved.responses_via_chat.then_some("responses_via_chat"),
+        "upstream_api_format": api_format_name(resolved.protocol.upstream_api_format),
+        "conversion_mode": resolved.protocol.conversion_name(),
         "status": status,
         "error_type": error_type,
         "duration_ms": duration_ms,
@@ -1422,6 +1405,7 @@ pub(crate) struct UpstreamPlan {
     pub(crate) runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
     pub(crate) attempts: Vec<ResolvedUpstream>,
     pub(crate) transient_spill_provider_ids: HashSet<i64>,
+    diagnostics: RouteDiagnostics,
 }
 
 impl UpstreamPlan {
@@ -1486,14 +1470,13 @@ pub(crate) fn apply_affinity_to_plan(
 const MAX_PROVIDER_SWITCHES: usize = 3;
 pub(crate) const MAX_DISTINCT_PROVIDERS: usize = MAX_PROVIDER_SWITCHES + 1;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ProviderRoute {
     provider: UpstreamProvider,
     upstream_model: String,
     route_priority: Option<i32>,
     route_weight: Option<i32>,
-    upstream_api_format: ApiFormat,
-    responses_via_chat: bool,
+    protocol: ProtocolPlan,
 }
 
 struct SchedulableProvider {
@@ -1515,72 +1498,95 @@ pub(crate) async fn build_upstream_plan(
     api_key: &ApiKeyAuth,
     affinity: Option<&AffinityIdentity>,
     allow_responses_via_chat: bool,
-) -> Result<UpstreamPlan, (StatusCode, String)> {
+) -> Result<UpstreamPlan, RouteResolutionError> {
     let snap = state
         .caches
         .upstream
         .get(&state.db, &state.config.master_key)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    if !snap.is_model_globally_enabled(requested_model) {
-        return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
-    }
+        .map_err(|message| {
+            RouteResolutionError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "upstream_snapshot_failed",
+                message,
+                RouteDiagnostics::default(),
+            )
+        })?;
 
     let runtime = state.runtime_settings.snapshot();
     let now_ms = util::now_ms();
-    let routes =
+    let (routes, mut diagnostics) =
         collect_provider_routes(&snap, api_format, requested_model, allow_responses_via_chat)?;
-    if routes.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no providers can route this model".to_string(),
-        ));
-    }
 
     let authorized_group_ids = api_key
         .provider_groups
         .iter()
         .map(|group| group.id)
         .collect::<HashSet<_>>();
-    let mut authorized_routes = routes
-        .into_iter()
-        .filter(|route| {
-            provider_matching_groups(&snap, route.provider.id, &authorized_group_ids)
-                .next()
-                .is_some()
-        })
-        .collect::<Vec<_>>();
+    let mut authorized_routes = Vec::new();
+    for route in routes {
+        if provider_matching_groups(&snap, route.provider.id, &authorized_group_ids)
+            .next()
+            .is_some()
+        {
+            authorized_routes.push(route);
+        } else {
+            diagnostics.reject(
+                Some(route.provider.id),
+                &route.upstream_model,
+                "authorization",
+                "provider_group_denied",
+                "API key is not assigned to a Provider Group containing this provider",
+            );
+        }
+    }
     if authorized_routes.is_empty() {
-        return Err((
+        return Err(RouteResolutionError::new(
             StatusCode::FORBIDDEN,
-            "API key is not authorized for any provider that can route this model".to_string(),
+            "permission_error",
+            "model_not_authorized",
+            format!(
+                "Model \"{requested_model}\" is registered, but this API key is not authorized for any matching provider"
+            ),
+            diagnostics,
         ));
     }
 
-    authorized_routes.retain(|route| route.provider.enabled);
+    let mut enabled_routes = Vec::new();
+    for route in authorized_routes {
+        if route.provider.enabled {
+            enabled_routes.push(route);
+        } else {
+            diagnostics.reject(
+                Some(route.provider.id),
+                &route.upstream_model,
+                "static_configuration",
+                "provider_disabled",
+                "provider is disabled",
+            );
+        }
+    }
+    if enabled_routes.is_empty() {
+        return Err(RouteResolutionError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_configuration_error",
+            "no_enabled_upstream_provider",
+            format!("Model \"{requested_model}\" has no enabled upstream provider"),
+            diagnostics,
+        ));
+    }
+
     let affinity_provider_id = affinity
         .and_then(|identity| state.affinity.lookup(identity, now_ms))
         .map(|binding| binding.provider_id);
     let mut schedulable = Vec::new();
     let mut transient_spill_provider_ids = HashSet::new();
-    for route in authorized_routes {
+    let mut key_ready_providers = 0usize;
+    let mut static_ready_providers = 0usize;
+    for route in enabled_routes {
         let provider = &route.provider;
-        if affinity.is_some_and(|identity| {
-            state
-                .affinity
-                .is_provider_avoided(identity, provider.id, now_ms)
-        }) {
-            continue;
-        }
-        let provider_runtime = state.provider_runtime.snapshot(provider, now_ms);
-        if !provider_runtime.available {
-            if provider_runtime.state != crate::health::CircuitState::Open {
-                state.metrics.record_provider_capacity_skip();
-                transient_spill_provider_ids.insert(provider.id);
-            }
-            continue;
-        }
+
         let model_keys = snap
             .keys_by_provider
             .get(&provider.id)
@@ -1591,9 +1597,91 @@ pub(crate) async fn build_upstream_plan(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let keys = model_keys
-            .iter()
-            .copied()
+        if model_keys.is_empty() {
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "static_configuration",
+                "no_upstream_key_for_model",
+                "provider has no upstream key registered for this model",
+            );
+            continue;
+        }
+        let enabled_model_keys = model_keys
+            .into_iter()
+            .filter(|key| key.enabled)
+            .collect::<Vec<_>>();
+        if enabled_model_keys.is_empty() {
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "static_configuration",
+                "no_enabled_upstream_key",
+                "all upstream keys registered for this model are disabled",
+            );
+            continue;
+        }
+        key_ready_providers += 1;
+
+        let endpoints = snap
+            .endpoints_by_provider
+            .get(&provider.id)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|endpoint| endpoint.enabled)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if endpoints.is_empty() {
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "static_configuration",
+                "no_enabled_upstream_endpoint",
+                "provider has no enabled upstream endpoint",
+            );
+            continue;
+        }
+        static_ready_providers += 1;
+
+        if affinity.is_some_and(|identity| {
+            state
+                .affinity
+                .is_provider_avoided(identity, provider.id, now_ms)
+        }) {
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "runtime",
+                "affinity_provider_avoided",
+                "provider is temporarily avoided for this affinity identity",
+            );
+            continue;
+        }
+        let provider_runtime = state.provider_runtime.snapshot(provider, now_ms);
+        if !provider_runtime.available {
+            let (code, message) = if provider_runtime.state == crate::health::CircuitState::Open {
+                ("provider_circuit_open", "provider circuit is open")
+            } else {
+                state.metrics.record_provider_capacity_skip();
+                transient_spill_provider_ids.insert(provider.id);
+                (
+                    "provider_capacity_exhausted",
+                    "provider concurrency capacity is exhausted",
+                )
+            };
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "runtime",
+                code,
+                message,
+            );
+            continue;
+        }
+        let keys = enabled_model_keys
+            .into_iter()
             .filter(|key| {
                 let available = state.quota.is_available(key.id, now_ms);
                 if !available {
@@ -1602,8 +1690,16 @@ pub(crate) async fn build_upstream_plan(
                 available
             })
             .collect::<Vec<_>>();
-        if !model_keys.is_empty() && keys.is_empty() {
+        if keys.is_empty() {
             transient_spill_provider_ids.insert(provider.id);
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "runtime",
+                "key_quota_cooldown",
+                "all model-capable upstream keys are in quota cooldown",
+            );
+            continue;
         }
         let ranked_keys =
             selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
@@ -1614,14 +1710,17 @@ pub(crate) async fn build_upstream_plan(
             &ranked_keys,
         );
         if ranked_keys.is_empty() {
+            transient_spill_provider_ids.insert(provider.id);
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "runtime",
+                "no_healthy_upstream_key",
+                "all model-capable upstream keys are unhealthy or circuit-open",
+            );
             continue;
         }
 
-        let endpoints = snap
-            .endpoints_by_provider
-            .get(&provider.id)
-            .map(|items| items.iter().collect::<Vec<_>>())
-            .unwrap_or_default();
         let ranked_endpoints = selector::rank_endpoint_refs_with_health(
             &endpoints,
             &state.endpoint_health,
@@ -1629,6 +1728,13 @@ pub(crate) async fn build_upstream_plan(
             now_ms,
         );
         if ranked_endpoints.is_empty() {
+            diagnostics.reject(
+                Some(provider.id),
+                &route.upstream_model,
+                "runtime",
+                "no_healthy_upstream_endpoint",
+                "all enabled upstream endpoints are unhealthy or circuit-open",
+            );
             continue;
         }
 
@@ -1645,6 +1751,15 @@ pub(crate) async fn build_upstream_plan(
             .max(1);
         let price =
             snap.find_price_for_request(provider.id, requested_model, &route.upstream_model);
+        diagnostics.candidates.push(RouteCandidateTrace {
+            provider_id: provider.id,
+            upstream_model: route.upstream_model.clone(),
+            priority: effective_priority,
+            weight: effective_weight,
+            attempt_budget: provider.max_attempts,
+            upstream_api_format: api_format_name(route.protocol.upstream_api_format),
+            conversion_mode: route.protocol.conversion_name(),
+        });
         schedulable.push(SchedulableProvider {
             route,
             effective_priority,
@@ -1659,18 +1774,48 @@ pub(crate) async fn build_upstream_plan(
     }
 
     if schedulable.is_empty() {
-        return Err((
+        if key_ready_providers == 0 {
+            return Err(RouteResolutionError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upstream_configuration_error",
+                "no_upstream_key_for_model",
+                format!(
+                    "Model \"{requested_model}\" has no enabled upstream key registered for this model"
+                ),
+                diagnostics,
+            ));
+        }
+        if static_ready_providers == 0 {
+            return Err(RouteResolutionError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upstream_configuration_error",
+                "no_enabled_upstream_endpoint",
+                format!("Model \"{requested_model}\" has no enabled upstream endpoint"),
+                diagnostics,
+            ));
+        }
+        return Err(RouteResolutionError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "no available upstream targets".to_string(),
+            "upstream_unavailable",
+            "all_upstreams_temporarily_unavailable",
+            format!(
+                "All upstream targets for model \"{requested_model}\" are temporarily unavailable"
+            ),
+            diagnostics,
         ));
     }
 
     let attempts = build_scheduled_attempts(schedulable, affinity_provider_id);
 
     if attempts.is_empty() {
-        return Err((
+        return Err(RouteResolutionError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "no available upstream targets".to_string(),
+            "upstream_unavailable",
+            "all_upstreams_temporarily_unavailable",
+            format!(
+                "All upstream targets for model \"{requested_model}\" are temporarily unavailable"
+            ),
+            diagnostics,
         ));
     }
 
@@ -1678,6 +1823,7 @@ pub(crate) async fn build_upstream_plan(
         runtime,
         attempts,
         transient_spill_provider_ids,
+        diagnostics,
     })
 }
 
@@ -1702,8 +1848,7 @@ fn build_scheduled_attempts(
                     endpoint: endpoint.clone(),
                     key: key.clone(),
                     price: scheduled.price.clone(),
-                    upstream_api_format: scheduled.route.upstream_api_format,
-                    responses_via_chat: scheduled.route.responses_via_chat,
+                    protocol: scheduled.route.protocol,
                 });
                 provider_attempts += 1;
                 if provider_attempts >= max_attempts {
@@ -1720,85 +1865,238 @@ fn collect_provider_routes(
     api_format: ApiFormat,
     requested_model: &str,
     allow_responses_via_chat: bool,
-) -> Result<Vec<ProviderRoute>, (StatusCode, String)> {
+) -> Result<(Vec<ProviderRoute>, RouteDiagnostics), RouteResolutionError> {
+    let mut diagnostics = RouteDiagnostics::default();
+    if !snap.is_model_globally_enabled(requested_model) {
+        diagnostics.reject(
+            None,
+            requested_model,
+            "model_policy",
+            "model_disabled",
+            "model is disabled by the gateway policy",
+        );
+        return Err(RouteResolutionError::new(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "model_disabled",
+            format!("Model \"{requested_model}\" is disabled"),
+            diagnostics,
+        ));
+    }
+
     let mut routes = Vec::new();
+    let mut inventory_candidates = 0usize;
+    let mut route_candidates = 0usize;
     if let Some(alias) = snap.model_aliases_by_name.get(requested_model) {
         if !alias.enabled {
-            return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+            diagnostics.reject(
+                None,
+                requested_model,
+                "model_policy",
+                "model_disabled",
+                "model alias is disabled",
+            );
+            return Err(RouteResolutionError::new(
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                "model_disabled",
+                format!("Model \"{requested_model}\" is disabled"),
+                diagnostics,
+            ));
         }
         let Some(targets) = snap.alias_targets_by_alias.get(&alias.id) else {
-            return Ok(routes);
+            return Err(RouteResolutionError::new(
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                "model_not_found",
+                format!("Model \"{requested_model}\" has no registered alias targets"),
+                diagnostics,
+            ));
         };
         let mut seen = HashSet::new();
         for target in targets {
-            if !target.enabled
-                || !snap.is_model_globally_enabled(&target.upstream_model)
+            if !target.enabled {
+                diagnostics.reject(
+                    Some(target.provider_id),
+                    &target.upstream_model,
+                    "model_inventory",
+                    "alias_target_disabled",
+                    "model alias target is disabled",
+                );
+                continue;
+            }
+            let Some(provider) = snap
+                .providers
+                .iter()
+                .find(|provider| provider.id == target.provider_id)
+            else {
+                diagnostics.reject(
+                    Some(target.provider_id),
+                    &target.upstream_model,
+                    "model_inventory",
+                    "provider_not_found",
+                    "model alias target references a missing provider",
+                );
+                continue;
+            };
+            if let Some((code, message)) =
+                provider_model_rejection(snap, provider.id, &target.upstream_model)
+            {
+                diagnostics.reject(
+                    Some(provider.id),
+                    &target.upstream_model,
+                    "model_inventory",
+                    code,
+                    message,
+                );
+                continue;
+            }
+            inventory_candidates += 1;
+            if !snap.is_model_globally_enabled(&target.upstream_model)
                 || !route_allows_provider_for_model(
                     snap,
                     &target.upstream_model,
                     target.provider_id,
                 )
             {
+                diagnostics.reject(
+                    Some(provider.id),
+                    &target.upstream_model,
+                    "model_route",
+                    "model_route_excluded",
+                    "gateway model route excludes this provider",
+                );
                 continue;
             }
-            if let Some((provider, (upstream_api_format, responses_via_chat))) = snap
-                .providers
-                .iter()
-                .find(|item| {
-                    item.id == target.provider_id
-                        && provider_model_enabled(snap, item.id, &target.upstream_model)
-                })
-                .and_then(|provider| {
-                    provider_route_api_format(
-                        snap,
-                        provider,
-                        api_format,
-                        &target.upstream_model,
-                        allow_responses_via_chat,
-                    )
-                    .map(|format| (provider, format))
-                })
-                && seen.insert(target.provider_id)
-            {
+            route_candidates += 1;
+            let Some(protocol) = provider_protocol_plan(
+                snap,
+                provider,
+                api_format,
+                &target.upstream_model,
+                allow_responses_via_chat,
+            ) else {
+                let (code, message) = protocol_rejection(
+                    snap,
+                    provider,
+                    api_format,
+                    &target.upstream_model,
+                    allow_responses_via_chat,
+                );
+                diagnostics.reject(
+                    Some(provider.id),
+                    &target.upstream_model,
+                    "protocol",
+                    code,
+                    message,
+                );
+                continue;
+            };
+            if seen.insert(target.provider_id) {
                 routes.push(ProviderRoute {
                     provider: provider.clone(),
                     upstream_model: target.upstream_model.clone(),
                     route_priority: Some(target.priority),
                     route_weight: (alias.mode == "weighted").then_some(target.weight),
-                    upstream_api_format,
-                    responses_via_chat,
+                    protocol,
                 });
             }
         }
-        return Ok(routes);
+        return finish_route_collection(
+            requested_model,
+            routes,
+            diagnostics,
+            inventory_candidates,
+            route_candidates,
+        );
     }
 
     let (upstream_model, forced_provider_id) =
         if let Some(target) = snap.alias_to_provider_model.get(requested_model) {
             if !target.enabled {
-                return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+                diagnostics.reject(
+                    Some(target.provider_id),
+                    &target.upstream_model,
+                    "model_policy",
+                    "model_disabled",
+                    "legacy model alias is disabled",
+                );
+                return Err(RouteResolutionError::new(
+                    StatusCode::FORBIDDEN,
+                    "permission_error",
+                    "model_disabled",
+                    format!("Model \"{requested_model}\" is disabled"),
+                    diagnostics,
+                ));
             }
             (target.upstream_model.clone(), Some(target.provider_id))
         } else {
             (requested_model.to_string(), None)
         };
     if !snap.is_model_globally_enabled(&upstream_model) {
-        return Err((StatusCode::FORBIDDEN, "model disabled".to_string()));
+        diagnostics.reject(
+            forced_provider_id,
+            &upstream_model,
+            "model_policy",
+            "model_disabled",
+            "upstream model is disabled by the gateway policy",
+        );
+        return Err(RouteResolutionError::new(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "model_disabled",
+            format!("Model \"{requested_model}\" is disabled"),
+            diagnostics,
+        ));
     }
     for provider in &snap.providers {
-        if forced_provider_id.is_some_and(|id| id != provider.id)
-            || !route_allows_provider_for_model(snap, &upstream_model, provider.id)
-            || !provider_model_enabled(snap, provider.id, &upstream_model)
-        {
+        if forced_provider_id.is_some_and(|id| id != provider.id) {
             continue;
         }
-        let Some((upstream_api_format, responses_via_chat)) = provider_route_api_format(
+        if let Some((code, message)) = provider_model_rejection(snap, provider.id, &upstream_model)
+        {
+            diagnostics.reject(
+                Some(provider.id),
+                &upstream_model,
+                "model_inventory",
+                code,
+                message,
+            );
+            continue;
+        }
+        inventory_candidates += 1;
+        if !route_allows_provider_for_model(snap, &upstream_model, provider.id) {
+            diagnostics.reject(
+                Some(provider.id),
+                &upstream_model,
+                "model_route",
+                "model_route_excluded",
+                "gateway model route excludes this provider",
+            );
+            continue;
+        }
+        route_candidates += 1;
+        let Some(protocol) = provider_protocol_plan(
             snap,
             provider,
             api_format,
             &upstream_model,
             allow_responses_via_chat,
         ) else {
+            let (code, message) = protocol_rejection(
+                snap,
+                provider,
+                api_format,
+                &upstream_model,
+                allow_responses_via_chat,
+            );
+            diagnostics.reject(
+                Some(provider.id),
+                &upstream_model,
+                "protocol",
+                code,
+                message,
+            );
             continue;
         };
         routes.push(ProviderRoute {
@@ -1806,11 +2104,128 @@ fn collect_provider_routes(
             upstream_model: upstream_model.clone(),
             route_priority: None,
             route_weight: None,
-            upstream_api_format,
-            responses_via_chat,
+            protocol,
         });
     }
-    Ok(routes)
+    finish_route_collection(
+        requested_model,
+        routes,
+        diagnostics,
+        inventory_candidates,
+        route_candidates,
+    )
+}
+
+fn provider_model_rejection(
+    snap: &UpstreamSnapshot,
+    provider_id: i64,
+    upstream_model: &str,
+) -> Option<(&'static str, &'static str)> {
+    let models = snap.provider_models_by_provider.get(&provider_id)?;
+    let Some(state) = models.get(upstream_model) else {
+        return Some((
+            "provider_model_not_registered",
+            "provider model inventory does not contain this model",
+        ));
+    };
+    if !state.enabled {
+        return Some(("provider_model_disabled", "provider model is disabled"));
+    }
+    if !state.available {
+        return Some((
+            "provider_model_unavailable",
+            "provider model is not present in the latest synchronized inventory",
+        ));
+    }
+    None
+}
+
+fn protocol_rejection(
+    snap: &UpstreamSnapshot,
+    provider: &UpstreamProvider,
+    api_format: ApiFormat,
+    upstream_model: &str,
+    allow_responses_via_chat: bool,
+) -> (&'static str, &'static str) {
+    if provider.provider_type == "openai_compatible" && api_format == ApiFormat::Responses {
+        if !allow_responses_via_chat {
+            return (
+                "provider_protocol_unsupported",
+                "this transport requires a native Responses upstream",
+            );
+        }
+        if snap
+            .provider_model_state(provider.id, upstream_model)
+            .is_some_and(|state| !state.responses_via_chat_enabled)
+        {
+            return (
+                "responses_via_chat_disabled",
+                "Responses-to-Chat conversion is disabled for this provider model",
+            );
+        }
+    }
+    (
+        "provider_protocol_unsupported",
+        "provider does not support the requested client API format",
+    )
+}
+
+fn finish_route_collection(
+    requested_model: &str,
+    routes: Vec<ProviderRoute>,
+    diagnostics: RouteDiagnostics,
+    inventory_candidates: usize,
+    route_candidates: usize,
+) -> Result<(Vec<ProviderRoute>, RouteDiagnostics), RouteResolutionError> {
+    if !routes.is_empty() {
+        return Ok((routes, diagnostics));
+    }
+    if route_candidates > 0 {
+        return Err(RouteResolutionError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "model_protocol_unsupported",
+            format!(
+                "Model \"{requested_model}\" is registered, but no matching provider supports the requested API format or conversion"
+            ),
+            diagnostics,
+        ));
+    }
+    if inventory_candidates > 0 {
+        return Err(RouteResolutionError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_configuration_error",
+            "model_route_unavailable",
+            format!(
+                "Model \"{requested_model}\" is registered, but its gateway route excludes all matching providers"
+            ),
+            diagnostics,
+        ));
+    }
+    let model_known_but_inactive = diagnostics.rejections.iter().any(|rejection| {
+        matches!(
+            rejection.code,
+            "provider_model_disabled" | "provider_model_unavailable" | "alias_target_disabled"
+        )
+    });
+    if model_known_but_inactive {
+        return Err(RouteResolutionError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_configuration_error",
+            "model_not_available",
+            format!(
+                "Model \"{requested_model}\" exists in synchronized inventory but is disabled or unavailable"
+            ),
+            diagnostics,
+        ));
+    }
+    Err(RouteResolutionError::new(
+        StatusCode::NOT_FOUND,
+        "invalid_request_error",
+        "model_not_found",
+        format!("Model \"{requested_model}\" is not registered by any provider"),
+        diagnostics,
+    ))
 }
 
 fn provider_matching_groups<'a>(
@@ -1945,18 +2360,8 @@ fn route_allows_provider_for_model(
     route.provider_ids.contains(&provider_id)
 }
 
-fn provider_model_enabled(snap: &UpstreamSnapshot, provider_id: i64, upstream_model: &str) -> bool {
-    snap.provider_models_by_provider
-        .get(&provider_id)
-        .and_then(|items| items.get(upstream_model).copied())
-        .unwrap_or(true)
-}
-
 fn key_allows_model(snap: &UpstreamSnapshot, key_id: i64, upstream_model: &str) -> bool {
-    match snap.key_models_by_key.get(&key_id) {
-        Some(models) => models.get(upstream_model).copied().unwrap_or(false),
-        None => true,
-    }
+    snap.key_allows_model(key_id, upstream_model)
 }
 
 fn order_keys_for_provider(
@@ -2082,6 +2487,15 @@ pub(crate) struct UpstreamAttemptReservation {
 impl UpstreamAttemptReservation {
     pub(crate) fn finish(mut self, outcome: AttemptOutcome<'_>, metrics: &crate::metrics::Metrics) {
         let scope = classify_failure_scope(outcome.status, outcome.origin);
+        self.finish_with_scope(outcome, scope, metrics);
+    }
+
+    fn finish_with_scope(
+        &mut self,
+        outcome: AttemptOutcome<'_>,
+        scope: FailureScope,
+        metrics: &crate::metrics::Metrics,
+    ) {
         let now_ms = util::now_ms();
         let error_type = outcome.error_type.unwrap_or("upstream_error");
         let error_message = outcome.error_message.unwrap_or("upstream attempt failed");
@@ -2305,16 +2719,15 @@ pub(crate) fn build_upstream_uri(
 
 fn upstream_path_and_query(
     original: Option<&hyper::http::uri::PathAndQuery>,
-    responses_via_chat: bool,
+    protocol: ProtocolPlan,
 ) -> Option<hyper::http::uri::PathAndQuery> {
     let original = original?;
-    let endpoint_path = if responses_via_chat {
+    let endpoint_path = if protocol.is_responses_via_chat() {
         "/chat/completions"
     } else {
-        match original.path() {
-            "/v1/chat/completions" => "/chat/completions",
-            "/v1/responses" => "/responses",
-            _ => return None,
+        match protocol.upstream_api_format {
+            ApiFormat::ChatCompletions => "/chat/completions",
+            ApiFormat::Responses => "/responses",
         }
     };
     let query = original
@@ -2332,7 +2745,18 @@ fn api_format_name(api_format: ApiFormat) -> &'static str {
 }
 
 pub(crate) fn sanitize_hop_headers(headers: &mut hyper::HeaderMap) {
+    let connection_headers = headers
+        .get_all(CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
+        .collect::<Vec<_>>();
+    for name in connection_headers {
+        headers.remove(name);
+    }
     headers.remove(CONNECTION);
+    headers.remove(HeaderName::from_static("keep-alive"));
     headers.remove(TRANSFER_ENCODING);
     headers.remove(UPGRADE);
     headers.remove(TE);
@@ -2793,21 +3217,39 @@ fn finalize_tap(
     } else {
         OutcomeOrigin::UpstreamResponse
     };
-    let scope = classify_failure_scope(cfg.http_status, origin);
+    let captured_error = if origin == OutcomeOrigin::UpstreamResponse
+        && cfg.http_status.is_some_and(|status| status >= 400)
+        && !inputs.capture.is_truncated()
+    {
+        upstream_error_details(&inputs.capture.to_vec())
+    } else {
+        None
+    };
+    let error_type = inputs
+        .error_type
+        .clone()
+        .or_else(|| captured_error.as_ref().map(|details| details.0.clone()));
+    let error_message = inputs
+        .error_message
+        .clone()
+        .or_else(|| captured_error.and_then(|details| details.1));
+    let scope = classify_failure_scope_with_body(cfg.http_status, origin, inputs.capture);
     let observed_latency_ms = inputs
         .first_byte_ms
         .or(inputs.first_token_ms)
         .or(cfg.t_stream_ms)
         .or_else(|| Some(cfg.start.elapsed().as_millis() as i64));
     if let Some(reservation) = reservation.take() {
-        reservation.finish(
+        let mut reservation = reservation;
+        reservation.finish_with_scope(
             AttemptOutcome {
                 status: cfg.http_status,
                 origin,
-                error_type: inputs.error_type.as_deref(),
-                error_message: inputs.error_message.as_deref(),
+                error_type: error_type.as_deref(),
+                error_message: error_message.as_deref(),
                 observed_latency_ms,
             },
+            scope,
             &cfg.metrics,
         );
     }
@@ -2864,20 +3306,20 @@ fn finalize_tap(
                 "conversion_mode": (cfg.api_format != cfg.upstream_api_format)
                     .then_some("responses_via_chat"),
                 "status": cfg.http_status,
-                "error_type": inputs.error_type,
+                "error_type": error_type.as_deref(),
                 "duration_ms": duration_ms,
             }));
         }
         trace.terminal = Some(serde_json::json!({
             "status": cfg.http_status,
-            "error_type": inputs.error_type,
+            "error_type": error_type.as_deref(),
         }));
     }
     cfg.metrics.record_request_str(
         cfg.api_format,
         RequestMetric {
             http_status: cfg.http_status,
-            error_type: inputs.error_type.as_deref(),
+            error_type: error_type.as_deref(),
             duration_ms,
             usage: *inputs.usage,
             pricing,
@@ -2895,8 +3337,8 @@ fn finalize_tap(
         upstream_api_format: Some(cfg.upstream_api_format),
         model: cfg.model.clone(),
         http_status: cfg.http_status,
-        error_type: inputs.error_type.clone(),
-        error_message: inputs.error_message.clone(),
+        error_type,
+        error_message,
         t_stream_ms: cfg.t_stream_ms,
         t_first_byte_ms: inputs.first_byte_ms,
         t_first_token_ms: inputs.first_token_ms,
@@ -2987,6 +3429,57 @@ impl UsageCaptureBuffer {
         out.extend_from_slice(&self.tail);
         out
     }
+}
+
+fn classify_failure_scope_with_body(
+    status: Option<i32>,
+    origin: OutcomeOrigin,
+    capture: &UsageCaptureBuffer,
+) -> FailureScope {
+    let scope = classify_failure_scope(status, origin);
+    if scope != FailureScope::Provider
+        || origin != OutcomeOrigin::UpstreamResponse
+        || capture.is_truncated()
+    {
+        return scope;
+    }
+
+    let body = capture.to_vec();
+    if upstream_error_is_model_scoped(&body) {
+        FailureScope::Model
+    } else {
+        scope
+    }
+}
+
+fn upstream_error_is_model_scoped(body: &[u8]) -> bool {
+    upstream_error_details(body).is_some_and(|(kind, _)| {
+        matches!(
+            kind.trim().to_ascii_lowercase().as_str(),
+            "model_not_found" | "invalid_model" | "unsupported_model" | "model_not_supported"
+        )
+    })
+}
+
+fn upstream_error_details(body: &[u8]) -> Option<(String, Option<String>)> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let error = value.get("error").unwrap_or(&value);
+    if let Some(message) = error.as_str() {
+        return Some(("upstream_error".to_string(), Some(message.to_string())));
+    }
+    let kind = error
+        .get("type")
+        .or_else(|| error.get("code"))
+        .and_then(Value::as_str)?
+        .trim();
+    if kind.is_empty() {
+        return None;
+    }
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some((kind.to_string(), message))
 }
 
 fn extract_usage_from_capture(
@@ -3371,18 +3864,21 @@ pub(crate) fn responses_has_delta(v: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttemptOutcome, FailureScope, OutcomeOrigin, ProviderRoute, SchedulableProvider, SseParser,
-        UpstreamAttemptReservation, UsageCaptureBuffer, build_scheduled_attempts,
-        build_upstream_headers, classify_failure_scope, effective_priority_from_memberships,
-        extract_usage_from_capture, parse_chat_usage, parse_responses_usage,
-        provider_route_api_format, should_retry_response_status, upstream_path_and_query,
+        AttemptOutcome, FailureScope, OutcomeOrigin, ProtocolPlan, ProviderRoute, RouteDiagnostics,
+        SchedulableProvider, SseParser, UpstreamAttemptReservation, UsageCaptureBuffer,
+        build_scheduled_attempts, build_upstream_headers, classify_failure_scope,
+        classify_failure_scope_with_body, collect_provider_routes,
+        effective_priority_from_memberships, extract_usage_from_capture, parse_chat_usage,
+        parse_responses_usage, provider_protocol_plan, should_retry_response_status,
+        upstream_path_and_query,
     };
-    use crate::cache::upstream_cache::UpstreamSnapshot;
+    use crate::cache::upstream_cache::{ProviderModelState, UpstreamSnapshot};
     use crate::health::RuntimeHealthBook;
     use crate::metrics::Metrics;
     use crate::provider_runtime::ProviderRuntimeBook;
     use crate::types::{ApiFormat, UpstreamKey, UpstreamProvider};
     use bytes::Bytes;
+    use hyper::StatusCode;
     use hyper::header::{
         ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderName,
         HeaderValue, USER_AGENT,
@@ -3398,7 +3894,11 @@ mod tests {
             .parse::<hyper::http::uri::PathAndQuery>()
             .expect("path");
 
-        let upstream = upstream_path_and_query(Some(&original), false).expect("upstream path");
+        let upstream = upstream_path_and_query(
+            Some(&original),
+            ProtocolPlan::native(ApiFormat::ChatCompletions),
+        )
+        .expect("upstream path");
 
         assert_eq!(upstream, "/chat/completions?trace=true");
     }
@@ -3409,7 +3909,9 @@ mod tests {
             .parse::<hyper::http::uri::PathAndQuery>()
             .expect("path");
 
-        let upstream = upstream_path_and_query(Some(&original), false).expect("upstream path");
+        let upstream =
+            upstream_path_and_query(Some(&original), ProtocolPlan::native(ApiFormat::Responses))
+                .expect("upstream path");
 
         assert_eq!(upstream, "/responses?trace=true");
     }
@@ -3420,7 +3922,8 @@ mod tests {
             .parse::<hyper::http::uri::PathAndQuery>()
             .expect("path");
 
-        let upstream = upstream_path_and_query(Some(&original), true).expect("upstream path");
+        let upstream = upstream_path_and_query(Some(&original), ProtocolPlan::responses_via_chat())
+            .expect("upstream path");
 
         assert_eq!(upstream, "/chat/completions?trace=true");
     }
@@ -3666,7 +4169,7 @@ mod tests {
         compatible.provider_type = "openai_compatible".to_string();
 
         assert_eq!(
-            provider_route_api_format(
+            provider_protocol_plan(
                 &snapshot,
                 &compatible,
                 ApiFormat::Responses,
@@ -3675,22 +4178,29 @@ mod tests {
             ),
             None
         );
-        snapshot.responses_via_chat_by_provider.insert(
+        snapshot.provider_models_by_provider.insert(
             compatible.id,
-            std::collections::HashMap::from([("model-a".to_string(), true)]),
+            std::collections::HashMap::from([(
+                "model-a".to_string(),
+                ProviderModelState {
+                    enabled: true,
+                    available: true,
+                    responses_via_chat_enabled: true,
+                },
+            )]),
         );
         assert_eq!(
-            provider_route_api_format(
+            provider_protocol_plan(
                 &snapshot,
                 &compatible,
                 ApiFormat::Responses,
                 "model-a",
                 true,
             ),
-            Some((ApiFormat::ChatCompletions, true))
+            Some(ProtocolPlan::responses_via_chat())
         );
         assert_eq!(
-            provider_route_api_format(
+            provider_protocol_plan(
                 &snapshot,
                 &compatible,
                 ApiFormat::Responses,
@@ -3703,17 +4213,17 @@ mod tests {
         let mut native_responses = test_provider(8, 100, 2);
         native_responses.provider_type = "openai_compatible_responses".to_string();
         assert_eq!(
-            provider_route_api_format(
+            provider_protocol_plan(
                 &snapshot,
                 &native_responses,
                 ApiFormat::Responses,
                 "model-a",
                 false,
             ),
-            Some((ApiFormat::Responses, false))
+            Some(ProtocolPlan::native(ApiFormat::Responses))
         );
         assert_eq!(
-            provider_route_api_format(
+            provider_protocol_plan(
                 &snapshot,
                 &native_responses,
                 ApiFormat::ChatCompletions,
@@ -3721,6 +4231,185 @@ mod tests {
                 true,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn provider_inventory_should_exclude_a_model_missing_after_sync() {
+        let mut snapshot = UpstreamSnapshot::default();
+        let provider_with_model = test_provider(7, 100, 2);
+        let provider_without_model = test_provider(8, 100, 2);
+        snapshot.providers = vec![provider_with_model, provider_without_model];
+        snapshot.provider_models_by_provider.insert(
+            7,
+            std::collections::HashMap::from([(
+                "kimi-k3".to_string(),
+                ProviderModelState {
+                    enabled: true,
+                    available: true,
+                    responses_via_chat_enabled: false,
+                },
+            )]),
+        );
+        snapshot.provider_models_by_provider.insert(
+            8,
+            std::collections::HashMap::from([(
+                "other-model".to_string(),
+                ProviderModelState {
+                    enabled: true,
+                    available: true,
+                    responses_via_chat_enabled: false,
+                },
+            )]),
+        );
+
+        let (routes, diagnostics) =
+            collect_provider_routes(&snapshot, ApiFormat::ChatCompletions, "kimi-k3", true)
+                .expect("route collection");
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].provider.id, 7);
+        assert!(diagnostics.rejections.iter().any(|rejection| {
+            rejection.provider_id == Some(8) && rejection.code == "provider_model_not_registered"
+        }));
+    }
+
+    #[test]
+    fn provider_without_inventory_should_keep_legacy_wildcard_routing() {
+        let snapshot = UpstreamSnapshot {
+            providers: vec![test_provider(7, 100, 2)],
+            ..UpstreamSnapshot::default()
+        };
+
+        let (routes, _) = collect_provider_routes(
+            &snapshot,
+            ApiFormat::ChatCompletions,
+            "unlisted-model",
+            true,
+        )
+        .expect("route collection");
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].provider.id, 7);
+    }
+
+    #[test]
+    fn chat_only_model_without_conversion_should_return_protocol_error() {
+        let mut snapshot = UpstreamSnapshot::default();
+        let mut provider = test_provider(7, 100, 2);
+        provider.provider_type = "openai_compatible".to_string();
+        snapshot.providers.push(provider);
+        snapshot.provider_models_by_provider.insert(
+            7,
+            std::collections::HashMap::from([(
+                "kimi-k3".to_string(),
+                ProviderModelState {
+                    enabled: true,
+                    available: true,
+                    responses_via_chat_enabled: false,
+                },
+            )]),
+        );
+
+        let error = collect_provider_routes(&snapshot, ApiFormat::Responses, "kimi-k3", true)
+            .expect_err("protocol error");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "model_protocol_unsupported");
+        assert!(
+            error
+                .diagnostics
+                .rejections
+                .iter()
+                .any(|rejection| rejection.code == "responses_via_chat_disabled")
+        );
+    }
+
+    #[test]
+    fn public_reason_counts_should_only_include_decisive_protocol_rejections() {
+        let mut diagnostics = RouteDiagnostics::default();
+        diagnostics.reject(
+            Some(7),
+            "kimi-k3",
+            "model_inventory",
+            "provider_model_not_registered",
+            "missing from inventory",
+        );
+        diagnostics.reject(
+            Some(8),
+            "kimi-k3",
+            "model_route",
+            "model_route_excluded",
+            "excluded by route",
+        );
+        diagnostics.reject(
+            Some(9),
+            "kimi-k3",
+            "protocol",
+            "responses_via_chat_disabled",
+            "conversion disabled",
+        );
+
+        assert_eq!(
+            diagnostics.public_reason_counts("model_protocol_unsupported"),
+            vec![serde_json::json!({
+                "code": "responses_via_chat_disabled",
+                "count": 1,
+            })],
+        );
+    }
+
+    #[test]
+    fn public_reason_counts_should_include_only_key_configuration_rejections() {
+        let mut diagnostics = RouteDiagnostics::default();
+        diagnostics.reject(
+            Some(7),
+            "kimi-k3",
+            "static_configuration",
+            "no_upstream_key_for_model",
+            "no key",
+        );
+        diagnostics.reject(
+            Some(8),
+            "kimi-k3",
+            "static_configuration",
+            "no_enabled_upstream_key",
+            "keys disabled",
+        );
+        diagnostics.reject(
+            Some(9),
+            "kimi-k3",
+            "static_configuration",
+            "no_enabled_upstream_endpoint",
+            "no endpoint",
+        );
+
+        assert_eq!(
+            diagnostics.public_reason_counts("no_upstream_key_for_model"),
+            vec![
+                serde_json::json!({ "code": "no_enabled_upstream_key", "count": 1 }),
+                serde_json::json!({ "code": "no_upstream_key_for_model", "count": 1 }),
+            ],
+        );
+    }
+
+    #[test]
+    fn public_reason_counts_should_fall_back_to_resolution_code() {
+        let mut diagnostics = RouteDiagnostics::default();
+        diagnostics.reject(
+            Some(7),
+            "kimi-k3",
+            "model_inventory",
+            "provider_model_not_registered",
+            "missing from inventory",
+        );
+
+        assert_eq!(
+            diagnostics.public_reason_counts("upstream_snapshot_failed"),
+            vec![serde_json::json!({
+                "code": "upstream_snapshot_failed",
+                "count": 1,
+            })],
         );
     }
 
@@ -3861,8 +4550,7 @@ mod tests {
                 upstream_model: "model-a".to_string(),
                 route_priority: None,
                 route_weight: None,
-                upstream_api_format: ApiFormat::ChatCompletions,
-                responses_via_chat: false,
+                protocol: ProtocolPlan::native(ApiFormat::ChatCompletions),
             },
             effective_priority: priority,
             effective_weight: 1,
@@ -4015,6 +4703,40 @@ mod tests {
         }
         assert_eq!(
             classify_failure_scope(Some(400), OutcomeOrigin::LocalTransport),
+            FailureScope::Provider,
+        );
+    }
+
+    #[test]
+    fn upstream_model_error_body_should_override_retryable_5xx_scope() {
+        let mut capture = UsageCaptureBuffer::new(4096, 1024);
+        capture.push(&Bytes::from_static(
+            br#"{"error":{"message":"model unavailable","type":"model_not_found"}}"#,
+        ));
+
+        assert_eq!(
+            classify_failure_scope_with_body(
+                Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                OutcomeOrigin::UpstreamResponse,
+                &capture,
+            ),
+            FailureScope::Model,
+        );
+    }
+
+    #[test]
+    fn ordinary_5xx_body_should_remain_provider_scoped() {
+        let mut capture = UsageCaptureBuffer::new(4096, 1024);
+        capture.push(&Bytes::from_static(
+            br#"{"error":{"message":"temporary outage","type":"server_error"}}"#,
+        ));
+
+        assert_eq!(
+            classify_failure_scope_with_body(
+                Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                OutcomeOrigin::UpstreamResponse,
+                &capture,
+            ),
             FailureScope::Provider,
         );
     }

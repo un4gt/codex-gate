@@ -544,6 +544,62 @@ describe('admin console smoke test', () => {
     expect(screen.queryByText('model-b')).toBeNull();
   });
 
+  it('restores and persists model column widths while updating sticky offsets', async () => {
+    let widthPatch: Record<string, number> | null = null;
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/api/v1/console-preferences')) {
+        if (init?.method === 'PATCH') {
+          const body = JSON.parse(String(init.body)) as { model_column_widths: Record<string, number> };
+          widthPatch = body.model_column_widths;
+          return jsonResponse({
+            log_visible_columns: ['time'],
+            log_column_widths: {},
+            model_column_widths: body.model_column_widths,
+          });
+        }
+        return jsonResponse({
+          log_visible_columns: ['time'],
+          log_column_widths: {},
+          model_column_widths: { provider: 104, model: 176 },
+        });
+      }
+      if (url.endsWith('/api/v1/gateway-models')) return jsonResponse([]);
+      if (url.endsWith('/api/v1/provider-models')) return jsonResponse([{
+        id: 11,
+        provider_id: 7,
+        provider_name: 'Provider A',
+        provider_type: 'openai_compatible',
+        upstream_model: 'model-a',
+        alias: null,
+        enabled: true,
+        available: true,
+        responses_via_chat_enabled: false,
+        native_api_formats: ['chat_completions'],
+        created_at_ms: 1,
+        updated_at_ms: 1,
+      }]);
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(<ModelsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      providers={[providerWorkspace()]}
+      aliases={[]}
+      onAliasesRefresh={async () => undefined}
+      onMessage={() => undefined}
+    />);
+
+    const table = await screen.findByRole('table', { name: 'Model Inventory' });
+    await waitFor(() => expect(table.querySelector('col[data-column-id="provider"]')?.getAttribute('style')).toContain('104px'));
+    expect(table.querySelector('thead [data-column-id="model"]')?.getAttribute('data-sticky-offset')).toBe('104');
+
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize Providers column' }), { key: 'ArrowRight' });
+
+    await waitFor(() => expect(widthPatch?.provider).toBe(112));
+    expect(table.querySelector('thead [data-column-id="model"]')?.getAttribute('data-sticky-offset')).toBe('112');
+  });
+
   it('creates a model alias from the Models page and refreshes aliases', async () => {
     let aliasPayload: Record<string, unknown> | null = null;
     let aliasRefreshes = 0;
@@ -658,5 +714,72 @@ describe('admin console smoke test', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Providers' }));
 
     await waitFor(() => expect(table.querySelector('thead [data-sticky-column="first-visible"]')?.textContent).toContain('Time'));
+  });
+
+  it('renders usage metrics in one cell and persists log column widths', async () => {
+    let widthPatch: Record<string, number> | null = null;
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/v1/console-preferences')) {
+        if (init?.method === 'PATCH') {
+          const body = JSON.parse(String(init.body)) as { log_column_widths: Record<string, number> };
+          widthPatch = body.log_column_widths;
+          return jsonResponse({
+            log_visible_columns: ['time', 'total_tokens'],
+            log_column_widths: body.log_column_widths,
+            model_column_widths: {},
+          });
+        }
+        return jsonResponse({
+          log_visible_columns: ['time', 'input_tokens', 'cache_read', 'reasoning'],
+          log_column_widths: { time: 136 },
+          model_column_widths: {},
+        });
+      }
+      if (url.includes('/api/v1/logs')) return jsonResponse([{
+        id: 'req-usage',
+        time_ms: 1,
+        api_key_id: 1,
+        provider_id: 7,
+        endpoint_id: 71,
+        upstream_key_id: 72,
+        model: 'model-a',
+        http_status: 200,
+        duration_ms: 10,
+        api_format: 'responses',
+        upstream_api_format: 'responses',
+        span_kind: 'http_request',
+        transport: 'http',
+        usage_observed: true,
+        input_tokens: 101,
+        output_tokens: 202,
+        cache_read_input_tokens: 303,
+        cache_creation_input_tokens: 404,
+        reasoning_output_tokens: 505,
+      }]);
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(<LogsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      providers={[providerWorkspaceWithConnection()]}
+      apiKeys={[]}
+      refreshKey={0}
+      onMessage={() => undefined}
+    />);
+
+    const table = await screen.findByRole('table', { name: 'Request Logs' });
+    await waitFor(() => expect(table.querySelector('col[data-column-id="time"]')?.getAttribute('style')).toContain('136px'));
+    expect(within(table).getByRole('columnheader', { name: 'Usage' })).toBeTruthy();
+    expect(within(table).queryByRole('columnheader', { name: 'Input Tokens' })).toBeNull();
+    expect(within(table).getByText('101')).toBeTruthy();
+    expect(within(table).getByText('202')).toBeTruthy();
+    expect(within(table).getByText('303')).toBeTruthy();
+    expect(within(table).getByText('404')).toBeTruthy();
+    expect(within(table).getByText('505')).toBeTruthy();
+
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize Time column' }), { key: 'ArrowRight' });
+
+    await waitFor(() => expect(widthPatch?.time).toBe(144));
   });
 });

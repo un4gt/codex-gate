@@ -57,14 +57,26 @@ export interface RoutingTrace {
   } | null;
   candidates: Array<{
     provider_id: number;
+    upstream_model?: string;
     priority: number;
     weight: number;
     attempt_budget: number;
+    upstream_api_format?: string;
+    conversion_mode?: string | null;
+  }>;
+  rejections?: Array<{
+    provider_id: number | null;
+    upstream_model: string;
+    stage: string;
+    code: string;
+    message: string;
   }>;
   attempts: Array<{
     provider_id: number;
     endpoint_id: number;
     upstream_key_id: number;
+    upstream_api_format?: string;
+    conversion_mode?: string | null;
     status: number | null;
     error_type: string | null;
     duration_ms: number;
@@ -311,6 +323,14 @@ export interface ProviderModelInventory extends ProviderModel {
 
 export interface ConsolePreferences {
   log_visible_columns: string[];
+  log_column_widths: Record<string, number>;
+  model_column_widths: Record<string, number>;
+}
+
+export interface ConsolePreferencesPatch {
+  log_visible_columns?: string[];
+  log_column_widths?: Record<string, number>;
+  model_column_widths?: Record<string, number>;
 }
 
 export interface ModelAliasTarget {

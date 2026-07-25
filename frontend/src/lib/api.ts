@@ -2,6 +2,7 @@ import type {
   ApiKeySummary,
   ApiKeyWorkspace,
   ConnectionSettings,
+  ConsolePreferencesPatch,
   ConsolePreferences,
   CreateApiKeyInput,
   CreateEndpointInput,
@@ -475,12 +476,10 @@ export async function loadConsolePreferences(settings: ConnectionSettings) {
 
 export async function updateConsolePreferences(
   settings: ConnectionSettings,
-  logVisibleColumns: string[],
+  patch: ConsolePreferencesPatch,
 ) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return patchJson<ConsolePreferences>(apiBase, '/api/v1/console-preferences', adminToken, {
-    log_visible_columns: logVisibleColumns,
-  });
+  return patchJson<ConsolePreferences>(apiBase, '/api/v1/console-preferences', adminToken, patch);
 }
 
 export async function deleteProviderModel(settings: ConnectionSettings, modelId: number) {

@@ -4,6 +4,10 @@ import { EmptyState } from '@/components/console/EmptyState';
 import { FilterBar } from '@/components/console/FilterBar';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import {
+  ColumnResizeHandle,
+  useResizableColumns,
+} from '@/components/console/ResizableTable';
 import { t } from '@/lib/i18n';
 import {
   createModelAlias,
@@ -11,9 +15,11 @@ import {
   deleteModelAlias,
   deleteModelAliasTarget,
   deleteProviderModel,
+  loadConsolePreferences,
   loadGatewayModelPolicies,
   loadProviderModelInventory,
   updateGatewayModelPolicy,
+  updateConsolePreferences,
   updateModelAlias,
   updateModelAliasTarget,
   updateProviderModel,
@@ -56,6 +62,19 @@ interface ModelsPageProps {
 type AvailabilityFilter = '' | 'available' | 'unavailable';
 type ConversionFilter = '' | 'enabled' | 'disabled' | 'eligible';
 
+const MODEL_COLUMN_DEFINITIONS = [
+  { id: 'provider', label: '上游', defaultWidth: 128, minWidth: 96, maxWidth: 360, align: 'left' },
+  { id: 'model', label: '模型', defaultWidth: 200, minWidth: 140, maxWidth: 640, align: 'left' },
+  { id: 'alias', label: '显示名称', defaultWidth: 190, minWidth: 140, maxWidth: 480, align: 'left' },
+  { id: 'native_endpoint', label: '原生端点', defaultWidth: 180, minWidth: 140, maxWidth: 420, align: 'left' },
+  { id: 'availability', label: '库存', defaultWidth: 120, minWidth: 88, maxWidth: 240, align: 'left' },
+  { id: 'enabled', label: '启用', defaultWidth: 120, minWidth: 96, maxWidth: 240, align: 'center' },
+  { id: 'global', label: '全局', defaultWidth: 80, minWidth: 72, maxWidth: 180, align: 'center' },
+  { id: 'conversion', label: '转协议', defaultWidth: 210, minWidth: 160, maxWidth: 480, align: 'center' },
+  { id: 'actions', label: '操作', defaultWidth: 96, minWidth: 72, maxWidth: 200, align: 'right' },
+] as const;
+const MODEL_COLUMN_DEFINITION_MAP = new Map(MODEL_COLUMN_DEFINITIONS.map(column => [column.id, column]));
+
 function initialProviderFilter(): string {
   if (typeof window === 'undefined') return '';
   return new URLSearchParams(window.location.search).get('provider_id') ?? '';
@@ -91,6 +110,22 @@ export function ModelsPage(props: ModelsPageProps) {
   const [nativeFormat, setNativeFormat] = useState('');
   const [availability, setAvailability] = useState<AvailabilityFilter>('');
   const [conversion, setConversion] = useState<ConversionFilter>('');
+  const commitModelColumnWidths = useCallback(async (widths: Record<string, number>) => {
+    await updateConsolePreferences(props.settings, { model_column_widths: widths });
+  }, [props.settings]);
+  const reportColumnWidthError = useCallback((error: unknown) => {
+    props.onMessage(error instanceof Error ? error.message : '保存模型列宽失败。');
+  }, [props.onMessage]);
+  const {
+    widths: columnWidths,
+    applyPersistedWidths,
+    resizeColumn,
+    resetColumn,
+  } = useResizableColumns(
+    MODEL_COLUMN_DEFINITIONS,
+    commitModelColumnWidths,
+    reportColumnWidthError,
+  );
 
   const loadModels = useCallback(async () => {
     if (!props.settings.adminToken.trim()) {
@@ -100,15 +135,20 @@ export function ModelsPage(props: ModelsPageProps) {
     }
     setLoading(true);
     try {
-      const [inventory, policies] = await Promise.all([
+      const [inventory, policies, preferences] = await Promise.all([
         loadProviderModelInventory(props.settings),
         loadGatewayModelPolicies(props.settings).catch(error => {
           props.onMessage(error instanceof Error ? error.message : '加载全局模型策略失败。');
           return [];
         }),
+        loadConsolePreferences(props.settings).catch(error => {
+          props.onMessage(error instanceof Error ? error.message : '读取模型列宽失败。');
+          return null;
+        }),
       ]);
       setModels(inventory);
       setGatewayPolicies(policies);
+      if (preferences) applyPersistedWidths(preferences.model_column_widths);
       setModelAliasDraft(Object.fromEntries(inventory.map(model => [
         model.id,
         model.alias ?? '',
@@ -120,7 +160,7 @@ export function ModelsPage(props: ModelsPageProps) {
     } finally {
       setLoading(false);
     }
-  }, [props.onMessage, props.settings]);
+  }, [applyPersistedWidths, props.onMessage, props.settings]);
 
   useEffect(() => {
     void loadModels();
@@ -149,6 +189,11 @@ export function ModelsPage(props: ModelsPageProps) {
   const providerNames = useMemo(() => new Map(
     props.providers.map(item => [item.provider.id, item.provider.name]),
   ), [props.providers]);
+
+  const tableWidth = useMemo(
+    () => MODEL_COLUMN_DEFINITIONS.reduce((sum, column) => sum + columnWidths[column.id], 0),
+    [columnWidths],
+  );
 
   const saveInventoryAlias = async (model: ProviderModelInventory) => {
     const trimmed = (modelAliasDraft[model.id] ?? '').trim();
@@ -418,68 +463,100 @@ export function ModelsPage(props: ModelsPageProps) {
           data-testid="model-inventory-table-container"
           sx={{ maxHeight: { xs: '65dvh', md: 'min(70dvh, 48rem)' } }}
         >
-          <Table stickyHeader aria-label={t('模型库存')} size="small" sx={{ minWidth: 1320 }}>
+          <Table stickyHeader aria-label={t('模型库存')} size="small" sx={{
+            tableLayout: 'fixed',
+            width: tableWidth,
+            '& .MuiTableCell-root': { boxSizing: 'border-box' },
+          }}>
+            <colgroup>
+              {MODEL_COLUMN_DEFINITIONS.map(column => <col
+                key={column.id}
+                data-column-id={column.id}
+                style={{ width: columnWidths[column.id] }}
+              />)}
+            </colgroup>
             <TableHead sx={{ '& .MuiTableCell-head': { bgcolor: 'background.default' } }}>
               <TableRow>
-                <TableCell data-sticky-column="provider" sx={{
-                  position: 'sticky',
-                  left: 0,
-                  zIndex: 5,
-                  width: 150,
-                  minWidth: 150,
-                  maxWidth: 150,
-                  bgcolor: 'background.default',
-                  boxShadow: { xs: '4px 0 8px -7px rgb(0 0 0 / 0.65)', md: 'none' },
-                }}>{t('上游')}</TableCell>
-                <TableCell data-sticky-column="model" sx={{
-                  position: 'sticky',
-                  left: { xs: 'auto', md: 150 },
-                  zIndex: 4,
-                  width: 240,
-                  minWidth: 240,
-                  maxWidth: 240,
-                  bgcolor: 'background.default',
-                  boxShadow: { xs: 'none', md: '4px 0 8px -7px rgb(0 0 0 / 0.65)' },
-                }}>{t('模型')}</TableCell>
-                <TableCell className="min-w-[190px]">{t('显示名称')}</TableCell>
-                <TableCell className="min-w-[180px]">{t('原生端点')}</TableCell>
-                <TableCell className="min-w-[120px]">{t('库存')}</TableCell>
-                <TableCell className="min-w-[120px]" align="center">{t('启用')}</TableCell>
-                <TableCell className="min-w-[80px]" align="center">{t('全局')}</TableCell>
-                <TableCell className="min-w-[210px]" align="center">{t('转协议')}</TableCell>
-                <TableCell align="right">{t('操作')}</TableCell>
+                {MODEL_COLUMN_DEFINITIONS.map(column => {
+                  const width = columnWidths[column.id];
+                  return <TableCell
+                    key={column.id}
+                    align={column.align}
+                    aria-label={t(column.label)}
+                    data-column-id={column.id}
+                    data-sticky-offset={column.id === 'model' ? columnWidths.provider : column.id === 'provider' ? 0 : undefined}
+                    data-sticky-column={column.id === 'provider' || column.id === 'model' ? column.id : undefined}
+                    sx={{
+                      maxWidth: width,
+                      minWidth: column.minWidth,
+                      overflow: 'visible',
+                      position: 'relative',
+                      width,
+                      ...(column.id === 'provider' ? {
+                        position: 'sticky',
+                        left: 0,
+                        zIndex: 5,
+                        bgcolor: 'background.default',
+                        boxShadow: { xs: '4px 0 8px -7px rgb(0 0 0 / 0.65)', md: 'none' },
+                      } : {}),
+                      ...(column.id === 'model' ? {
+                        position: 'sticky',
+                        left: { xs: 'auto', md: columnWidths.provider },
+                        zIndex: 4,
+                        bgcolor: 'background.default',
+                        boxShadow: { xs: 'none', md: '4px 0 8px -7px rgb(0 0 0 / 0.65)' },
+                      } : {}),
+                    }}
+                  >
+                    {t(column.label)}
+                    <ColumnResizeHandle
+                      column={column}
+                      label={t('调整 {{column}} 列宽', { column: t(column.label) })}
+                      width={width}
+                      onResize={resizeColumn}
+                      onReset={resetColumn}
+                    />
+                  </TableCell>;
+                })}
               </TableRow>
             </TableHead>
             <TableBody>
               {filtered.map(model => {
                 const eligible = model.provider_type === 'openai_compatible';
                 return <TableRow key={model.id} hover>
-                  <TableCell data-sticky-column="provider" sx={{
+                  <TableCell data-column-id="provider" data-sticky-column="provider" data-sticky-offset={0} sx={{
                     position: 'sticky',
                     left: 0,
                     zIndex: 2,
-                    width: 150,
-                    minWidth: 150,
-                    maxWidth: 150,
+                    width: columnWidths.provider,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('provider')!.minWidth,
+                    maxWidth: columnWidths.provider,
+                    overflow: 'hidden',
                     bgcolor: 'background.default',
                     boxShadow: { xs: '4px 0 8px -7px rgb(0 0 0 / 0.65)', md: 'none' },
                     'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
                   }}>
-                    <Box className="font-medium">{model.provider_name}</Box>
-                    <Box className="mt-1 font-mono text-[0.65rem] text-muted-foreground">{model.provider_type}</Box>
+                    <Box className="truncate font-medium" title={model.provider_name}>{model.provider_name}</Box>
+                    <Box className="mt-1 truncate font-mono text-[0.65rem] text-muted-foreground" title={model.provider_type}>{model.provider_type}</Box>
                   </TableCell>
-                  <TableCell className="break-all font-mono text-xs" data-sticky-column="model" sx={{
+                  <TableCell className="font-mono text-xs" data-column-id="model" data-sticky-column="model" data-sticky-offset={columnWidths.provider} sx={{
                     position: 'sticky',
-                    left: { xs: 'auto', md: 150 },
+                    left: { xs: 'auto', md: columnWidths.provider },
                     zIndex: 2,
-                    width: 240,
-                    minWidth: 240,
-                    maxWidth: 240,
+                    width: columnWidths.model,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('model')!.minWidth,
+                    maxWidth: columnWidths.model,
+                    overflow: 'hidden',
                     bgcolor: 'background.default',
                     boxShadow: { xs: 'none', md: '4px 0 8px -7px rgb(0 0 0 / 0.65)' },
                     'tr:hover &': { bgcolor: 'color-mix(in oklab, var(--muted) 50%, var(--background))' },
-                  }}>{model.upstream_model}</TableCell>
-                  <TableCell className="min-w-[180px] p-2">
+                  }}><Box className="truncate" title={model.upstream_model}>{model.upstream_model}</Box></TableCell>
+                  <TableCell className="p-2" data-column-id="alias" sx={{
+                    maxWidth: columnWidths.alias,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('alias')!.minWidth,
+                    overflow: 'hidden',
+                    width: columnWidths.alias,
+                  }}>
                     <InputBase
                       value={modelAliasDraft[model.id] ?? model.alias ?? ''}
                       placeholder={t('无别名')}
@@ -493,15 +570,30 @@ export function ModelsPage(props: ModelsPageProps) {
                       onBlur={() => void saveInventoryAlias(model)}
                     />
                   </TableCell>
-                  <TableCell className="whitespace-nowrap font-mono text-xs">{nativeEndpointLabel(model)}</TableCell>
-                  <TableCell>
+                  <TableCell className="font-mono text-xs" data-column-id="native_endpoint" sx={{
+                    maxWidth: columnWidths.native_endpoint,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('native_endpoint')!.minWidth,
+                    overflow: 'hidden',
+                    width: columnWidths.native_endpoint,
+                  }}><Box className="truncate whitespace-nowrap" title={nativeEndpointLabel(model)}>{nativeEndpointLabel(model)}</Box></TableCell>
+                  <TableCell data-column-id="availability" sx={{
+                    maxWidth: columnWidths.availability,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('availability')!.minWidth,
+                    overflow: 'hidden',
+                    width: columnWidths.availability,
+                  }}>
                     <StatusBadge tone={model.available ? 'normal' : 'warning'}>
                       {model.available ? t('可用') : t('已下线')}
                     </StatusBadge>
                   </TableCell>
-                  <TableCell align="center">
+                  <TableCell align="center" data-column-id="enabled" sx={{
+                    maxWidth: columnWidths.enabled,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('enabled')!.minWidth,
+                    overflow: 'hidden',
+                    width: columnWidths.enabled,
+                  }}>
                     <FormControlLabel
-                      className="m-0 whitespace-nowrap"
+                      className="m-0 min-w-0 whitespace-nowrap"
                       control={<Checkbox
                         checked={model.enabled}
                         disabled={busy !== null}
@@ -510,7 +602,12 @@ export function ModelsPage(props: ModelsPageProps) {
                       label={t(model.enabled ? '启用' : '停用')}
                     />
                   </TableCell>
-                  <TableCell align="center">
+                  <TableCell align="center" data-column-id="global" sx={{
+                    maxWidth: columnWidths.global,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('global')!.minWidth,
+                    overflow: 'hidden',
+                    width: columnWidths.global,
+                  }}>
                     <Checkbox
                       checked={!disabledGatewayModels.has(model.upstream_model)}
                       disabled={gatewayPolicies === null || busy !== null}
@@ -518,9 +615,14 @@ export function ModelsPage(props: ModelsPageProps) {
                       onChange={event => void toggleGatewayModelEnabled(model, event.target.checked)}
                     />
                   </TableCell>
-                  <TableCell align="center">
+                  <TableCell align="center" data-column-id="conversion" sx={{
+                    maxWidth: columnWidths.conversion,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('conversion')!.minWidth,
+                    overflow: 'hidden',
+                    width: columnWidths.conversion,
+                  }}>
                     <FormControlLabel
-                      className="m-0 whitespace-nowrap"
+                      className="m-0 min-w-0 whitespace-nowrap"
                       control={<Checkbox
                         checked={model.responses_via_chat_enabled}
                         disabled={!eligible || !model.available || busy !== null}
@@ -534,7 +636,12 @@ export function ModelsPage(props: ModelsPageProps) {
                         : model.native_api_formats.includes('responses') ? t('原生 Responses') : t('不支持')}
                     />
                   </TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" data-column-id="actions" sx={{
+                    maxWidth: columnWidths.actions,
+                    minWidth: MODEL_COLUMN_DEFINITION_MAP.get('actions')!.minWidth,
+                    overflow: 'hidden',
+                    width: columnWidths.actions,
+                  }}>
                     <Tooltip title={t('删除模型')}>
                       <span>
                         <Button

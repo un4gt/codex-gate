@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -51,6 +52,22 @@ def request_json(method, url, token=None, payload=None, timeout=10.0):
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
         return json.loads(raw.decode('utf-8')) if raw else {}
+
+
+def request_http(method, url, token=None, payload=None, timeout=10.0, extra_headers=None):
+    body = None if payload is None else json.dumps(payload).encode('utf-8')
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    headers.update(extra_headers or {})
+    req = urllib.request.Request(url=url, method=method, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return resp.getcode(), {name.lower(): value for name, value in resp.headers.items()}, raw
+    except urllib.error.HTTPError as error:
+        raw = error.read()
+        return error.code, {name.lower(): value for name, value in error.headers.items()}, raw
 
 
 def read_text(url, timeout=10.0):
@@ -170,6 +187,456 @@ def bootstrap_main_provider(admin_token):
     return extract_api_key(client_key)
 
 
+def verify_model_sync_error_passthrough(admin_token):
+    provider_id = extract_id(request_json('POST', f'{BASE_URL}/api/v1/providers', admin_token, {
+        'name': 'reg-model-sync-auth',
+        'providerType': 'openai',
+        'enabled': True,
+        'priority': 20,
+        'weight': 1,
+    }))
+    request_json('POST', f'{BASE_URL}/api/v1/providers/{provider_id}/endpoints', admin_token, {
+        'name': 'auth-models',
+        'baseUrl': f'{MOCK_URL}/key/api/coding/v3',
+        'enabled': True,
+        'priority': 10,
+        'weight': 1,
+    })
+    key_id = extract_id(request_json('POST', f'{BASE_URL}/api/v1/providers/{provider_id}/keys', admin_token, {
+        'name': 'bad-model-key',
+        'secret': 'bad-key',
+        'enabled': True,
+        'priority': 10,
+        'weight': 1,
+    }))
+
+    responses = []
+    for path in (
+        f'/api/v1/providers/{provider_id}/models/sync',
+        f'/api/v1/keys/{key_id}/models/sync',
+    ):
+        status, headers, body = request_http('POST', f'{BASE_URL}{path}', admin_token, {})
+        parsed = json.loads(body.decode('utf-8'))
+        if status != 401:
+            raise RuntimeError(f'model sync did not preserve upstream 401 for {path}: {status} {body!r}')
+        if parsed.get('error', {}).get('message') != 'invalid upstream credential':
+            raise RuntimeError(f'model sync changed upstream error body for {path}: {parsed!r}')
+        if headers.get('x-upstream-error') != 'authentication-failed':
+            raise RuntimeError(f'model sync dropped safe upstream headers for {path}: {headers!r}')
+        if 'set-cookie' in headers or 'x-remove-me' in headers:
+            raise RuntimeError(f'model sync leaked unsafe upstream headers for {path}: {headers!r}')
+        responses.append({'path': path, 'status': status, 'body': parsed})
+
+    request_json('PATCH', f'{BASE_URL}/api/v1/keys/{key_id}', admin_token, {
+        'secret': 'good-key',
+    })
+    synced = request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/providers/{provider_id}/models/sync',
+        admin_token,
+        {},
+    )
+    if not synced:
+        raise RuntimeError('model sync did not recover after correcting the upstream key')
+
+    return {
+        'errors': responses,
+        'recovered_model_count': len(synced),
+    }
+
+
+def configure_responses_via_chat_provider(
+    admin_token,
+    name,
+    model,
+    endpoint_url,
+    enable_conversion=True,
+):
+    provider_id = extract_id(request_json('POST', f'{BASE_URL}/api/v1/providers', admin_token, {
+        'name': name,
+        'providerType': 'openai_compatible',
+        'enabled': True,
+        'priority': 10,
+        'weight': 1,
+        'supportsIncludeUsage': True,
+    }))
+    endpoint_id = extract_id(request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/providers/{provider_id}/endpoints',
+        admin_token,
+        {
+            'name': f'{name}-endpoint',
+            'baseUrl': endpoint_url,
+            'enabled': True,
+            'priority': 10,
+            'weight': 1,
+        },
+    ))
+    key_id = extract_id(request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/providers/{provider_id}/keys',
+        admin_token,
+        {
+            'name': f'{name}-key',
+            'secret': 'good-key',
+            'enabled': True,
+            'priority': 10,
+            'weight': 1,
+        },
+    ))
+    provider_models = request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/providers/{provider_id}/models/sync',
+        admin_token,
+        {},
+    )
+    provider_model = next(
+        (item for item in provider_models if item.get('upstream_model') == model),
+        None,
+    )
+    if provider_model is None:
+        raise RuntimeError(f'{name} provider sync did not return {model}: {provider_models!r}')
+    if enable_conversion:
+        request_json(
+            'PATCH',
+            f'{BASE_URL}/api/v1/provider-models/{provider_model["id"]}',
+            admin_token,
+            {'responses_via_chat_enabled': True},
+        )
+    key_models = request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/keys/{key_id}/models/sync',
+        admin_token,
+        {},
+    )
+    if not any(item.get('model_name') == model and item.get('enabled') for item in key_models):
+        raise RuntimeError(f'{name} key sync did not enable {model}: {key_models!r}')
+    request_json('PUT', f'{BASE_URL}/api/v1/routes/{model}', admin_token, {
+        'enabled': True,
+        'providerIds': [provider_id],
+    })
+    return {
+        'provider_id': provider_id,
+        'endpoint_id': endpoint_id,
+        'key_id': key_id,
+    }
+
+
+def verify_responses_via_chat_routing(admin_token, api_key):
+    success_model = 'kimi-k3'
+    configure_responses_via_chat_provider(
+        admin_token,
+        'reg-responses-via-chat',
+        success_model,
+        f'{MOCK_URL}/bridge/api/coding/v3',
+    )
+    response_status, _, response_body = request_http(
+        'POST',
+        f'{BASE_URL}/v1/responses',
+        api_key,
+        {
+            'model': success_model,
+            'input': 'Return a short reply.',
+            'stream': True,
+        },
+        extra_headers={'Accept': 'text/event-stream'},
+    )
+    response_stream = response_body.decode('utf-8', errors='replace')
+    if response_status != 200:
+        raise RuntimeError(
+            f'Responses via Chat request failed: {response_status} {response_stream!r}'
+        )
+    if 'response.completed' not in response_stream:
+        raise RuntimeError(f'Responses via Chat stream did not complete: {response_stream!r}')
+    if 'response.failed' in response_stream or 'event: error' in response_stream:
+        raise RuntimeError(f'Responses via Chat stream emitted an error: {response_stream!r}')
+    mock_stats = request_json('GET', f'{MOCK_URL}/__admin/stats')
+    success_upstream_request = next(
+        (
+            item for item in reversed(mock_stats.get('recent_requests', []))
+            if item.get('method') == 'POST' and item.get('model') == success_model
+        ),
+        None,
+    )
+    if success_upstream_request is None:
+        raise RuntimeError('mock did not record the successful Responses via Chat request')
+    if success_upstream_request.get('path') != '/bridge/api/coding/v3/chat/completions':
+        raise RuntimeError(
+            f'Responses request reached the wrong upstream path: {success_upstream_request!r}'
+        )
+    if success_upstream_request.get('stream') is not True:
+        raise RuntimeError(
+            f'Codex-compatible streaming flag was not preserved: {success_upstream_request!r}'
+        )
+
+    default_models = request_json(
+        'GET',
+        f'{BASE_URL}/v1/models',
+        api_key,
+    )
+    response_models = request_json(
+        'GET',
+        f'{BASE_URL}/v1/models?api_format=responses',
+        api_key,
+    )
+    default_model_ids = {item.get('id') for item in default_models.get('data', [])}
+    response_model_ids = {item.get('id') for item in response_models.get('data', [])}
+    if default_model_ids != response_model_ids:
+        raise RuntimeError(
+            f'Model registry changed with api_format query: '
+            f'default={default_models!r} responses={response_models!r}'
+        )
+    if success_model not in response_model_ids:
+        raise RuntimeError(
+            f'Responses model list omitted Chat-converted model: {response_models!r}'
+        )
+
+    disabled_conversion_model = 'kimi-k3-no-conversion'
+    configure_responses_via_chat_provider(
+        admin_token,
+        'reg-responses-via-chat-disabled',
+        disabled_conversion_model,
+        f'{MOCK_URL}/bridge/api/coding/v3',
+        enable_conversion=False,
+    )
+    disabled_status, _, disabled_body = request_http(
+        'POST',
+        f'{BASE_URL}/v1/responses',
+        api_key,
+        {
+            'model': disabled_conversion_model,
+            'input': 'This request must not reach the upstream.',
+            'stream': False,
+        },
+    )
+    disabled_error = json.loads(disabled_body.decode('utf-8'))
+    if disabled_status != 400:
+        raise RuntimeError(
+            f'Disabled Responses conversion returned wrong status: '
+            f'{disabled_status} {disabled_error!r}'
+        )
+    error_payload = disabled_error.get('error') or {}
+    if error_payload.get('code') != 'model_protocol_unsupported':
+        raise RuntimeError(
+            f'Disabled Responses conversion returned wrong error code: {disabled_error!r}'
+        )
+    reasons = (error_payload.get('details') or {}).get('reasons') or []
+    if not any(item.get('code') == 'responses_via_chat_disabled' for item in reasons):
+        raise RuntimeError(
+            f'Disabled Responses conversion omitted its routing reason: {disabled_error!r}'
+        )
+    mock_stats = request_json('GET', f'{MOCK_URL}/__admin/stats')
+    if any(
+        item.get('method') == 'POST' and item.get('model') == disabled_conversion_model
+        for item in mock_stats.get('recent_requests', [])
+    ):
+        raise RuntimeError('Protocol-rejected request unexpectedly reached the upstream')
+
+    error_model = 'kimi-k3-error'
+    failing = configure_responses_via_chat_provider(
+        admin_token,
+        'reg-responses-via-chat-error',
+        error_model,
+        f'{MOCK_URL}/bridge/api/coding/v3',
+    )
+    request_json(
+        'PATCH',
+        f'{BASE_URL}/api/v1/endpoints/{failing["endpoint_id"]}',
+        admin_token,
+        {'baseUrl': f'{MOCK_URL}/model-error/api/coding/v3'},
+    )
+    expected_error = {
+        'error': {
+            'message': f'Model "{error_model}" is not supported by any configured account in this group',
+            'type': 'model_not_found',
+        },
+    }
+    error_statuses = []
+    for _ in range(4):
+        status, _, body = request_http(
+            'POST',
+            f'{BASE_URL}/v1/responses',
+            api_key,
+            {
+                'model': error_model,
+                'input': 'Return a short reply.',
+                'stream': False,
+            },
+        )
+        parsed = json.loads(body.decode('utf-8'))
+        if status != 502 or parsed != expected_error:
+            raise RuntimeError(
+                f'Chat upstream error was not preserved on attempt {len(error_statuses) + 1}: '
+                f'{status} {parsed!r}'
+            )
+        error_statuses.append(status)
+
+    mock_stats = request_json('GET', f'{MOCK_URL}/__admin/stats')
+    error_upstream_request = next(
+        (
+            item for item in reversed(mock_stats.get('recent_requests', []))
+            if item.get('method') == 'POST' and item.get('model') == error_model
+        ),
+        None,
+    )
+    if error_upstream_request is None:
+        raise RuntimeError('mock did not record the failing Responses via Chat request')
+    if error_upstream_request.get('path') != '/model-error/api/coding/v3/chat/completions':
+        raise RuntimeError(
+            f'Failing Responses request reached the wrong upstream path: {error_upstream_request!r}'
+        )
+
+    providers = request_json('GET', f'{BASE_URL}/api/v1/providers', admin_token)
+    failing_provider = next(
+        (item for item in providers if item.get('id') == failing['provider_id']),
+        None,
+    )
+    if failing_provider is None:
+        raise RuntimeError('failing Chat bridge provider disappeared from provider inventory')
+    runtime = failing_provider.get('runtime') or {}
+    if runtime.get('state') != 'closed' or runtime.get('consecutive_failures') != 0:
+        raise RuntimeError(f'model-scoped 502 incorrectly tripped provider circuit: {runtime!r}')
+
+    time.sleep(0.8)
+    logs = request_json('GET', f'{BASE_URL}/api/v1/logs?page=1&page_size=100', admin_token)
+    success_log = next((item for item in logs if item.get('model') == success_model), None)
+    error_log = next((item for item in logs if item.get('model') == error_model), None)
+    for label, item in [('success', success_log), ('error', error_log)]:
+        if item is None or item.get('api_format') != 'responses':
+            raise RuntimeError(f'missing Responses via Chat {label} log: {item!r}')
+        if item.get('upstream_api_format') != 'chat_completions':
+            raise RuntimeError(f'{label} log recorded wrong upstream API format: {item!r}')
+        if item.get('provider_id') is None or item.get('endpoint_id') is None:
+            raise RuntimeError(f'{label} log omitted resolved upstream target: {item!r}')
+    if success_log.get('http_status') != 200 or success_log.get('error_type') is not None:
+        raise RuntimeError(f'successful Codex-compatible request was logged as an error: {success_log!r}')
+    if error_log.get('http_status') != 502:
+        raise RuntimeError(f'upstream model error log lost its original status: {error_log!r}')
+    if error_log.get('error_type') != 'model_not_found':
+        raise RuntimeError(f'upstream model error log lost its error type: {error_log!r}')
+
+    return {
+        'success_status': response_status,
+        'success_stream_completed': True,
+        'success_log_error_type': success_log.get('error_type'),
+        'success_upstream_path': success_upstream_request.get('path'),
+        'model_registry_protocol_independent': default_model_ids == response_model_ids,
+        'disabled_conversion_error': disabled_error,
+        'error_statuses': error_statuses,
+        'error_body': expected_error,
+        'error_upstream_path': error_upstream_request.get('path'),
+        'error_provider_runtime': runtime,
+    }
+
+
+def verify_global_model_registry(admin_token, default_api_key):
+    model = 'isolated-responses-model'
+    group_id = extract_id(request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/provider-groups',
+        admin_token,
+        {'name': 'reg-isolated-group'},
+    ))
+    provider_id = extract_id(request_json('POST', f'{BASE_URL}/api/v1/providers', admin_token, {
+        'name': 'reg-isolated-responses',
+        'providerType': 'openai_compatible_responses',
+        'enabled': True,
+        'priority': 10,
+        'weight': 1,
+        'groups': [{'groupId': group_id}],
+    }))
+    request_json('POST', f'{BASE_URL}/api/v1/providers/{provider_id}/endpoints', admin_token, {
+        'name': 'isolated-responses-endpoint',
+        'baseUrl': f'{MOCK_URL}/isolated/api/coding/v3',
+        'enabled': True,
+        'priority': 10,
+        'weight': 1,
+    })
+    key_id = extract_id(request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/providers/{provider_id}/keys',
+        admin_token,
+        {
+            'name': 'isolated-responses-key',
+            'secret': 'good-key',
+            'enabled': True,
+            'priority': 10,
+            'weight': 1,
+        },
+    ))
+    provider_models = request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/providers/{provider_id}/models/sync',
+        admin_token,
+        {},
+    )
+    if not any(item.get('upstream_model') == model for item in provider_models):
+        raise RuntimeError(f'isolated provider did not register {model}: {provider_models!r}')
+    key_models = request_json(
+        'POST',
+        f'{BASE_URL}/api/v1/keys/{key_id}/models/sync',
+        admin_token,
+        {},
+    )
+    if not any(item.get('model_name') == model and item.get('enabled') for item in key_models):
+        raise RuntimeError(f'isolated key did not register {model}: {key_models!r}')
+    request_json('PUT', f'{BASE_URL}/api/v1/routes/{model}', admin_token, {
+        'enabled': True,
+        'providerIds': [provider_id],
+    })
+
+    isolated_client = request_json('POST', f'{BASE_URL}/api/v1/api-keys', admin_token, {
+        'name': 'reg-isolated-client',
+        'enabled': True,
+        'logEnabled': True,
+        'providerGroupIds': [group_id],
+    })
+    isolated_api_key = extract_api_key(isolated_client)
+
+    default_models = request_json('GET', f'{BASE_URL}/v1/models', default_api_key)
+    isolated_models = request_json('GET', f'{BASE_URL}/v1/models', isolated_api_key)
+    default_ids = {item.get('id') for item in default_models.get('data', [])}
+    isolated_ids = {item.get('id') for item in isolated_models.get('data', [])}
+    if default_ids != isolated_ids or model not in default_ids:
+        raise RuntimeError(
+            f'global model registry differs by API key group: '
+            f'default={default_models!r} isolated={isolated_models!r}'
+        )
+
+    denied_status, _, denied_body = request_http(
+        'POST',
+        f'{BASE_URL}/v1/responses',
+        default_api_key,
+        {'model': model, 'input': 'default group must be denied'},
+    )
+    denied_error = json.loads(denied_body.decode('utf-8'))
+    if denied_status != 403 or (denied_error.get('error') or {}).get('code') != 'model_not_authorized':
+        raise RuntimeError(
+            f'global registry group denial was not explicit: {denied_status} {denied_error!r}'
+        )
+
+    allowed_status, _, allowed_body = request_http(
+        'POST',
+        f'{BASE_URL}/v1/responses',
+        isolated_api_key,
+        {'model': model, 'input': 'isolated group request'},
+    )
+    if allowed_status != 200:
+        raise RuntimeError(
+            f'isolated group could not execute its registered model: '
+            f'{allowed_status} {allowed_body!r}'
+        )
+
+    return {
+        'model': model,
+        'registry_count': len(default_ids),
+        'same_registry_for_distinct_groups': default_ids == isolated_ids,
+        'unauthorized_status': denied_status,
+        'unauthorized_error': denied_error,
+        'authorized_status': allowed_status,
+    }
+
+
 def seed_expired_rows():
     now_ms = int(time.time() * 1000)
     old_ms = now_ms - 3 * 86400 * 1000
@@ -256,6 +723,11 @@ def main():
         '--route', '/bad/api/coding/v3|429|rate limited||0|chat',
         '--route', '/good/api/coding/v3|200|good endpoint||0|chat',
         '--route', '/key/api/coding/v3|200|key ok|good-key|0|chat',
+        '--route', '/bridge/api/coding/v3|200|bridge ok|good-key|0|chat',
+        '--route', '/isolated/api/coding/v3|200|isolated responses ok|good-key|0|responses',
+        '--route', '/model-error/api/coding/v3|502|Model "kimi-k3-error" is not supported by any configured account in this group|good-key|0|chat|model_not_found',
+        '--models-chat', 'gpt-4o-mini,gpt-4.1-mini,kimi-k3,kimi-k3-no-conversion,kimi-k3-error',
+        '--models-responses', 'isolated-responses-model',
     ], log_name='regression_mock.log')
 
     gateway_env = os.environ.copy()
@@ -284,6 +756,9 @@ def main():
         wait_http(f'{BASE_URL}/readyz')
 
         api_key = bootstrap_main_provider('adm')
+        model_sync_passthrough = verify_model_sync_error_passthrough('adm')
+        responses_via_chat = verify_responses_via_chat_routing('adm', api_key)
+        global_model_registry = verify_global_model_registry('adm', api_key)
 
         bench = run_cmd([
             'python3', 'scripts/bench_gateway.py',
@@ -329,7 +804,10 @@ def main():
         unexpected_paths = [
             item.get('path')
             for item in proxy_requests
-            if not str(item.get('path')).endswith('/api/coding/v3/chat/completions')
+            if not (
+                str(item.get('path')).endswith('/api/coding/v3/chat/completions')
+                or str(item.get('path')).endswith('/api/coding/v3/responses')
+            )
         ]
         if unexpected_paths:
             raise RuntimeError(f'unexpected custom-prefix upstream paths: {unexpected_paths}')
@@ -347,6 +825,9 @@ def main():
             'failover_endpoint': failover_endpoint,
             'failover_key': failover_key,
             'upstream_requests': upstream_requests,
+            'model_sync_passthrough': model_sync_passthrough,
+            'responses_via_chat': responses_via_chat,
+            'global_model_registry': global_model_registry,
             'pricing_contract': {
                 'logs_have_pricing': bool(logs_payload) and 'pricing' in logs_payload[0],
                 'logs_have_cost_fields': bool(logs_payload) and any(key.startswith('cost_') for key in logs_payload[0]),
