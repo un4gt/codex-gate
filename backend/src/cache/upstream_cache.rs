@@ -6,6 +6,7 @@ use parking_lot::RwLock;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::cache::policy::UpstreamCachePolicy;
+use crate::codex_oauth::CodexOAuthRoutingAccount;
 use crate::db::Database;
 use crate::pricing::PriceVersion;
 use crate::types::{
@@ -26,6 +27,7 @@ pub struct UpstreamSnapshot {
     pub alias_targets_by_alias: HashMap<i64, Vec<ModelAliasTarget>>,
     pub key_models_by_key: HashMap<i64, HashMap<String, bool>>,
     pub globally_disabled_models: HashSet<String>,
+    pub codex_oauth_by_key: HashMap<i64, CodexOAuthRoutingAccount>,
     pub model_registry_ids: Vec<String>,
     pub provider_prices_by_model: HashMap<i64, HashMap<String, PriceVersion>>,
     pub global_prices_by_model: HashMap<String, PriceVersion>,
@@ -92,10 +94,15 @@ impl UpstreamSnapshot {
                 if !state.is_active() || !self.is_model_globally_enabled(upstream_model) {
                     continue;
                 }
-                if !keys
-                    .iter()
-                    .any(|key| key.enabled && self.key_allows_model(key.id, upstream_model))
-                {
+                if !keys.iter().any(|key| {
+                    key.enabled
+                        && self.key_allows_model(key.id, upstream_model)
+                        && (provider.provider_type != crate::codex_oauth::PROVIDER_TYPE
+                            || self
+                                .codex_oauth_by_key
+                                .get(&key.id)
+                                .is_some_and(|account| account.is_routable(crate::util::now_ms())))
+                }) {
                     continue;
                 }
                 ids.insert(upstream_model.clone());
@@ -249,6 +256,10 @@ impl UpstreamCache {
             .list_upstream_keys(master_key)
             .await
             .map_err(|e| e.to_string())?;
+        let codex_accounts = db
+            .list_codex_oauth_accounts(master_key)
+            .await
+            .map_err(|e| e.to_string())?;
         let endpoints = db
             .list_upstream_endpoints()
             .await
@@ -283,6 +294,10 @@ impl UpstreamCache {
                 .or_default()
                 .push(key);
         }
+        let codex_oauth_by_key = codex_accounts
+            .into_iter()
+            .map(|account| (account.upstream_key_id, account.routing()))
+            .collect::<HashMap<_, _>>();
         let mut endpoints_by_provider: HashMap<i64, Vec<UpstreamEndpoint>> = HashMap::new();
         for endpoint in endpoints {
             endpoints_by_provider
@@ -402,6 +417,7 @@ impl UpstreamCache {
             alias_targets_by_alias,
             key_models_by_key,
             globally_disabled_models,
+            codex_oauth_by_key,
             model_registry_ids: Vec::new(),
             provider_prices_by_model,
             global_prices_by_model,
@@ -451,6 +467,7 @@ mod tests {
             alias_targets_by_alias: HashMap::new(),
             key_models_by_key: HashMap::new(),
             globally_disabled_models: HashSet::new(),
+            codex_oauth_by_key: HashMap::new(),
             model_registry_ids: Vec::new(),
             provider_prices_by_model,
             global_prices_by_model,

@@ -4,6 +4,7 @@ import { StyledEngineProvider, ThemeProvider } from '@mui/material/styles';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
 import Root from '@/App';
+import { CodexOAuthLoginDialog } from '@/components/CodexOAuthPanel';
 import { LogsPage } from '@/components/LogsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { ModelsPage } from '@/components/ModelsPage';
@@ -76,6 +77,94 @@ function providerWorkspaceWithConnection(): ProviderWorkspace {
       enabled: true,
       priority: 100,
       weight: 1,
+    }],
+  };
+}
+
+function codexProviderWorkspace(): ProviderWorkspace {
+  return {
+    provider: {
+      ...providerWorkspace().provider,
+      id: 17,
+      name: 'Codex Accounts',
+      provider_type: 'openai_codex_oauth',
+      websocket_enabled: true,
+      beta_features: ['responses-http-to-ws'],
+    },
+    endpoints: [{
+      id: 171,
+      provider_id: 17,
+      name: 'Codex',
+      base_url: 'https://chatgpt.com/backend-api/codex',
+      enabled: true,
+      priority: 100,
+      weight: 1,
+    }],
+    keys: [{
+      id: 172,
+      provider_id: 17,
+      name: 'Primary account',
+      enabled: true,
+      priority: 100,
+      weight: 1,
+      auth_kind: 'codex_oauth',
+      codex_oauth: {
+        upstream_key_id: 172,
+        provider_id: 17,
+        email_masked: 'o***@example.com',
+        account_id_suffix: '…1234',
+        plan_type: 'plus',
+        token_expires_at_ms: 2_000_000_000_000,
+        last_refresh_at_ms: 1_900_000_000_000,
+        auth_status: 'active',
+        last_error: null,
+        quota_checked_at_ms: 1_900_000_100_000,
+        quota: {
+          plan_type: 'plus',
+          allowed: true,
+          primary_window: {
+            used_percent: 25,
+            remaining_percent: 75,
+            window_seconds: 18_000,
+            reset_at_ms: 2_000_000_100_000,
+          },
+          secondary_window: {
+            used_percent: 40,
+            remaining_percent: 60,
+            window_seconds: 2_592_000,
+            reset_at_ms: 2_000_100_000_000,
+          },
+          code_review_window: null,
+          credits: {
+            has_credits: true,
+            unlimited: false,
+            balance: 12.5,
+            reset_credits: 20,
+            subscription_end_at_ms: 2_010_000_000_000,
+          },
+        },
+      },
+    }, {
+      id: 173,
+      provider_id: 17,
+      name: 'Secondary account',
+      enabled: false,
+      priority: 110,
+      weight: 1,
+      auth_kind: 'codex_oauth',
+      codex_oauth: {
+        upstream_key_id: 173,
+        provider_id: 17,
+        email_masked: 's***@example.com',
+        account_id_suffix: '…5678',
+        plan_type: 'team',
+        token_expires_at_ms: null,
+        last_refresh_at_ms: null,
+        auth_status: 'forbidden',
+        last_error: 'workspace deactivated',
+        quota: null,
+        quota_checked_at_ms: null,
+      },
     }],
   };
 }
@@ -193,6 +282,195 @@ describe('admin console smoke test', () => {
     expect(requests).toContain('POST /api/v1/providers/9/endpoints');
     expect(requests).toContain('POST /api/v1/providers/9/keys');
     expect(requests).toContain('POST /api/v1/providers/9/models/sync');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('creates a Codex OAuth provider without an API key and polls device login', async () => {
+    let providerPayload: Record<string, unknown> | null = null;
+    let endpointPayload: Record<string, unknown> | null = null;
+    let sessionStarts = 0;
+    let sessionPolls = 0;
+    const requests: string[] = [];
+    const refreshMessages: string[] = [];
+    const messages: string[] = [];
+    const writeText = rs.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const path = new URL(url).pathname;
+      const method = init?.method ?? 'GET';
+      requests.push(`${method} ${path}`);
+      if (method === 'POST' && path === '/api/v1/providers') {
+        providerPayload = JSON.parse(String(init?.body));
+        return jsonResponse({ id: 19 });
+      }
+      if (method === 'POST' && path === '/api/v1/providers/19/endpoints') {
+        endpointPayload = JSON.parse(String(init?.body));
+        return jsonResponse({ id: 191 });
+      }
+      if (method === 'POST' && path === '/api/v1/providers/19/codex-oauth/sessions') {
+        sessionStarts += 1;
+        return jsonResponse({
+          session_id: 'oauth-session-1',
+          status: 'pending',
+          verification_uri: 'https://auth.openai.com/codex/device',
+          user_code: 'ABCD-EFGH',
+          expires_at_ms: Date.now() + 60_000,
+          poll_interval_ms: 1,
+        });
+      }
+      if (method === 'GET' && path === '/api/v1/codex-oauth/sessions/oauth-session-1') {
+        sessionPolls += 1;
+        return jsonResponse({
+          session_id: 'oauth-session-1',
+          status: 'completed',
+          verification_uri: 'https://auth.openai.com/codex/device',
+          expires_at_ms: Date.now() + 60_000,
+          poll_interval_ms: 1,
+          key_id: 192,
+          operation: 'created',
+          warnings: ['quota: temporarily unavailable'],
+        });
+      }
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(
+      <ProvidersPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        items={[]}
+        onRefresh={async message => {
+          refreshMessages.push(message ?? '');
+        }}
+        onMessage={message => messages.push(message)}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
+    fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Codex Prod' } });
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Type' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'OpenAI Codex OAuth' }));
+
+    expect(screen.queryByPlaceholderText('sk-...')).toBeNull();
+    expect((screen.getByPlaceholderText('https://api.example.com/v1') as HTMLInputElement).value)
+      .toBe('https://chatgpt.com/backend-api/codex');
+    fireEvent.click(screen.getByRole('button', { name: 'Create and Sign In' }));
+
+    expect(await screen.findByText('ABCD-EFGH')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Code' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('ABCD-EFGH'));
+    expect(messages).toContain('Verification code copied.');
+    expect(await screen.findByText('Sign-In Complete')).toBeTruthy();
+    expect(await screen.findByText('Post-Login Checks Reported Warnings')).toBeTruthy();
+    expect(providerPayload).toMatchObject({
+      provider_type: 'openai_codex_oauth',
+      websocket_enabled: true,
+      beta_features: ['responses-http-to-ws'],
+    });
+    expect(endpointPayload).toMatchObject({
+      base_url: 'https://chatgpt.com/backend-api/codex',
+    });
+    expect(sessionStarts).toBe(1);
+    expect(sessionPolls).toBe(1);
+    expect(requests.some(request => request.endsWith('/keys'))).toBe(false);
+    expect(requests.some(request => request.endsWith('/models/sync'))).toBe(false);
+    expect(refreshMessages).toEqual(expect.arrayContaining([
+      'Provider Codex Prod was created. Complete Codex device login to continue.',
+      'The Codex OAuth account was created.',
+    ]));
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending Codex device login and clears the dialog', async () => {
+    let cancelledSession = '';
+    let closed = false;
+    fetchRequest.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const method = init?.method ?? 'GET';
+      if (method === 'POST') {
+        return jsonResponse({
+          session_id: 'oauth-session-cancel',
+          status: 'pending',
+          verification_uri: 'https://auth.openai.com/codex/device',
+          user_code: 'CANCEL-ME',
+          expires_at_ms: Date.now() + 60_000,
+          poll_interval_ms: 60_000,
+        });
+      }
+      if (method === 'DELETE') {
+        cancelledSession = path;
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(
+      <CodexOAuthLoginDialog
+        open
+        attemptId={1}
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        providerId={19}
+        replaceKeyId={null}
+        onClose={() => { closed = true; }}
+        onCompleted={() => undefined}
+        onMessage={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText('CANCEL-ME')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(closed).toBe(true));
+    expect(cancelledSession).toBe('/api/v1/codex-oauth/sessions/oauth-session-cancel');
+  });
+
+  it('renders Codex accounts without batch controls and calls per-account APIs', async () => {
+    const requests: string[] = [];
+    const confirmDelete = rs.spyOn(window, 'confirm').mockReturnValue(true);
+    fetchRequest.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const method = init?.method ?? 'GET';
+      requests.push(`${method} ${path}`);
+      if (method === 'POST' && path.endsWith('/quota/refresh')) return jsonResponse({});
+      if (method === 'PATCH') return jsonResponse({ ok: true });
+      if (method === 'DELETE') return new Response(null, { status: 204 });
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(
+      <ProvidersPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        items={[codexProviderWorkspace()]}
+        onRefresh={async () => undefined}
+        onMessage={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('Codex Accounts'));
+    expect(await screen.findByRole('heading', { name: 'OAuth Accounts' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'API Keys' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Key Model Restrictions' })).toBeNull();
+    expect(screen.queryByText(/select all/i)).toBeNull();
+    expect(screen.getByText('5-Hour Quota')).toBeTruthy();
+    expect(screen.getByText('30-Day Quota')).toBeTruthy();
+    expect(screen.getByText('Credits Balance')).toBeTruthy();
+    expect(screen.getByText('Forbidden')).toBeTruthy();
+    expect(screen.getByText('Disabled')).toBeTruthy();
+
+    const primaryCard = screen.getByRole('heading', { name: 'o***@example.com' }).closest('.MuiCard-root');
+    const secondaryCard = screen.getByRole('heading', { name: 's***@example.com' }).closest('.MuiCard-root');
+    expect(primaryCard).toBeTruthy();
+    expect(secondaryCard).toBeTruthy();
+    fireEvent.click(within(primaryCard as HTMLElement).getByRole('button', { name: 'Refresh Quota' }));
+    await waitFor(() => expect(requests).toContain('POST /api/v1/keys/172/codex-oauth/quota/refresh'));
+    fireEvent.click(within(secondaryCard as HTMLElement).getByRole('button', { name: 'Enable' }));
+    await waitFor(() => expect(requests).toContain('PATCH /api/v1/keys/173'));
+    fireEvent.click(within(primaryCard as HTMLElement).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(requests).toContain('DELETE /api/v1/keys/172'));
+    expect(confirmDelete).toHaveBeenCalledWith('Delete OAuth account Primary account?');
+    confirmDelete.mockRestore();
     expect(consoleError).not.toHaveBeenCalled();
   });
 

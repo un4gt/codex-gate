@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{Sink, SinkExt, StreamExt};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
 use hyper::header::{
     ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
@@ -36,6 +36,7 @@ type UpstreamWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const UPSTREAM_RESPONSES_PATH: &str = "/responses";
 const RESPONSES_WS_BETA: &str = "responses_websockets=2026-02-06";
 const BETA_FEATURE_RESPONSES_HTTP_TO_WS: &str = "responses-http-to-ws";
+const CODEX_ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 struct WsContext {
@@ -460,6 +461,13 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     };
                     let mut routed_value = original_value.clone();
                     normalize_response_create(&mut routed_value, &selected.resolved.upstream_model);
+                    if selected.resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+                    {
+                        crate::codex_oauth::normalize_response_create_value(
+                            &mut routed_value,
+                            &selected.resolved.upstream_model,
+                        );
+                    }
                     let payload = match serde_json::to_string(&routed_value) {
                         Ok(payload) => payload,
                         Err(err) => {
@@ -854,8 +862,79 @@ async fn connect_upstream_ws_once(
         }
     };
 
-    let headers = build_upstream_ws_headers(&ctx.request_headers, &resolved.key.secret);
-    match connect_upstream_ws(&ctx.state, &ws_url, &headers).await {
+    let prepared_codex_auth =
+        if resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE {
+            match ctx
+                .state
+                .codex_oauth
+                .prepare_auth(&ctx.state, resolved.key.id, false)
+                .await
+            {
+                Ok(auth) => Some(auth),
+                Err(error) => {
+                    reservation.finish(
+                        proxy::AttemptOutcome::upstream_response(
+                            error.http_status().as_u16() as i32,
+                            Some(error.code),
+                            Some(&error.message),
+                            Some(start.elapsed().as_millis() as i64),
+                        ),
+                        &ctx.state.metrics,
+                    );
+                    return NativeWsConnectOutcome::Unavailable(WsBridgeError {
+                        status: error.http_status(),
+                        error_type: error.code,
+                        message: error.message,
+                        scope: proxy::FailureScope::Key,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+    let upstream_secret = prepared_codex_auth
+        .as_ref()
+        .map_or(resolved.key.secret.as_str(), |auth| {
+            auth.access_token.as_str()
+        });
+    let mut headers = build_upstream_ws_headers(&ctx.request_headers, upstream_secret);
+    if let Some(auth) = prepared_codex_auth.as_ref() {
+        crate::codex_oauth::apply_codex_headers(&mut headers, auth);
+    }
+    let mut connected = connect_upstream_ws(&ctx.state, &ws_url, &headers).await;
+    if connected
+        .as_ref()
+        .is_err_and(|error| error.status == StatusCode::UNAUTHORIZED)
+        && resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+        && let Ok(refreshed) = ctx
+            .state
+            .codex_oauth
+            .prepare_auth(&ctx.state, resolved.key.id, true)
+            .await
+    {
+        let mut retry_headers =
+            build_upstream_ws_headers(&ctx.request_headers, &refreshed.access_token);
+        crate::codex_oauth::apply_codex_headers(&mut retry_headers, &refreshed);
+        connected = connect_upstream_ws(&ctx.state, &ws_url, &retry_headers).await;
+    }
+    if connected
+        .as_ref()
+        .is_err_and(|error| error.status == StatusCode::UNAUTHORIZED)
+        && resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+    {
+        let _ = ctx
+            .state
+            .db
+            .update_codex_auth_status(
+                resolved.key.id,
+                crate::codex_oauth::AUTH_STATUS_REAUTH_REQUIRED,
+                Some("upstream websocket rejected the refreshed access token"),
+                util::now_ms(),
+            )
+            .await;
+        ctx.state.caches.upstream.invalidate();
+    }
+    match connected {
         Ok(ws) => {
             ctx.state
                 .caches
@@ -1292,6 +1371,9 @@ where
                     && is_terminal_response_event(event)
                 {
                     let (status, error_type, error_message) = terminal_status(event);
+                    if let Ok(bytes) = serde_json::to_vec(event) {
+                        observe_codex_account_error(&ctx.state, resolved, status, &bytes).await;
+                    }
                     let outcome = TurnOutcome::from_parts(
                         status,
                         error_type,
@@ -1580,18 +1662,106 @@ where
         }
     };
 
+    let is_codex_oauth = resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE;
+    let prepared_codex_auth = if is_codex_oauth {
+        match ctx
+            .state
+            .codex_oauth
+            .prepare_auth(&ctx.state, resolved.key.id, false)
+            .await
+        {
+            Ok(auth) => Some(auth),
+            Err(error) => {
+                let outcome = TurnOutcome::upstream_response_error(
+                    error.http_status(),
+                    error.code,
+                    error.message.clone(),
+                    turn_start,
+                );
+                record_turn(
+                    ctx,
+                    resolved,
+                    requested_model,
+                    TurnTransport::HttpBridge,
+                    &outcome,
+                    telemetry_permit,
+                    Some(reservation),
+                );
+                return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                    status: error.http_status(),
+                    error_type: error.code,
+                    message: error.message,
+                    scope: proxy::FailureScope::Key,
+                });
+            }
+        }
+    } else {
+        None
+    };
+    let upstream_secret = prepared_codex_auth
+        .as_ref()
+        .map_or(resolved.key.secret.as_str(), |auth| {
+            auth.access_token.as_str()
+        });
     let mut headers =
-        build_upstream_http_bridge_headers(&ctx.request_headers, &resolved.key.secret, body.len());
-    let response = proxy::dispatch_upstream_request(
+        build_upstream_http_bridge_headers(&ctx.request_headers, upstream_secret, body.len());
+    if let Some(auth) = prepared_codex_auth.as_ref() {
+        crate::codex_oauth::apply_codex_headers(&mut headers, auth);
+    }
+    let mut response = proxy::dispatch_upstream_request(
         &ctx.state,
         &Method::POST,
         hyper::Version::HTTP_11,
         &headers,
-        body,
-        upstream_uri,
+        body.clone(),
+        upstream_uri.clone(),
     )
     .await;
+    if is_codex_oauth
+        && response
+            .as_ref()
+            .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
+        && let Ok(refreshed) = ctx
+            .state
+            .codex_oauth
+            .prepare_auth(&ctx.state, resolved.key.id, true)
+            .await
+    {
+        let mut retry_headers = build_upstream_http_bridge_headers(
+            &ctx.request_headers,
+            &refreshed.access_token,
+            body.len(),
+        );
+        crate::codex_oauth::apply_codex_headers(&mut retry_headers, &refreshed);
+        response = proxy::dispatch_upstream_request(
+            &ctx.state,
+            &Method::POST,
+            hyper::Version::HTTP_11,
+            &retry_headers,
+            body,
+            upstream_uri,
+        )
+        .await;
+        retry_headers.clear();
+    }
     headers.clear();
+    if is_codex_oauth
+        && response
+            .as_ref()
+            .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
+    {
+        let _ = ctx
+            .state
+            .db
+            .update_codex_auth_status(
+                resolved.key.id,
+                crate::codex_oauth::AUTH_STATUS_REAUTH_REQUIRED,
+                Some("HTTP bridge rejected the refreshed access token"),
+                util::now_ms(),
+            )
+            .await;
+        ctx.state.caches.upstream.invalidate();
+    }
 
     let upstream_resp = match response {
         Ok(response) => response,
@@ -1628,6 +1798,20 @@ where
         ctx.state.config.rate_limit_fallback_cooldown,
     );
     if proxy::should_retry_response_status(status_i32) {
+        if is_codex_oauth
+            && matches!(
+                status,
+                StatusCode::FORBIDDEN
+                    | StatusCode::PAYMENT_REQUIRED
+                    | StatusCode::TOO_MANY_REQUESTS
+            )
+            && let Ok(collected) =
+                Limited::new(upstream_resp.into_body(), CODEX_ERROR_BODY_MAX_BYTES)
+                    .collect()
+                    .await
+        {
+            observe_codex_account_error(&ctx.state, resolved, status, &collected.to_bytes()).await;
+        }
         let message = format!("retryable upstream HTTP bridge status {status_i32}");
         let outcome = TurnOutcome::upstream_response_error(
             status,
@@ -1979,6 +2163,39 @@ where
         ForwardResult::Complete
     } else {
         ForwardResult::Fatal
+    }
+}
+
+async fn observe_codex_account_error(
+    state: &SharedState,
+    resolved: &ResolvedUpstream,
+    status: StatusCode,
+    body: &[u8],
+) {
+    if resolved.provider.provider_type != crate::codex_oauth::PROVIDER_TYPE {
+        return;
+    }
+    let now_ms = util::now_ms();
+    if status == StatusCode::FORBIDDEN && crate::codex_oauth::is_account_forbidden_error(body) {
+        let _ = state
+            .db
+            .update_codex_auth_status(
+                resolved.key.id,
+                crate::codex_oauth::AUTH_STATUS_FORBIDDEN,
+                Some("Codex entitlement or workspace access was denied"),
+                now_ms,
+            )
+            .await;
+        state.caches.upstream.invalidate();
+    }
+    if matches!(
+        status,
+        StatusCode::PAYMENT_REQUIRED | StatusCode::TOO_MANY_REQUESTS
+    ) && let Some(reset_at_ms) = crate::codex_oauth::quota_reset_hint_from_error(body, now_ms)
+    {
+        state
+            .quota
+            .set_cooldown_until(resolved.key.id, reset_at_ms, now_ms);
     }
 }
 

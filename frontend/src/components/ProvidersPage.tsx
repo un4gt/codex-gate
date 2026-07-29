@@ -5,6 +5,7 @@ import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import { CodexOAuthLoginDialog, CodexOAuthPanel } from '@/components/CodexOAuthPanel';
 import { t } from '@/lib/i18n';
 import { addUpstreamKeyModels, createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, loadUpstreamKeyModels, resetProviderCircuit, syncProviderModels, syncUpstreamKeyModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateUpstreamKeyModel, updateProviderKey } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
@@ -110,6 +111,10 @@ const PROVIDER_TYPE_OPTIONS = [{
   label: 'OpenAI',
   description: '官方 OpenAI 服务'
 }, {
+  value: 'openai_codex_oauth',
+  label: 'OpenAI Codex OAuth',
+  description: '通过设备登录连接 ChatGPT Codex，仅支持 Responses 协议'
+}, {
   value: 'openai_compatible',
   label: 'OpenAI Compatible',
   description: '兼容 OpenAI 协议的第三方或自建服务'
@@ -118,6 +123,8 @@ const PROVIDER_TYPE_OPTIONS = [{
   label: 'OpenAI Compatible (Responses)',
   description: '仅用于响应式接口的兼容服务'
 }] as const;
+const CODEX_PROVIDER_TYPE = 'openai_codex_oauth';
+const CODEX_DEFAULT_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 const BETA_FEATURE_RESPONSES_HTTP_TO_WS = 'responses-http-to-ws';
 function providerHasBetaFeature(item: ProviderWorkspace, feature: string) {
   return item.provider.beta_features?.includes(feature) ?? false;
@@ -139,6 +146,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const [createResources, setCreateResources] = useState<CreatedProviderResources | null>(null);
   const [createSyncedCount, setCreateSyncedCount] = useState<number | null>(null);
   const [createFormVersion, setCreateFormVersion] = useState(0);
+  const [createdCodexLogin, setCreatedCodexLogin] = useState<{
+    providerId: number;
+    attemptId: number;
+  } | null>(null);
+  const createdCodexLoginSequenceRef = useRef(0);
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
   const [providerTypeDraft, setProviderTypeDraft] = useState('');
   const [providerPriorityDraft, setProviderPriorityDraft] = useState('');
@@ -158,6 +170,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
   } | null>(null);
   const selected = props.items.find(item => item.provider.id === selectedProviderId) ?? null;
   const [createProviderType, setCreateProviderType] = useState<string>('openai');
+  const isCreateCodex = createProviderType === CODEX_PROVIDER_TYPE;
   const createPriorityValue = parseProviderRoutingValue(createPriority, 0);
   const createWeightValue = parseProviderRoutingValue(createWeight, 1);
   const providerPriorityValue = parseProviderRoutingValue(providerPriorityDraft, 0);
@@ -200,6 +213,17 @@ export function ProvidersPage(props: ProvidersPageProps) {
     } : row));
     setCreateSubmitError(null);
   };
+  const updateCreateProviderType = (providerType: string) => {
+    setCreateProviderType(providerType);
+    if (providerType === CODEX_PROVIDER_TYPE) {
+      setCreateBaseUrls([{
+        id: createDraftInputRow('url').id,
+        value: CODEX_DEFAULT_BASE_URL,
+      }]);
+      setCreateApiKeys([createDraftInputRow('key')]);
+    }
+    setCreateSubmitError(null);
+  };
   const addCreateBaseUrl = () => setCreateBaseUrls(rows => [...rows, createDraftInputRow('url')]);
   const addCreateApiKey = () => setCreateApiKeys(rows => [...rows, createDraftInputRow('key')]);
   const removeCreateBaseUrl = (rowId: string) => {
@@ -227,7 +251,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     if (createBaseUrlValues().length === 0) {
       missing.push('服务地址');
     }
-    if (createApiKeyValues().length === 0) {
+    if (!isCreateCodex && createApiKeyValues().length === 0) {
       missing.push('API 密钥');
     }
     if (createPriorityValue === null) {
@@ -258,13 +282,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return t('正在创建上游基本配置…');
     }
     if (createStage === 'connections') {
-      return t('正在保存服务地址和 API 密钥…');
+      return t(isCreateCodex ? '正在保存 Codex 服务地址…' : '正在保存服务地址和 API 密钥…');
     }
     if (createStage === 'models') {
       return t('正在从上游同步模型…');
     }
     if (createMissingFields().length === 0) {
-      return t('将创建上游、保存连接信息并同步模型。');
+      return t(isCreateCodex
+        ? '将创建上游和默认服务地址，然后启动 OpenAI 设备登录。'
+        : '将创建上游、保存连接信息并同步模型。');
     }
     return t('请先填写：{{fields}}。', {
       fields: createMissingFields().map(field => t(field)).join(', ')
@@ -321,8 +347,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
       priority: createPriorityValue,
       weight: createWeightValue,
       supports_include_usage: readBool(formData, 'supports_include_usage'),
-      websocket_enabled: readBool(formData, 'websocket_enabled'),
-      beta_features: readBool(formData, 'responses_http_to_ws') ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS] : [],
+      websocket_enabled: isCreateCodex || readBool(formData, 'websocket_enabled'),
+      beta_features: isCreateCodex || readBool(formData, 'responses_http_to_ws')
+        ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS]
+        : [],
       key_selection_strategy: 'round_robin',
       groups: createGroupIds.length > 0
         ? createGroupIds.map(groupId => ({
@@ -415,7 +443,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return;
     }
     const apiKeys = createApiKeyValues();
-    if (apiKeys.length === 0) {
+    if (!isCreateCodex && apiKeys.length === 0) {
       const message = 'API 密钥不能为空。';
       setCreateSubmitError(message);
       props.onMessage(message);
@@ -441,7 +469,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
           };
           return createEndpoint(props.settings, providerId, endpointPayload);
         })),
-        Promise.allSettled(apiKeys.map((apiKey, index) => {
+        Promise.allSettled((isCreateCodex ? [] : apiKeys).map((apiKey, index) => {
           const keyPayload: CreateProviderKeyInput = {
             name: `密钥 ${index + 1}`,
             secret: apiKey,
@@ -485,6 +513,25 @@ export function ProvidersPage(props: ProvidersPageProps) {
       setCreateBaseUrls(baseUrls.map(value => ({ id: createDraftInputRow('url').id, value })));
       setCreateApiKeys(apiKeys.map(value => ({ id: createDraftInputRow('key').id, value })));
       setCreateResources(resources);
+      if (isCreateCodex) {
+        const providerName = payload.name;
+        setCreateStage('complete');
+        setCreateOpen(false);
+        resetCreateForm();
+        try {
+          await props.onRefresh(t('上游 {{name}} 已创建，请完成 Codex 设备登录。', {
+            name: providerName,
+          }));
+        } finally {
+          setSelectedProviderId(providerId);
+          createdCodexLoginSequenceRef.current += 1;
+          setCreatedCodexLogin({
+            providerId,
+            attemptId: createdCodexLoginSequenceRef.current,
+          });
+        }
+        return;
+      }
       await syncCreatedProvider(resources, payload.name);
     } catch (error) {
       console.error('Failed to create provider', error);
@@ -1238,7 +1285,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
             </FormControl>
             <FormControl>
               <FormLabel>{t("类型")}</FormLabel>
-              <Select name="provider_type" value={createProviderType} disabled={createFieldsDisabled} onChange={event => setCreateProviderType(event.target.value)}>
+              <Select
+                name="provider_type"
+                value={createProviderType}
+                disabled={createFieldsDisabled}
+                inputProps={{ 'aria-label': t('类型') }}
+                onChange={event => updateCreateProviderType(event.target.value)}
+              >
                 {PROVIDER_TYPE_OPTIONS.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
               </Select>
               <FormHelperText className="mt-2">{t(providerTypeDescription(createProviderType))}</FormHelperText>
@@ -1336,23 +1389,29 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     </Box>)}
               </Box>
             </FormControl>
-            <FormControl>
-              <Box className="flex items-center justify-between gap-3">
-                <FormLabel>{t("API 密钥")}</FormLabel>
-                <Button type="button" size="icon" variant="ghost" aria-label={t('添加 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateApiKey}>
-                  <Plus className="size-4" />
-                </Button>
-              </Box>
-              <Box className="grid gap-3">
-                {createApiKeys.map((row, index) => <Box key={row.id} className="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
-                      <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
-                      <InputBase type="password" value={row.value} disabled={createFieldsDisabled} autoComplete="new-password" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateApiKey(row.id, event.target.value)} placeholder={t("sk-...")} className="bg-background" />
-                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateApiKey(row.id)}>
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </Box>)}
-              </Box>
-            </FormControl>
+            {isCreateCodex ? <Alert severity="info" variant="outlined">
+                <AlertTitle>{t('使用 OAuth 账号')}</AlertTitle>
+                {t('创建后将打开设备登录，不需要在此填写 API 密钥。')}
+                <Typography className="mt-1 text-sm" component="div">
+                  {t('Codex 创建时默认启用 WebSocket 和 HTTP→WS，之后可在上游设置中修改。')}
+                </Typography>
+              </Alert> : <FormControl>
+                <Box className="flex items-center justify-between gap-3">
+                  <FormLabel>{t("API 密钥")}</FormLabel>
+                  <Button type="button" size="icon" variant="ghost" aria-label={t('添加 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateApiKey}>
+                    <Plus className="size-4" />
+                  </Button>
+                </Box>
+                <Box className="grid gap-3">
+                  {createApiKeys.map((row, index) => <Box key={row.id} className="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
+                        <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
+                        <InputBase type="password" value={row.value} disabled={createFieldsDisabled} autoComplete="new-password" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateApiKey(row.id, event.target.value)} placeholder={t("sk-...")} className="bg-background" />
+                        <Button type="button" size="icon" variant="ghost" aria-label={t('移除 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateApiKey(row.id)}>
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </Box>)}
+                </Box>
+              </FormControl>}
           </Box>
           <Box className="grid gap-4 md:grid-cols-4">
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
@@ -1364,11 +1423,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <Box component="span">{t('补充用量')}</Box>
             </Box>
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
-              <Checkbox name="websocket_enabled" disabled={createFieldsDisabled} />
+              <Checkbox key={`websocket-${createProviderType}`} name="websocket_enabled" defaultChecked={isCreateCodex} disabled={createFieldsDisabled || isCreateCodex} />
               <Box component="span">{t('WebSocket')}</Box>
             </Box>
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
-              <Checkbox name="responses_http_to_ws" disabled={createFieldsDisabled} />
+              <Checkbox key={`bridge-${createProviderType}`} name="responses_http_to_ws" defaultChecked={isCreateCodex} disabled={createFieldsDisabled || isCreateCodex} />
               <Box component="span">{t('HTTP→WS Beta')}</Box>
             </Box>
           </Box>
@@ -1413,7 +1472,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
             </Button> : null}
             {createStage !== 'complete' && createStage !== 'partial' ? <Button type="submit" disabled={createIsBusy || createMissingFields().length > 0} className="rounded-none font-mono text-xs tracking-widest px-8">
               <RefreshCw className={`mr-2 size-3.5 ${createIsBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
-              {t(createStage === 'sync_failed' ? '保存并重试同步' : createIsBusy ? '处理中…' : '创建并同步')}
+              {t(createStage === 'sync_failed'
+                ? '保存并重试同步'
+                : createIsBusy
+                  ? '处理中…'
+                  : isCreateCodex
+                    ? '创建并登录'
+                    : '创建并同步')}
             </Button> : null}
           </Box>
         </Box>
@@ -1674,6 +1739,14 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </Box>
                 </Box>
 
+                {item.provider.provider_type === CODEX_PROVIDER_TYPE ? <Box className="mt-8">
+                    <CodexOAuthPanel
+                      settings={props.settings}
+                      item={item}
+                      onRefresh={props.onRefresh}
+                      onMessage={props.onMessage}
+                    />
+                  </Box> : <>
                 <Box className="grid gap-4 mt-8" component="section">
                   <Box className="flex items-center justify-between border-b border-border/40 pb-4">
                     <Box className="flex items-center gap-3">
@@ -1833,6 +1906,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         </CardContent>
                       </Card>}
                 </Box>
+                </>}
 
                 <Box className="grid gap-6 mt-8 pb-8" component="section">
                   <Box className="flex items-center justify-between border-b border-border/40 pb-4">
@@ -1909,6 +1983,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
               </Box>;
       })(selected) : null}
       </DetailDrawer>
+
+      {createdCodexLogin ? <CodexOAuthLoginDialog
+          open
+          attemptId={createdCodexLogin.attemptId}
+          settings={props.settings}
+          providerId={createdCodexLogin.providerId}
+          replaceKeyId={null}
+          onClose={() => setCreatedCodexLogin(null)}
+          onMessage={props.onMessage}
+          onCompleted={async session => {
+            await props.onRefresh(t(
+              session.operation === 'updated' ? 'Codex OAuth 账号已更新。' : 'Codex OAuth 账号已创建。',
+            ));
+          }}
+        /> : null}
 
       <Dialog
         aria-describedby="delete-provider-description"

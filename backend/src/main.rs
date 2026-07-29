@@ -1,6 +1,7 @@
 mod admin;
 mod affinity;
 mod cache;
+mod codex_oauth;
 mod config;
 mod crypto;
 mod db;
@@ -268,6 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
     let provider_runtime = Arc::new(provider_runtime::ProviderRuntimeBook::new());
     let quota = Arc::new(provider_runtime::QuotaBook::new());
+    let codex_oauth = codex_oauth::CodexOAuthManager::new();
 
     let metrics = Arc::new(metrics::Metrics::new());
     let system_status = system_status::SystemStatusMonitor::new();
@@ -287,6 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         affinity,
         provider_runtime,
         quota,
+        codex_oauth,
         metrics,
         system_status,
         runtime_settings,

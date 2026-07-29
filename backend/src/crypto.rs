@@ -17,6 +17,14 @@ pub fn hash_api_key(master_key: &str, api_key_plaintext: &str) -> String {
     hex::encode(hasher.finalize().as_bytes())
 }
 
+pub fn hash_codex_account(master_key: &str, account_id: &str) -> String {
+    let key = derive_32(master_key);
+    let mut hasher = blake3::Hasher::new_keyed(&key);
+    hasher.update(b"little-gate/codex-account/v1\0");
+    hasher.update(account_id.as_bytes());
+    hex::encode(hasher.finalize().as_bytes())
+}
+
 pub fn encrypt_secret(master_key: &str, plaintext: &str) -> Result<String, String> {
     let key = derive_32(master_key);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;

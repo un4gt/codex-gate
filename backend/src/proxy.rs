@@ -7,7 +7,7 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::header::{
-    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName,
+    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName, HeaderValue,
     PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE, USER_AGENT,
 };
 use hyper::http::HeaderMap;
@@ -37,6 +37,8 @@ use crate::telemetry::TelemetryEvent;
 use crate::types::{ApiFormat, ApiKeyAuth, UpstreamKey, UpstreamProvider, Usage};
 use crate::upstream_url;
 use crate::util;
+
+const CODEX_NON_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
@@ -485,6 +487,37 @@ async fn proxy_openai(
                 }
             }
         };
+        let is_codex_oauth = resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE;
+        let mut codex_downstream_stream = None;
+        if is_codex_oauth {
+            match crate::codex_oauth::normalize_responses_request(
+                &out_body,
+                &resolved.upstream_model,
+            ) {
+                Ok((normalized, downstream_stream)) => {
+                    out_body = normalized;
+                    codex_downstream_stream = Some(downstream_stream);
+                }
+                Err(error) => {
+                    reservation.neutral();
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_REQUEST,
+                        "codex_request_normalization_failed",
+                        error.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                        Some("codex_request_normalization_failed"),
+                    );
+                    return http::json_error(StatusCode::BAD_REQUEST, error);
+                }
+            }
+        }
         if should_inject_include_usage(
             resolved.protocol.upstream_api_format,
             &info,
@@ -565,18 +598,103 @@ async fn proxy_openai(
             }
         };
 
-        let headers =
-            build_upstream_headers(&request_headers, out_body.len(), &resolved.key.secret);
+        let prepared_codex_auth = if is_codex_oauth {
+            match state
+                .codex_oauth
+                .prepare_auth(&state, resolved.key.id, false)
+                .await
+            {
+                Ok(auth) => Some(auth),
+                Err(error) => {
+                    let status = error.http_status();
+                    trace_attempt(
+                        &routing_trace,
+                        resolved,
+                        Some(status.as_u16() as i32),
+                        Some(error.code),
+                        start.elapsed().as_millis() as i64,
+                    );
+                    reservation.finish(
+                        AttemptOutcome::upstream_response(
+                            status.as_u16() as i32,
+                            Some(error.code),
+                            Some(&error.message),
+                            None,
+                        ),
+                        &state.metrics,
+                    );
+                    exclusions.note_attempt(resolved);
+                    exclusions.avoid_key(resolved.key.id);
+                    last_failure = Some(AttemptFailure::new(
+                        resolved,
+                        status,
+                        error.code,
+                        error.message.clone(),
+                    ));
+                    if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
+                        state.metrics.record_failover(FailoverKind::Key);
+                        continue;
+                    }
+                    submit_err(
+                        &mut telemetry_permit,
+                        status,
+                        error.code,
+                        error.message.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(Some(status.as_u16() as i32), Some(error.code));
+                    return http::json_error(status, error.message);
+                }
+            }
+        } else {
+            None
+        };
 
-        let upstream_response = dispatch_upstream_request(
+        let upstream_secret = prepared_codex_auth
+            .as_ref()
+            .map_or(resolved.key.secret.as_str(), |auth| {
+                auth.access_token.as_str()
+            });
+        let mut headers = build_upstream_headers(&request_headers, out_body.len(), upstream_secret);
+        if let Some(auth) = prepared_codex_auth.as_ref() {
+            crate::codex_oauth::apply_codex_headers(&mut headers, auth);
+        }
+
+        let mut upstream_response = dispatch_upstream_request(
             &state,
             &request_method,
             request_version,
             &headers,
-            out_body,
-            upstream_uri,
+            out_body.clone(),
+            upstream_uri.clone(),
         )
         .await;
+
+        if is_codex_oauth
+            && upstream_response
+                .as_ref()
+                .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
+            && let Ok(refreshed) = state
+                .codex_oauth
+                .prepare_auth(&state, resolved.key.id, true)
+                .await
+        {
+            let mut retry_headers =
+                build_upstream_headers(&request_headers, out_body.len(), &refreshed.access_token);
+            crate::codex_oauth::apply_codex_headers(&mut retry_headers, &refreshed);
+            upstream_response = dispatch_upstream_request(
+                &state,
+                &request_method,
+                request_version,
+                &retry_headers,
+                out_body,
+                upstream_uri,
+            )
+            .await;
+        }
 
         let upstream_resp = match upstream_response {
             Ok(response) => response,
@@ -652,6 +770,18 @@ async fn proxy_openai(
             util::now_ms(),
             state.config.rate_limit_fallback_cooldown,
         );
+        if is_codex_oauth && status_code == StatusCode::UNAUTHORIZED {
+            let _ = state
+                .db
+                .update_codex_auth_status(
+                    resolved.key.id,
+                    crate::codex_oauth::AUTH_STATUS_REAUTH_REQUIRED,
+                    Some("upstream rejected the refreshed access token"),
+                    util::now_ms(),
+                )
+                .await;
+            state.caches.upstream.invalidate();
+        }
         if should_retry_response_status(status_i32) {
             trace_attempt(
                 &routing_trace,
@@ -725,7 +855,7 @@ async fn proxy_openai(
             .map(|ct| ct.contains("text/event-stream"))
             .unwrap_or(false);
         let upstream_api_format_str = api_format_name(resolved.protocol.upstream_api_format);
-        let tap_config = TapConfig {
+        let mut tap_config = TapConfig {
             api_key_id: api_key.id,
             log_enabled: api_key.log_enabled,
             provider_id: Some(resolved.provider.id),
@@ -753,9 +883,79 @@ async fn proxy_openai(
                     || faulted_providers.contains(&binding.provider_id)
             }),
             routing_trace: routing_trace.clone(),
+            codex_state: is_codex_oauth.then(|| state.clone()),
         };
         if !status_code.is_success() {
             let tap = ProxyTapBody::new(body, tap_config, telemetry_permit.take(), reservation);
+            return Response::from_parts(resp_parts, http::boxed(tap));
+        }
+        if is_codex_oauth && codex_downstream_stream == Some(false) {
+            if !is_sse {
+                reservation.finish(
+                    AttemptOutcome::local_provider(
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        "codex_stream_expected",
+                        "Codex returned a non-streaming response to a forced streaming request",
+                        Some(t_stream_ms),
+                    ),
+                    &state.metrics,
+                );
+                return http::json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "Codex returned an unexpected non-streaming response",
+                );
+            }
+            let collected = match Limited::new(body, CODEX_NON_STREAM_MAX_BYTES)
+                .collect()
+                .await
+            {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => {
+                    reservation.finish(
+                        AttemptOutcome::local_provider(
+                            Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                            "codex_response_too_large",
+                            "Codex streaming response exceeded the non-stream buffer limit",
+                            Some(t_stream_ms),
+                        ),
+                        &state.metrics,
+                    );
+                    return http::json_error(
+                        StatusCode::BAD_GATEWAY,
+                        "Codex response exceeded the non-stream buffer limit",
+                    );
+                }
+            };
+            let completed =
+                match crate::codex_oauth::collect_completed_response_from_sse(&collected) {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        reservation.finish(
+                            AttemptOutcome::local_provider(
+                                Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                                "codex_response_aggregation_failed",
+                                &error,
+                                Some(t_stream_ms),
+                            ),
+                            &state.metrics,
+                        );
+                        return http::json_error(StatusCode::BAD_GATEWAY, error);
+                    }
+                };
+            resp_parts.headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            if let Ok(length) = HeaderValue::from_str(&completed.len().to_string()) {
+                resp_parts.headers.insert(CONTENT_LENGTH, length);
+            }
+            tap_config.is_sse = false;
+            let tap = ProxyTapBody::new(
+                Full::new(completed),
+                tap_config,
+                telemetry_permit.take(),
+                reservation,
+            );
             return Response::from_parts(resp_parts, http::boxed(tap));
         }
         let body = if is_sse {
@@ -1139,6 +1339,9 @@ fn provider_protocol_plan(
             Some(ProtocolPlan::responses_via_chat())
         }
         ("openai_compatible_responses", ApiFormat::Responses) => {
+            Some(ProtocolPlan::native(ApiFormat::Responses))
+        }
+        (crate::codex_oauth::PROVIDER_TYPE, ApiFormat::Responses) => {
             Some(ProtocolPlan::native(ApiFormat::Responses))
         }
         _ => None,
@@ -1683,6 +1886,14 @@ pub(crate) async fn build_upstream_plan(
         let keys = enabled_model_keys
             .into_iter()
             .filter(|key| {
+                if provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+                    && !snap
+                        .codex_oauth_by_key
+                        .get(&key.id)
+                        .is_some_and(|account| account.is_routable(now_ms))
+                {
+                    return false;
+                }
                 let available = state.quota.is_available(key.id, now_ms);
                 if !available {
                     state.metrics.record_quota_cooldown_skip();
@@ -1692,12 +1903,23 @@ pub(crate) async fn build_upstream_plan(
             .collect::<Vec<_>>();
         if keys.is_empty() {
             transient_spill_provider_ids.insert(provider.id);
+            let (code, message) = if provider.provider_type == crate::codex_oauth::PROVIDER_TYPE {
+                (
+                    "codex_account_unavailable",
+                    "all Codex OAuth accounts require login, entitlement recovery, or quota reset",
+                )
+            } else {
+                (
+                    "key_quota_cooldown",
+                    "all model-capable upstream keys are in quota cooldown",
+                )
+            };
             diagnostics.reject(
                 Some(provider.id),
                 &route.upstream_model,
                 "runtime",
-                "key_quota_cooldown",
-                "all model-capable upstream keys are in quota cooldown",
+                code,
+                message,
             );
             continue;
         }
@@ -3010,6 +3232,7 @@ struct TapConfig {
     affinity_binding: Option<AffinityBinding>,
     affinity_should_migrate: bool,
     routing_trace: SharedRoutingTrace,
+    codex_state: Option<SharedState>,
 }
 
 struct TapFinalizeInputs<'a> {
@@ -3225,6 +3448,36 @@ fn finalize_tap(
     } else {
         None
     };
+    if let (Some(state), Some(key_id), Some(status)) = (
+        cfg.codex_state.as_ref(),
+        cfg.upstream_key_id,
+        cfg.http_status,
+    ) {
+        let captured = inputs.capture.to_vec();
+        if status == StatusCode::FORBIDDEN.as_u16() as i32
+            && crate::codex_oauth::is_account_forbidden_error(&captured)
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let _ = state
+                    .db
+                    .update_codex_auth_status(
+                        key_id,
+                        crate::codex_oauth::AUTH_STATUS_FORBIDDEN,
+                        Some("Codex entitlement or workspace access was denied"),
+                        util::now_ms(),
+                    )
+                    .await;
+                state.caches.upstream.invalidate();
+            });
+        }
+        if matches!(status, 402 | 429)
+            && let Some(reset_at_ms) =
+                crate::codex_oauth::quota_reset_hint_from_error(&captured, now_ms)
+        {
+            state.quota.set_cooldown_until(key_id, reset_at_ms, now_ms);
+        }
+    }
     let error_type = inputs
         .error_type
         .clone()
@@ -4226,6 +4479,23 @@ mod tests {
             provider_protocol_plan(
                 &snapshot,
                 &native_responses,
+                ApiFormat::ChatCompletions,
+                "model-a",
+                true,
+            ),
+            None
+        );
+
+        let mut codex = test_provider(9, 100, 2);
+        codex.provider_type = crate::codex_oauth::PROVIDER_TYPE.to_string();
+        assert_eq!(
+            provider_protocol_plan(&snapshot, &codex, ApiFormat::Responses, "model-a", false,),
+            Some(ProtocolPlan::native(ApiFormat::Responses))
+        );
+        assert_eq!(
+            provider_protocol_plan(
+                &snapshot,
+                &codex,
                 ApiFormat::ChatCompletions,
                 "model-a",
                 true,

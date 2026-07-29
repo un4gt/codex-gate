@@ -583,6 +583,24 @@ impl QuotaBook {
         }
     }
 
+    pub fn set_cooldown_until(&self, key_id: i64, until_ms: i64, now_ms: i64) {
+        let mut guard = self.by_key.write();
+        let state = guard.entry(key_id).or_default();
+        state.cooldown_until_ms = (until_ms > now_ms).then_some(until_ms);
+        state.reset_at_ms = (until_ms > now_ms).then_some(until_ms);
+        state.remaining_requests = (until_ms > now_ms).then_some(0);
+        state.updated_at_ms = Some(now_ms);
+    }
+
+    pub fn clear_cooldown(&self, key_id: i64, now_ms: i64) {
+        let mut guard = self.by_key.write();
+        let state = guard.entry(key_id).or_default();
+        state.cooldown_until_ms = None;
+        state.reset_at_ms = None;
+        state.remaining_requests = None;
+        state.updated_at_ms = Some(now_ms);
+    }
+
     pub fn purge_key(&self, key_id: i64) {
         self.by_key.write().remove(&key_id);
     }

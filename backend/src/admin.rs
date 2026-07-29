@@ -22,8 +22,12 @@ use crate::upstream_url;
 use crate::util;
 use tokio::time as tokio_time;
 
-const ALLOWED_PROVIDER_TYPES: [&str; 3] =
-    ["openai", "openai_compatible", "openai_compatible_responses"];
+const ALLOWED_PROVIDER_TYPES: [&str; 4] = [
+    "openai",
+    "openai_compatible",
+    "openai_codex_oauth",
+    "openai_compatible_responses",
+];
 const BETA_FEATURE_RESPONSES_HTTP_TO_WS: &str = "responses-http-to-ws";
 
 // Successful model inventories and endpoint probes are buffered for inspection.
@@ -185,6 +189,9 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         }
     }
     if path.starts_with("/api/v1/providers/") {
+        if req.method() == Method::POST && path.ends_with("/codex-oauth/sessions") {
+            return start_codex_oauth_session(req, state).await;
+        }
         if req.method() == Method::POST && path.ends_with("/circuit/reset") {
             return reset_provider_circuit(req, state).await;
         }
@@ -213,6 +220,14 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
             return sync_provider_models(req, state).await;
         }
     }
+    if path.starts_with("/api/v1/codex-oauth/sessions/") {
+        if req.method() == Method::GET {
+            return get_codex_oauth_session(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return cancel_codex_oauth_session(req, state).await;
+        }
+    }
     if path.starts_with("/api/v1/endpoints/") {
         if req.method() == Method::PATCH {
             return update_endpoint(req, state).await;
@@ -225,6 +240,9 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         }
     }
     if path.starts_with("/api/v1/keys/") {
+        if req.method() == Method::POST && path.ends_with("/codex-oauth/quota/refresh") {
+            return refresh_codex_oauth_quota(req, state).await;
+        }
         if req.method() == Method::PATCH {
             return update_key(req, state).await;
         }
@@ -537,6 +555,7 @@ async fn list_all_provider_models(_req: Request<Incoming>, state: SharedState) -
             let native_api_formats: &[&str] = match provider.provider_type.as_str() {
                 "openai" => &["chat_completions", "responses"],
                 "openai_compatible" => &["chat_completions"],
+                "openai_codex_oauth" => &["responses"],
                 "openai_compatible_responses" => &["responses"],
                 _ => &[],
             };
@@ -603,19 +622,16 @@ async fn fetch_upstream_model_ids(
     let parsed: Value = serde_json::from_slice(&body_bytes).map_err(|error| {
         http::json_error(StatusCode::BAD_GATEWAY, format!("invalid json: {error}"))
     })?;
-    let mut models = parsed
-        .get("data")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut models = [parsed.get("data"), parsed.get("models")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .flat_map(|items| items.iter())
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     models.sort();
     models.dedup();
 
@@ -656,13 +672,13 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
-    if !snap
+    let Some(provider) = snap
         .providers
         .iter()
-        .any(|provider| provider.id == provider_id)
-    {
+        .find(|provider| provider.id == provider_id)
+    else {
         return http::json_error(StatusCode::NOT_FOUND, "provider not found");
-    }
+    };
 
     let now_ms = util::now_ms();
 
@@ -673,6 +689,49 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
         .unwrap_or_default();
     let ranked_keys =
         crate::selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
+
+    if provider.provider_type == crate::codex_oauth::PROVIDER_TYPE {
+        let mut last_error = None;
+        let mut synced_models = None;
+        for key in &ranked_keys {
+            if !snap.codex_oauth_by_key.get(&key.id).is_some_and(|account| {
+                account.auth_status == crate::codex_oauth::AUTH_STATUS_ACTIVE
+            }) {
+                continue;
+            }
+            match state.codex_oauth.fetch_models(&state, key.id).await {
+                Ok(models) => {
+                    synced_models = Some(models);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let Some(models) = synced_models else {
+            return last_error.map_or_else(
+                || {
+                    http::json_error(
+                        StatusCode::CONFLICT,
+                        "no active Codex OAuth account is available",
+                    )
+                },
+                codex_oauth_error_response,
+            );
+        };
+        if let Err(error) = state
+            .db
+            .upsert_provider_models(provider_id, &models, util::now_ms())
+            .await
+        {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+        state.caches.upstream.invalidate();
+        return match state.db.list_provider_models_by_provider(provider_id).await {
+            Ok(items) => http::json(StatusCode::OK, &items),
+            Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+    }
+
     let Some(key) = ranked_keys.first() else {
         return http::json_error(StatusCode::CONFLICT, "no available upstream keys");
     };
@@ -841,12 +900,39 @@ async fn sync_key_models(req: Request<Incoming>, state: SharedState) -> HttpResp
     let Some((provider_id, key)) = key_match else {
         return http::json_error(StatusCode::NOT_FOUND, "key not found");
     };
-    if !snap
+    let Some(provider) = snap
         .providers
         .iter()
-        .any(|provider| provider.id == provider_id)
-    {
+        .find(|provider| provider.id == provider_id)
+    else {
         return http::json_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+
+    if provider.provider_type == crate::codex_oauth::PROVIDER_TYPE {
+        let models = match state
+            .codex_oauth
+            .fetch_models(&state, upstream_key_id)
+            .await
+        {
+            Ok(models) => models,
+            Err(error) => return codex_oauth_error_response(error),
+        };
+        if let Err(error) = state
+            .db
+            .upsert_upstream_key_models(upstream_key_id, &models, util::now_ms())
+            .await
+        {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+        state.caches.upstream.invalidate();
+        return match state
+            .db
+            .list_upstream_key_models_by_key(upstream_key_id)
+            .await
+        {
+            Ok(items) => http::json(StatusCode::OK, &items),
+            Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
     }
 
     let now_ms = util::now_ms();
@@ -1960,8 +2046,16 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         return http::json_error(StatusCode::BAD_REQUEST, message);
     }
     let supports_include_usage = body.supports_include_usage.unwrap_or(true);
-    let websocket_enabled = body.websocket_enabled.unwrap_or(false);
-    let beta_features = normalize_beta_features(body.beta_features);
+    let is_codex_oauth = body.provider_type.trim() == crate::codex_oauth::PROVIDER_TYPE;
+    let websocket_enabled = body.websocket_enabled.unwrap_or(is_codex_oauth);
+    let mut beta_features = normalize_beta_features(body.beta_features);
+    if is_codex_oauth
+        && !beta_features
+            .iter()
+            .any(|feature| feature == BETA_FEATURE_RESPONSES_HTTP_TO_WS)
+    {
+        beta_features.push(BETA_FEATURE_RESPONSES_HTTP_TO_WS.to_string());
+    }
     let key_selection_strategy = body
         .key_selection_strategy
         .as_deref()
@@ -2565,31 +2659,160 @@ struct PatchKeyReq {
     weight: Option<i32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct StartCodexOAuthSessionReq {
+    replace_key_id: Option<i64>,
+}
+
+async fn start_codex_oauth_session(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let Some(provider_id) =
+        parse_provider_id_with_suffix(req.uri().path(), "/codex-oauth/sessions")
+    else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
+    };
+    let (_, body, _raw) = match http::read_json_limited::<StartCodexOAuthSessionReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let providers = match state.db.list_upstream_providers().await {
+        Ok(providers) => providers,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let Some(provider) = providers.iter().find(|provider| provider.id == provider_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if provider.provider_type != crate::codex_oauth::PROVIDER_TYPE {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "provider is not an OpenAI Codex OAuth provider",
+        );
+    }
+    if let Some(key_id) = body.replace_key_id {
+        let keys = match state
+            .db
+            .list_upstream_keys_meta_by_provider(provider_id)
+            .await
+        {
+            Ok(keys) => keys,
+            Err(error) => {
+                return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+            }
+        };
+        if !keys.iter().any(|key| key.id == key_id) {
+            return http::json_error(StatusCode::NOT_FOUND, "replacement key not found");
+        }
+    }
+    match state
+        .codex_oauth
+        .start_session(state.clone(), provider_id, body.replace_key_id)
+        .await
+    {
+        Ok(view) => http::json(StatusCode::OK, &view),
+        Err(error) => codex_oauth_error_response(error),
+    }
+}
+
+async fn get_codex_oauth_session(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let session_id = req
+        .uri()
+        .path()
+        .strip_prefix("/api/v1/codex-oauth/sessions/")
+        .unwrap_or_default()
+        .trim_matches('/');
+    if session_id.is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid OAuth session id");
+    }
+    match state.codex_oauth.get_session(session_id).await {
+        Some(view) => http::json(StatusCode::OK, &view),
+        None => http::json_error(StatusCode::NOT_FOUND, "OAuth session not found"),
+    }
+}
+
+async fn cancel_codex_oauth_session(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let session_id = req
+        .uri()
+        .path()
+        .strip_prefix("/api/v1/codex-oauth/sessions/")
+        .unwrap_or_default()
+        .trim_matches('/');
+    if session_id.is_empty() {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid OAuth session id");
+    }
+    if state.codex_oauth.cancel_session(session_id).await {
+        http::empty(StatusCode::NO_CONTENT)
+    } else {
+        http::json_error(StatusCode::NOT_FOUND, "OAuth session not found")
+    }
+}
+
+async fn refresh_codex_oauth_quota(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let Some(key_id) = parse_provider_id_with_prefix_and_suffix(
+        req.uri().path(),
+        "/api/v1/keys/",
+        "/codex-oauth/quota/refresh",
+    ) else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid key id");
+    };
+    match state.codex_oauth.refresh_quota(&state, key_id).await {
+        Ok(quota) => http::json(StatusCode::OK, &quota),
+        Err(error) => codex_oauth_error_response(error),
+    }
+}
+
+fn codex_oauth_error_response(error: crate::codex_oauth::CodexOAuthError) -> HttpResponse {
+    http::json(
+        error.http_status(),
+        &serde_json::json!({
+            "error": {
+                "code": error.code,
+                "message": error.message,
+            }
+        }),
+    )
+}
+
 async fn list_provider_keys(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     let Some(provider_id) = parse_provider_id_with_suffix(path, "/keys") else {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
     };
-    match state
-        .db
-        .list_upstream_keys_meta_by_provider(provider_id)
-        .await
-    {
-        Ok(items) => {
-            let now_ms = util::now_ms();
-            let out = items
-                .iter()
-                .map(|key| {
-                    upstream_key_to_json(
-                        key,
-                        state.upstream_key_health.snapshot(key.id, now_ms),
-                        state.quota.snapshot(key.id, now_ms),
-                    )
-                })
-                .collect::<Vec<_>>();
-            http::json(StatusCode::OK, &out)
+    let (items, providers, codex_accounts) = match tokio::try_join!(
+        state.db.list_upstream_keys_meta_by_provider(provider_id),
+        state.db.list_upstream_providers(),
+        state
+            .db
+            .list_codex_oauth_account_views(&state.config.master_key, provider_id),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
         }
-        Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let is_codex_oauth = providers.iter().any(|provider| {
+        provider.id == provider_id && provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+    });
+    {
+        let now_ms = util::now_ms();
+        let out = items
+            .iter()
+            .map(|key| {
+                upstream_key_to_json(
+                    key,
+                    state.upstream_key_health.snapshot(key.id, now_ms),
+                    state.quota.snapshot(key.id, now_ms),
+                    is_codex_oauth,
+                    codex_accounts.get(&key.id),
+                )
+            })
+            .collect::<Vec<_>>();
+        http::json(StatusCode::OK, &out)
     }
 }
 
@@ -2598,6 +2821,21 @@ async fn create_provider_key(req: Request<Incoming>, state: SharedState) -> Http
     let Some(provider_id) = parse_provider_id_with_suffix(path, "/keys") else {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
     };
+    let providers = match state.db.list_upstream_providers().await {
+        Ok(providers) => providers,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let Some(provider) = providers.iter().find(|provider| provider.id == provider_id) else {
+        return http::json_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if provider.provider_type == crate::codex_oauth::PROVIDER_TYPE {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "Codex OAuth credentials can only be added through device login",
+        );
+    }
     let (_, body, _raw) =
         match http::read_json_limited::<CreateKeyReq>(req, state.config.max_request_bytes).await {
             Ok(v) => v,
@@ -2651,6 +2889,23 @@ async fn update_key(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     let Some(mut current) = keys.into_iter().find(|k| k.id == key_id) else {
         return http::json_error(StatusCode::NOT_FOUND, "key not found");
     };
+
+    let providers = match state.db.list_upstream_providers().await {
+        Ok(providers) => providers,
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    let codex_provider = providers.iter().any(|provider| {
+        provider.id == current.provider_id
+            && provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+    });
+    if codex_provider && patch.secret.is_some() {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "Codex OAuth credentials can only be updated by signing in again",
+        );
+    }
 
     if let Some(name) = patch.name {
         if name.trim().is_empty() {
@@ -3367,6 +3622,11 @@ fn provider_to_json(
         "health": health,
         "runtime": runtime,
         "affinity_sessions": affinity_sessions
+        ,"default_base_url": if p.provider_type == crate::codex_oauth::PROVIDER_TYPE {
+            Some(crate::codex_oauth::DEFAULT_BASE_URL)
+        } else {
+            None
+        }
     })
 }
 
@@ -3426,6 +3686,8 @@ fn upstream_key_to_json(
     k: &UpstreamKeyMeta,
     health: UpstreamKeyHealthView,
     quota: crate::provider_runtime::QuotaRuntimeView,
+    is_codex_oauth: bool,
+    codex_oauth: Option<&crate::codex_oauth::CodexOAuthAccountView>,
 ) -> Value {
     serde_json::json!({
         "id": k.id,
@@ -3434,6 +3696,27 @@ fn upstream_key_to_json(
         "enabled": k.enabled,
         "priority": k.priority,
         "weight": k.weight,
+        "auth_kind": if is_codex_oauth { "codex_oauth" } else { "api_key" },
+        "codex_oauth": if is_codex_oauth {
+            codex_oauth.map_or_else(
+                || serde_json::json!({
+                    "upstream_key_id": k.id,
+                    "provider_id": k.provider_id,
+                    "email_masked": Value::Null,
+                    "account_id_suffix": Value::Null,
+                    "plan_type": Value::Null,
+                    "token_expires_at_ms": Value::Null,
+                    "last_refresh_at_ms": Value::Null,
+                    "auth_status": "reauth_required",
+                    "last_error": "legacy OAuth credential requires device login",
+                    "quota": Value::Null,
+                    "quota_checked_at_ms": Value::Null,
+                }),
+                |account| serde_json::json!(account),
+            )
+        } else {
+            Value::Null
+        },
         "health": health,
         "quota": quota
     })

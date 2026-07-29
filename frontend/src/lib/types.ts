@@ -283,6 +283,8 @@ export interface UpstreamKeyMeta {
   enabled: boolean;
   priority: number;
   weight: number;
+  auth_kind?: 'api_key' | 'codex_oauth';
+  codex_oauth?: CodexOAuthAccount | null;
   health?: UpstreamKeyHealthSummary;
   quota?: {
     remaining_requests: number | null;
@@ -292,6 +294,58 @@ export interface UpstreamKeyMeta {
     consecutive_rate_limits: number;
     updated_at_ms: number | null;
   };
+}
+
+export interface CodexQuotaWindow {
+  used_percent: number;
+  remaining_percent: number;
+  window_seconds: number | null;
+  reset_at_ms: number | null;
+}
+
+export interface CodexQuotaCredits {
+  has_credits: boolean;
+  unlimited: boolean;
+  balance: number | null;
+  reset_credits: number | null;
+  subscription_end_at_ms: number | null;
+}
+
+export interface CodexQuotaSnapshot {
+  plan_type: string | null;
+  allowed: boolean | null;
+  primary_window: CodexQuotaWindow | null;
+  secondary_window: CodexQuotaWindow | null;
+  code_review_window: CodexQuotaWindow | null;
+  credits: CodexQuotaCredits;
+}
+
+export interface CodexOAuthAccount {
+  upstream_key_id: number;
+  provider_id: number;
+  email_masked: string | null;
+  account_id_suffix: string | null;
+  plan_type: string | null;
+  token_expires_at_ms: number | null;
+  last_refresh_at_ms: number | null;
+  auth_status: 'active' | 'reauth_required' | 'forbidden' | string;
+  last_error: string | null;
+  quota: CodexQuotaSnapshot | null;
+  quota_checked_at_ms: number | null;
+}
+
+export interface CodexOAuthSession {
+  session_id: string;
+  status: 'pending' | 'completed' | 'failed' | 'cancelled' | 'expired';
+  verification_uri: string;
+  user_code?: string;
+  expires_at_ms: number;
+  poll_interval_ms: number;
+  key_id?: number;
+  operation?: 'created' | 'updated';
+  warnings?: string[];
+  error_code?: string;
+  error_message?: string;
 }
 
 export interface UpstreamKeyModel {

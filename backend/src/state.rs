@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::affinity::AffinityBook;
 use crate::cache::Caches;
+use crate::codex_oauth::CodexOAuthManager;
 use crate::config::Config;
 use crate::db::Database;
 use crate::health::{EndpointHealthBook, UpstreamKeyHealthBook};
@@ -25,6 +26,7 @@ pub struct AppState {
     pub affinity: Arc<AffinityBook>,
     pub provider_runtime: Arc<ProviderRuntimeBook>,
     pub quota: Arc<QuotaBook>,
+    pub codex_oauth: CodexOAuthManager,
     pub metrics: Arc<Metrics>,
     pub system_status: SystemStatusMonitor,
     pub runtime_settings: RuntimeSettings,

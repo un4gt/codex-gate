@@ -4,6 +4,8 @@ import type {
   ConnectionSettings,
   ConsolePreferencesPatch,
   ConsolePreferences,
+  CodexOAuthAccount,
+  CodexOAuthSession,
   CreateApiKeyInput,
   CreateEndpointInput,
   CreatePriceInput,
@@ -388,6 +390,57 @@ export async function updateProviderKey(settings: ConnectionSettings, keyId: num
 export async function deleteProviderKey(settings: ConnectionSettings, keyId: number) {
   const { apiBase, adminToken } = requireConnection(settings);
   return deleteJson<void>(apiBase, `/api/v1/keys/${keyId}`, adminToken);
+}
+
+export async function startCodexOAuthSession(
+  settings: ConnectionSettings,
+  providerId: number,
+  replaceKeyId: number | null,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<CodexOAuthSession>(
+    apiBase,
+    `/api/v1/providers/${providerId}/codex-oauth/sessions`,
+    adminToken,
+    { replace_key_id: replaceKeyId },
+  );
+}
+
+export async function loadCodexOAuthSession(
+  settings: ConnectionSettings,
+  sessionId: string,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<CodexOAuthSession>(
+    apiBase,
+    `/api/v1/codex-oauth/sessions/${encodeURIComponent(sessionId)}`,
+    adminToken,
+  );
+}
+
+export async function cancelCodexOAuthSession(
+  settings: ConnectionSettings,
+  sessionId: string,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(
+    apiBase,
+    `/api/v1/codex-oauth/sessions/${encodeURIComponent(sessionId)}`,
+    adminToken,
+  );
+}
+
+export async function refreshCodexOAuthQuota(
+  settings: ConnectionSettings,
+  keyId: number,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<CodexOAuthAccount>(
+    apiBase,
+    `/api/v1/keys/${keyId}/codex-oauth/quota/refresh`,
+    adminToken,
+    {},
+  );
 }
 
 export async function createPrice(settings: ConnectionSettings, payload: CreatePriceInput) {
