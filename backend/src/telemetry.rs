@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use log::{error, info, warn};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::db::{Database, DbError};
 use crate::types::{RequestLogRow, StatsDailyRow, StatsEventRow, StatsHourlyRow, Usage};
@@ -88,6 +88,7 @@ impl RetentionPolicy {
 #[derive(Clone)]
 pub struct Telemetry {
     tx: mpsc::Sender<TelemetryEvent>,
+    flush_tx: mpsc::Sender<oneshot::Sender<()>>,
 }
 
 impl Telemetry {
@@ -98,16 +99,29 @@ impl Telemetry {
         retention: RetentionPolicy,
     ) -> Result<Self, DbError> {
         let (tx, rx) = mpsc::channel(queue_capacity.max(1));
+        let (flush_tx, flush_rx) = mpsc::channel(8);
 
         let mut worker =
             TelemetryWorker::new(db, flush_interval, queue_capacity.max(1), retention).await?;
-        tokio::spawn(async move { worker.run(rx).await });
+        tokio::spawn(async move { worker.run(rx, flush_rx).await });
 
-        Ok(Self { tx })
+        Ok(Self { tx, flush_tx })
     }
 
     pub fn try_reserve_permit(&self) -> Result<mpsc::OwnedPermit<TelemetryEvent>, ()> {
         self.tx.clone().try_reserve_owned().map_err(|_| ())
+    }
+
+    pub async fn flush(&self) -> Result<(), &'static str> {
+        let (done_tx, done_rx) = oneshot::channel();
+        self.flush_tx
+            .send(done_tx)
+            .await
+            .map_err(|_| "telemetry worker is unavailable")?;
+        tokio::time::timeout(Duration::from_secs(5), done_rx)
+            .await
+            .map_err(|_| "telemetry flush timed out")?
+            .map_err(|_| "telemetry worker stopped before flushing")
     }
 }
 
@@ -249,13 +263,21 @@ impl TelemetryWorker {
         })
     }
 
-    async fn run(&mut self, mut rx: mpsc::Receiver<TelemetryEvent>) {
+    async fn run(
+        &mut self,
+        mut rx: mpsc::Receiver<TelemetryEvent>,
+        mut flush_rx: mpsc::Receiver<oneshot::Sender<()>>,
+    ) {
         let mut ticker = tokio::time::interval(self.flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
                 biased;
+                Some(done_tx) = flush_rx.recv() => {
+                    self.flush().await;
+                    let _ = done_tx.send(());
+                }
                 maybe = rx.recv() => {
                     let Some(event) = maybe else {
                         break;

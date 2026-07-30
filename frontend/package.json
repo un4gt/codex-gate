@@ -8,7 +8,9 @@
   },
   "scripts": {
     "dev": "rsbuild",
-    "build": "tsc -b && rsbuild build",
+    "build": "npm run email-templates:check && tsc -b && rsbuild build",
+    "email-templates:generate": "node scripts/render-notification-email.mjs --write",
+    "email-templates:check": "node scripts/render-notification-email.mjs --check",
     "test": "rstest run"
   },
   "dependencies": {
@@ -33,6 +35,7 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "emailmd": "0.10.0",
     "jsdom": "^29.1.1",
     "react-compiler-runtime": "^1.0.0",
     "tailwindcss": "^4.3.2",

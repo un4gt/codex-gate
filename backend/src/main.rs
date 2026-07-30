@@ -10,6 +10,7 @@ mod http;
 mod key_rotation;
 mod log_archive;
 mod metrics;
+mod notification;
 mod openai;
 mod pricing;
 mod provider_runtime;
@@ -276,6 +277,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let runtime_settings = runtime_settings::RuntimeSettings::load(&config, &db)
         .await
         .map_err(|e| format!("runtime settings: {e}"))?;
+    let (notifications, notification_rx) = notification::NotificationHandle::new();
+    let instance_id = util::new_ulid();
+    let started_at_ms = util::now_ms();
 
     let state: SharedState = Arc::new(AppState {
         config,
@@ -293,7 +297,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         metrics,
         system_status,
         runtime_settings,
+        notifications,
+        instance_id,
+        started_at_ms,
     });
+
+    notification::spawn(state.clone(), notification_rx);
 
     let addr: SocketAddr = state.config.listen_addr;
     log::info!("listening on {}", addr);

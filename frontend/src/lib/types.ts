@@ -141,6 +141,182 @@ export interface RequestLogSearchParams {
   cache_creation_input_tokens_max?: number;
 }
 
+export type NotificationLocale = 'zh-CN' | 'en-US';
+export type NotificationSmtpSecurity = 'starttls' | 'tls' | 'none';
+export type NotificationChannelKind = 'smtp' | 'webhook';
+export type NotificationRuleKind = 'scheduled_report' | 'threshold_alert';
+export type NotificationAlertMetric =
+  | 'cpu_usage_percent'
+  | 'memory_usage_percent'
+  | 'unhealthy_provider_count'
+  | 'request_count'
+  | 'error_rate_percent'
+  | 'total_tokens'
+  | 'estimated_cost_usd';
+export type NotificationAlertScope = 'global' | 'provider' | 'client_key';
+export type NotificationAlertOperator = 'gt' | 'gte' | 'lt' | 'lte';
+
+export interface NotificationWebhookHeader {
+  name: string;
+  value: string;
+}
+
+export interface NotificationSmtpPublicConfig {
+  host: string;
+  port: number;
+  security: NotificationSmtpSecurity;
+  username: string | null;
+  has_password: boolean;
+  from_name: string | null;
+  from_email: string;
+  recipients: string[];
+}
+
+export interface NotificationWebhookPublicConfig {
+  url_masked: string;
+  has_signing_secret: boolean;
+  headers: Array<{ name: string; has_value: boolean }>;
+}
+
+interface NotificationChannelBase {
+  id: number;
+  name: string;
+  enabled: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export type NotificationChannel = NotificationChannelBase & (
+  | { kind: 'smtp'; config: NotificationSmtpPublicConfig }
+  | { kind: 'webhook'; config: NotificationWebhookPublicConfig }
+);
+
+export type NotificationChannelInput = {
+  name: string;
+  enabled: boolean;
+} & (
+  | {
+      kind: 'smtp';
+      config: {
+        host: string;
+        port: number;
+        security: NotificationSmtpSecurity;
+        username?: string | null;
+        password?: string | null;
+        from_name?: string | null;
+        from_email: string;
+        recipients: string[];
+      };
+    }
+  | {
+      kind: 'webhook';
+      config: {
+        url: string;
+        signing_secret?: string;
+        headers: NotificationWebhookHeader[];
+      };
+    }
+);
+
+export interface NotificationChannelCreateResponse {
+  channel: NotificationChannel;
+  generated_signing_secret?: string;
+}
+
+export interface ScheduledNotificationConfig {
+  cron: string;
+  timezone: string;
+  locale: NotificationLocale;
+  top_n: number;
+}
+
+export interface ThresholdNotificationConfig {
+  metric: NotificationAlertMetric;
+  scope_kind: NotificationAlertScope;
+  scope_id: number | null;
+  operator: NotificationAlertOperator;
+  threshold: number;
+  window_minutes: number;
+  minimum_requests: number;
+  trigger_after: number;
+  recover_after: number;
+  cooldown_minutes: number;
+  send_recovery: boolean;
+  locale: NotificationLocale;
+}
+
+interface NotificationRuleBase {
+  id: number;
+  name: string;
+  enabled: boolean;
+  channel_ids: number[];
+  next_run_at_ms: number;
+  last_window_end_ms: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  alert_state?: {
+    state: 'normal' | 'pending' | 'firing' | string;
+    breach_count: number;
+    recovery_count: number;
+    opened_at_ms: number | null;
+    last_notified_at_ms: number | null;
+  };
+}
+
+export type NotificationRule = NotificationRuleBase & (
+  | { kind: 'scheduled_report'; config: ScheduledNotificationConfig }
+  | { kind: 'threshold_alert'; config: ThresholdNotificationConfig }
+);
+
+export type NotificationRuleInput = {
+  name: string;
+  enabled: boolean;
+  channel_ids: number[];
+} & (
+  | { kind: 'scheduled_report'; config: ScheduledNotificationConfig }
+  | { kind: 'threshold_alert'; config: ThresholdNotificationConfig }
+);
+
+export interface NotificationSummary {
+  enabled_channels: number;
+  enabled_rules: number;
+  firing_alerts: number;
+  failed_deliveries_24h: number;
+}
+
+export interface NotificationDelivery {
+  id: string;
+  run_id: string;
+  rule_id: number | null;
+  rule_name: string;
+  event_type: string;
+  channel_id: number | null;
+  channel_name: string;
+  channel_kind: NotificationChannelKind;
+  status: 'pending' | 'sending' | 'succeeded' | 'failed' | 'skipped' | string;
+  attempts: number;
+  next_attempt_at_ms: number | null;
+  last_attempt_at_ms: number | null;
+  delivered_at_ms: number | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at_ms: number;
+  window_from_ms: number | null;
+  window_to_ms: number | null;
+}
+
+export interface NotificationDeliveryList {
+  items: NotificationDelivery[];
+  offset: number;
+  limit: number;
+}
+
+export interface NotificationSchedulePreview {
+  cron: string;
+  timezone: string;
+  occurrences_ms: number[];
+}
+
 export interface ApiKeySummary {
   id: number;
   name: string;

@@ -8,6 +8,7 @@ use crate::db::Database;
 use crate::health::{EndpointHealthBook, UpstreamKeyHealthBook};
 use crate::key_rotation::KeyRotationBook;
 use crate::metrics::Metrics;
+use crate::notification::NotificationHandle;
 use crate::provider_runtime::{ProviderRuntimeBook, QuotaBook};
 use crate::runtime_settings::RuntimeSettings;
 use crate::system_status::SystemStatusMonitor;
@@ -30,6 +31,9 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     pub system_status: SystemStatusMonitor,
     pub runtime_settings: RuntimeSettings,
+    pub notifications: NotificationHandle,
+    pub instance_id: String,
+    pub started_at_ms: i64,
 }
 
 pub type SharedState = Arc<AppState>;

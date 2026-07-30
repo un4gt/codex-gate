@@ -5155,6 +5155,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     migrate_sqlite_provider_model_aliases(pool).await?;
     migrate_sqlite_pricing_storage(pool).await?;
     ensure_sqlite_responses_via_chat_columns(pool).await?;
+    crate::notification::migrate_sqlite(pool).await?;
     Ok(())
 }
 
@@ -5557,6 +5558,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_postgres_model_prices_provider_scope(pool).await?;
     migrate_postgres_provider_model_aliases(pool).await?;
     migrate_postgres_pricing_storage(pool).await?;
+    crate::notification::migrate_postgres(pool).await?;
     Ok(())
 }
 

@@ -733,9 +733,9 @@ describe('admin console smoke test', () => {
     renderWithTheme(<Root />);
 
     const navigation = await screen.findByRole('navigation', { name: 'Primary' });
-    const links = within(navigation).getAllByRole('link');
+    const links = Array.from(navigation.querySelectorAll<HTMLElement>('[data-nav-sortable="true"]'));
 
-    expect(links).toHaveLength(6);
+    expect(links).toHaveLength(7);
     for (const link of links) {
       expect(link.getAttribute('data-nav-sortable')).toBe('true');
       expect(link.getAttribute('aria-describedby')).toBe('primary-nav-sort-instructions');
@@ -744,7 +744,9 @@ describe('admin console smoke test', () => {
     expect(within(navigation).queryByRole('button', { name: /reorder navigation/i })).toBeNull();
     expect(screen.getByText(/Drag any navigation item to reorder it/i)).toBeTruthy();
 
-    fireEvent.click(within(navigation).getByRole('link', { name: 'Logs' }));
+    const logsLink = navigation.querySelector<HTMLElement>('[data-nav-key="logs"]');
+    expect(logsLink).toBeTruthy();
+    fireEvent.click(logsLink!);
 
     await waitFor(() => expect(window.location.pathname).toBe('/logs'));
     expect(consoleError).not.toHaveBeenCalled();
@@ -760,8 +762,8 @@ describe('admin console smoke test', () => {
     renderWithTheme(<Root />);
 
     const navigation = await screen.findByRole('navigation', { name: 'Primary' });
-    expect(within(navigation).getAllByRole('link').map(link => link.getAttribute('href')))
-      .toEqual(['/logs', '/overview', '/upstreams', '/models', '/keys', '/settings']);
+    expect(Array.from(navigation.querySelectorAll<HTMLElement>('[data-nav-sortable="true"]')).map(link => link.getAttribute('href')))
+      .toEqual(['/logs', '/overview', '/upstreams', '/models', '/keys', '/settings', '/notifications']);
   });
 
   it('filters the aggregated model inventory by search text', async () => {

@@ -3,6 +3,7 @@ WORKDIR /work/frontend
 COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
 RUN npm ci
 COPY frontend/ ./
+COPY backend/assets/notifications /work/backend/assets/notifications
 RUN npm test
 RUN npm run build
 
@@ -17,6 +18,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY backend/Cargo.toml backend/Cargo.lock backend/
 COPY backend/src backend/src
+COPY backend/assets backend/assets
 RUN cargo build --release --locked --manifest-path backend/Cargo.toml
 
 FROM debian:bookworm-slim AS runtime

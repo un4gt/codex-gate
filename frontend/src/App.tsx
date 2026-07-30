@@ -4,7 +4,7 @@ import { KeyboardSensor, PointerActivationConstraints, PointerSensor } from '@dn
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router';
-import { Activity, Boxes, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
+import { Activity, Bell, Boxes, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
@@ -12,6 +12,7 @@ import { LocaleSwitch } from '@/components/LocaleSwitch';
 import { ApiKeysPage } from '@/components/ApiKeysPage';
 import { LogsPage } from '@/components/LogsPage';
 import { ModelsPage } from '@/components/ModelsPage';
+import { NotificationsPage } from '@/components/NotificationsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
@@ -82,6 +83,11 @@ const NAV_ITEMS_BY_KEY = {
     label: '密钥',
     icon: KeyRound
   },
+  notifications: {
+    to: '/notifications',
+    label: '通知',
+    icon: Bell
+  },
   settings: {
     to: '/settings',
     label: '设置',
@@ -89,7 +95,7 @@ const NAV_ITEMS_BY_KEY = {
   }
 } as const;
 type NavKey = keyof typeof NAV_ITEMS_BY_KEY;
-const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'models', 'logs', 'keys', 'settings'];
+const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'models', 'logs', 'keys', 'notifications', 'settings'];
 const NAVIGATION_SORTABLE_TYPE = 'primary-navigation';
 const NAVIGATION_SORT_INSTRUCTIONS_ID = 'primary-nav-sort-instructions';
 const NAVIGATION_SORT_TRANSITION = {
@@ -295,6 +301,7 @@ function pageDescription(pathname: string) {
   if (pathname.startsWith('/logs')) return '筛选并排查最近请求。';
   if (pathname.startsWith('/models')) return '管理模型库存、别名与协议能力。';
   if (pathname.startsWith('/upstreams')) return '查看连接目标与健康状态。';
+  if (pathname.startsWith('/notifications')) return '配置定时报表、阈值告警与投递通道。';
   if (pathname.startsWith('/settings')) return '维护连接信息与高级设置。';
   return '';
 }
@@ -756,6 +763,17 @@ function SettingsRoutePage(props: {
   }, [props.data.loadPricesAndConfig, props.data.loadProviders, props.data.providers.length]);
   return <SettingsPage settings={props.data.settings} systemConfig={props.data.systemConfig} runtimeSettings={props.data.runtimeSettings} runtimeEnvPreview={props.data.runtimeEnvPreview} prices={props.data.prices} providers={props.data.providers} onApiBaseChange={props.data.onApiBaseChange} onAdminTokenChange={props.data.onAdminTokenChange} onRefresh={props.data.loadPricesAndConfig} onMessage={props.data.onMessage} />;
 }
+function NotificationsRoutePage(props: {
+  data: AppDataContext;
+}) {
+  useEffect(() => {
+    const tasks: Promise<void>[] = [];
+    if (props.data.providers.length === 0) tasks.push(props.data.loadProviders());
+    if (props.data.apiKeys.length === 0) tasks.push(props.data.loadApiKeys());
+    if (tasks.length > 0) void Promise.all(tasks);
+  }, [props.data.apiKeys.length, props.data.loadApiKeys, props.data.loadProviders, props.data.providers.length]);
+  return <NotificationsPage settings={props.data.settings} providers={props.data.providers} apiKeys={props.data.apiKeys} onMessage={props.data.onMessage} />;
+}
 function Root() {
   useI18n();
   const [settings, setSettings] = useState<ConnectionSettings>(readSettings);
@@ -980,6 +998,7 @@ function Root() {
           <Route path="/logs" element={<LogsRoutePage data={data} />} />
           <Route path="/upstreams" element={<UpstreamsPage data={data} />} />
           <Route path="/models" element={<ModelsRoutePage data={data} />} />
+          <Route path="/notifications" element={<NotificationsRoutePage data={data} />} />
           <Route path="/settings" element={<SettingsRoutePage data={data} />} />
           <Route path="/usage" element={<Navigate to="/overview" replace />} />
           <Route path="/prices" element={<Navigate to="/overview" replace />} />

@@ -16,6 +16,16 @@ import type {
   ModelAlias,
   ModelAliasTarget,
   ModelPrice,
+  NotificationChannel,
+  NotificationChannelCreateResponse,
+  NotificationChannelInput,
+  NotificationDelivery,
+  NotificationDeliveryList,
+  NotificationLocale,
+  NotificationRule,
+  NotificationRuleInput,
+  NotificationSchedulePreview,
+  NotificationSummary,
   ProviderModel,
   ProviderModelInventory,
   ProviderGroup,
@@ -116,6 +126,164 @@ async function deleteJson<T>(apiBase: string, path: string, adminToken: string):
 export async function loadPrices(settings: ConnectionSettings): Promise<ModelPrice[]> {
   const { apiBase, adminToken } = requireConnection(settings);
   return fetchJson<ModelPrice[]>(apiBase, '/api/v1/prices', adminToken);
+}
+
+export async function loadNotificationSummary(settings: ConnectionSettings) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<NotificationSummary>(apiBase, '/api/v1/notifications/summary', adminToken);
+}
+
+export async function loadNotificationChannels(settings: ConnectionSettings) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  const response = await fetchJson<{ items: NotificationChannel[] }>(
+    apiBase,
+    '/api/v1/notifications/channels',
+    adminToken,
+  );
+  return response.items;
+}
+
+export async function createNotificationChannel(
+  settings: ConnectionSettings,
+  payload: NotificationChannelInput,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<NotificationChannelCreateResponse>(
+    apiBase,
+    '/api/v1/notifications/channels',
+    adminToken,
+    payload,
+  );
+}
+
+export async function updateNotificationChannel(
+  settings: ConnectionSettings,
+  id: number,
+  payload: NotificationChannelInput,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<NotificationChannel>(
+    apiBase,
+    `/api/v1/notifications/channels/${id}`,
+    adminToken,
+    payload,
+  );
+}
+
+export async function deleteNotificationChannel(settings: ConnectionSettings, id: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/notifications/channels/${id}`, adminToken);
+}
+
+export async function testNotificationChannel(
+  settings: ConnectionSettings,
+  id: number,
+  locale: NotificationLocale,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<{ run_id: string }>(
+    apiBase,
+    `/api/v1/notifications/channels/${id}/test`,
+    adminToken,
+    { locale },
+  );
+}
+
+export async function loadNotificationRules(
+  settings: ConnectionSettings,
+  kind?: 'scheduled_report' | 'threshold_alert',
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  const suffix = kind ? `?kind=${kind}` : '';
+  const response = await fetchJson<{ items: NotificationRule[] }>(
+    apiBase,
+    `/api/v1/notifications/rules${suffix}`,
+    adminToken,
+  );
+  return response.items;
+}
+
+export async function createNotificationRule(
+  settings: ConnectionSettings,
+  payload: NotificationRuleInput,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<NotificationRule>(
+    apiBase,
+    '/api/v1/notifications/rules',
+    adminToken,
+    payload,
+  );
+}
+
+export async function updateNotificationRule(
+  settings: ConnectionSettings,
+  id: number,
+  payload: NotificationRuleInput,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<NotificationRule>(
+    apiBase,
+    `/api/v1/notifications/rules/${id}`,
+    adminToken,
+    payload,
+  );
+}
+
+export async function deleteNotificationRule(settings: ConnectionSettings, id: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<void>(apiBase, `/api/v1/notifications/rules/${id}`, adminToken);
+}
+
+export async function runNotificationRule(settings: ConnectionSettings, id: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<{ run_id: string }>(
+    apiBase,
+    `/api/v1/notifications/rules/${id}/run`,
+    adminToken,
+    {},
+  );
+}
+
+export async function previewNotificationSchedule(
+  settings: ConnectionSettings,
+  cron: string,
+  timezone: string,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<NotificationSchedulePreview>(
+    apiBase,
+    '/api/v1/notifications/schedule-preview',
+    adminToken,
+    { cron, timezone },
+  );
+}
+
+export async function loadNotificationDeliveries(
+  settings: ConnectionSettings,
+  options: { offset?: number; limit?: number; status?: string; ruleId?: number } = {},
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  const search = new URLSearchParams();
+  search.set('offset', String(options.offset ?? 0));
+  search.set('limit', String(options.limit ?? 50));
+  if (options.status) search.set('status', options.status);
+  if (typeof options.ruleId === 'number') search.set('rule_id', String(options.ruleId));
+  return fetchJson<NotificationDeliveryList>(
+    apiBase,
+    `/api/v1/notifications/deliveries?${search.toString()}`,
+    adminToken,
+  );
+}
+
+export async function retryNotificationDelivery(settings: ConnectionSettings, id: string) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<NotificationDelivery>(
+    apiBase,
+    `/api/v1/notifications/deliveries/${encodeURIComponent(id)}/retry`,
+    adminToken,
+    {},
+  );
 }
 
 export async function loadSystemConfig(settings: ConnectionSettings): Promise<SystemConfigResponse> {

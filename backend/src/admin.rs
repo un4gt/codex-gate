@@ -125,6 +125,10 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     let path = req.uri().path();
     let method = req.method().clone();
 
+    if path == "/api/v1/notifications" || path.starts_with("/api/v1/notifications/") {
+        return crate::notification::handle_admin(req, state).await;
+    }
+
     match (method, path) {
         (Method::GET, "/api/v1/ping") => return http::text(StatusCode::OK, "pong\n"),
 

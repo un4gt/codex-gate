@@ -1,0 +1,37 @@
+{{ rule.name }}
+
+Window: {{ window.from_ms }} — {{ window.to_ms }} ({{ window.timezone }})
+
+Requests {{ usage.totals.requests }} · Failed {{ usage.totals.failed }} · Tokens {{ usage.totals.total_tokens }} · Cost ${{ usage.totals.estimated_cost_usd }}
+
+SERVER STATUS
+
+- CPU: {{ server.cpu_usage_percent }}%
+- Memory: {{ server.memory_usage_percent }}%
+- Providers: {{ server.healthy }} healthy / {{ server.warning }} warning / {{ server.error }} error
+- Database: {% if server.database_ready %}ready{% else %}unavailable{% endif %}
+
+PROVIDER USAGE
+
+{{ provider_table_text }}
+
+CLIENT KEY USAGE
+
+{{ client_key_table_text }}
+
+{% if alert %}
+
+ALERT
+
+{{ alert.metric }}: {{ alert.value }} (threshold {{ alert.threshold }})
+{% endif %}
+
+{% if warnings %}
+
+WARNINGS
+
+{% for warning in warnings %}- {{ warning }}
+{% endfor %}
+{% endif %}
+
+Sent automatically by little-gate · instance {{ instance.id }}

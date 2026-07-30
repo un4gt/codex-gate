@@ -2,6 +2,8 @@
 
 轻量级 OpenAI 兼容网关代理，提供多上游路由、用户密钥管理、统计与基础可观测能力。
 
+管理台的“通知”模块支持按 Cron 定时发送服务器状态与上游 Provider/客户端访问 Key 用量报表，也支持 CPU、内存、上游健康、请求、错误率、Token 和估算成本阈值告警。首版投递通道包括 SMTP 邮件和带 HMAC-SHA256 签名的通用 Webhook，配置与安全说明见 [docs/notifications.md](docs/notifications.md)。
+
 ## 部署方式
 
 ### 1) Docker Compose 快速部署（使用已发布镜像）
