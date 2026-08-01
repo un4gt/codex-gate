@@ -69,6 +69,30 @@ pub struct DeliveryView {
 }
 
 #[derive(Clone, Debug)]
+pub struct DeliveryDetailView {
+    pub delivery: DeliveryView,
+    pub last_http_status: Option<i32>,
+    pub last_request_body: Option<String>,
+    pub last_response_body: Option<String>,
+    pub event_payload_json: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeliveryAttemptDiagnostics<'a> {
+    pub http_status: Option<i32>,
+    pub request_body: Option<&'a str>,
+    pub response_body: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DeliveryFailure<'a> {
+    pub retry_at_ms: Option<i64>,
+    pub error_code: &'a str,
+    pub error_message: &'a str,
+    pub diagnostics: DeliveryAttemptDiagnostics<'a>,
+}
+
+#[derive(Clone, Debug)]
 pub struct UsageGroupRow {
     pub provider_id: Option<i64>,
     pub api_key_id: i64,
@@ -173,6 +197,9 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
   lease_until_ms INTEGER,
   last_error_code TEXT,
   last_error_message TEXT,
+  last_http_status INTEGER,
+  last_request_body TEXT,
+  last_response_body TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   UNIQUE(run_id, channel_id),
@@ -191,6 +218,9 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_api_key_time
     )
     .execute(pool)
     .await?;
+    ensure_sqlite_column(pool, "last_http_status", "INTEGER").await?;
+    ensure_sqlite_column(pool, "last_request_body", "TEXT").await?;
+    ensure_sqlite_column(pool, "last_response_body", "TEXT").await?;
     Ok(())
 }
 
@@ -272,6 +302,9 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
   lease_until_ms BIGINT,
   last_error_code TEXT,
   last_error_message TEXT,
+  last_http_status INTEGER,
+  last_request_body TEXT,
+  last_response_body TEXT,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL,
   UNIQUE(run_id, channel_id)
@@ -286,6 +319,37 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_api_key_time
   ON stats_events(api_key_id, time_ms);
 "#,
     )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS last_http_status INTEGER;
+ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS last_request_body TEXT;
+ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS last_response_body TEXT;
+"#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_sqlite_column(
+    pool: &SqlitePool,
+    column: &str,
+    definition: &str,
+) -> Result<(), DbError> {
+    let rows = sqlx::query("PRAGMA table_info(notification_deliveries)")
+        .fetch_all(pool)
+        .await?;
+    if rows
+        .iter()
+        .any(|row| row.get::<String, _>("name") == column)
+    {
+        return Ok(());
+    }
+    sqlx::query(&format!(
+        "ALTER TABLE notification_deliveries ADD COLUMN {column} {definition}"
+    ))
     .execute(pool)
     .await?;
     Ok(())
@@ -926,16 +990,17 @@ impl Database {
         &self,
         id: &str,
         owner: &str,
+        diagnostics: DeliveryAttemptDiagnostics<'_>,
         now_ms: i64,
     ) -> Result<(), DbError> {
         match self {
             Self::Sqlite(pool) => {
-                sqlx::query("UPDATE notification_deliveries SET status = 'succeeded', delivered_at_ms = ?, next_attempt_at_ms = NULL, lease_owner = NULL, lease_until_ms = NULL, last_error_code = NULL, last_error_message = NULL, updated_at_ms = ? WHERE id = ? AND lease_owner = ?")
-                .bind(now_ms).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
+                sqlx::query("UPDATE notification_deliveries SET status = 'succeeded', delivered_at_ms = ?, next_attempt_at_ms = NULL, lease_owner = NULL, lease_until_ms = NULL, last_error_code = NULL, last_error_message = NULL, last_http_status = ?, last_request_body = ?, last_response_body = ?, updated_at_ms = ? WHERE id = ? AND lease_owner = ?")
+                .bind(now_ms).bind(diagnostics.http_status).bind(diagnostics.request_body).bind(diagnostics.response_body).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
             }
             Self::Postgres(pool) => {
-                sqlx::query("UPDATE notification_deliveries SET status = 'succeeded', delivered_at_ms = $1, next_attempt_at_ms = NULL, lease_owner = NULL, lease_until_ms = NULL, last_error_code = NULL, last_error_message = NULL, updated_at_ms = $2 WHERE id = $3 AND lease_owner = $4")
-                .bind(now_ms).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
+                sqlx::query("UPDATE notification_deliveries SET status = 'succeeded', delivered_at_ms = $1, next_attempt_at_ms = NULL, lease_owner = NULL, lease_until_ms = NULL, last_error_code = NULL, last_error_message = NULL, last_http_status = $2, last_request_body = $3, last_response_body = $4, updated_at_ms = $5 WHERE id = $6 AND lease_owner = $7")
+                .bind(now_ms).bind(diagnostics.http_status).bind(diagnostics.request_body).bind(diagnostics.response_body).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
             }
         }
         self.notification_refresh_run_status_for_delivery(id, now_ms)
@@ -946,24 +1011,22 @@ impl Database {
         &self,
         id: &str,
         owner: &str,
-        retry_at_ms: Option<i64>,
-        error_code: &str,
-        error_message: &str,
+        failure: DeliveryFailure<'_>,
         now_ms: i64,
     ) -> Result<(), DbError> {
-        let status = if retry_at_ms.is_some() {
+        let status = if failure.retry_at_ms.is_some() {
             "pending"
         } else {
             "failed"
         };
         match self {
             Self::Sqlite(pool) => {
-                sqlx::query("UPDATE notification_deliveries SET status = ?, next_attempt_at_ms = ?, lease_owner = NULL, lease_until_ms = NULL, last_error_code = ?, last_error_message = ?, updated_at_ms = ? WHERE id = ? AND lease_owner = ?")
-                .bind(status).bind(retry_at_ms).bind(error_code).bind(error_message).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
+                sqlx::query("UPDATE notification_deliveries SET status = ?, next_attempt_at_ms = ?, lease_owner = NULL, lease_until_ms = NULL, last_error_code = ?, last_error_message = ?, last_http_status = ?, last_request_body = ?, last_response_body = ?, updated_at_ms = ? WHERE id = ? AND lease_owner = ?")
+                .bind(status).bind(failure.retry_at_ms).bind(failure.error_code).bind(failure.error_message).bind(failure.diagnostics.http_status).bind(failure.diagnostics.request_body).bind(failure.diagnostics.response_body).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
             }
             Self::Postgres(pool) => {
-                sqlx::query("UPDATE notification_deliveries SET status = $1, next_attempt_at_ms = $2, lease_owner = NULL, lease_until_ms = NULL, last_error_code = $3, last_error_message = $4, updated_at_ms = $5 WHERE id = $6 AND lease_owner = $7")
-                .bind(status).bind(retry_at_ms).bind(error_code).bind(error_message).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
+                sqlx::query("UPDATE notification_deliveries SET status = $1, next_attempt_at_ms = $2, lease_owner = NULL, lease_until_ms = NULL, last_error_code = $3, last_error_message = $4, last_http_status = $5, last_request_body = $6, last_response_body = $7, updated_at_ms = $8 WHERE id = $9 AND lease_owner = $10")
+                .bind(status).bind(failure.retry_at_ms).bind(failure.error_code).bind(failure.error_message).bind(failure.diagnostics.http_status).bind(failure.diagnostics.request_body).bind(failure.diagnostics.response_body).bind(now_ms).bind(id).bind(owner).execute(pool).await?;
             }
         }
         self.notification_refresh_run_status_for_delivery(id, now_ms)
@@ -1083,6 +1146,25 @@ impl Database {
                 .fetch_optional(pool)
                 .await?
                 .map(delivery_view_from_postgres)),
+        }
+    }
+
+    pub async fn notification_get_delivery_detail(
+        &self,
+        id: &str,
+    ) -> Result<Option<DeliveryDetailView>, DbError> {
+        let sql = "SELECT d.id, d.run_id, r.rule_id, r.rule_name, r.event_type, d.channel_id, d.channel_name, d.channel_kind, d.status, d.attempts, d.next_attempt_at_ms, d.last_attempt_at_ms, d.delivered_at_ms, d.last_error_code, d.last_error_message, d.created_at_ms, r.window_from_ms, r.window_to_ms, d.last_http_status, d.last_request_body, d.last_response_body, r.payload_json AS event_payload_json FROM notification_deliveries d JOIN notification_runs r ON r.id = d.run_id WHERE d.id = ";
+        match self {
+            Self::Sqlite(pool) => Ok(sqlx::query(&format!("{sql}?"))
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .map(delivery_detail_from_sqlite)),
+            Self::Postgres(pool) => Ok(sqlx::query(&format!("{sql}$1"))
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .map(delivery_detail_from_postgres)),
         }
     }
 
@@ -1349,6 +1431,34 @@ fn delivery_view_from_postgres(row: sqlx::postgres::PgRow) -> DeliveryView {
         created_at_ms: row.get("created_at_ms"),
         window_from_ms: row.get("window_from_ms"),
         window_to_ms: row.get("window_to_ms"),
+    }
+}
+
+fn delivery_detail_from_sqlite(row: sqlx::sqlite::SqliteRow) -> DeliveryDetailView {
+    let last_http_status = row.get("last_http_status");
+    let last_request_body = row.get("last_request_body");
+    let last_response_body = row.get("last_response_body");
+    let event_payload_json = row.get("event_payload_json");
+    DeliveryDetailView {
+        delivery: delivery_view_from_sqlite(row),
+        last_http_status,
+        last_request_body,
+        last_response_body,
+        event_payload_json,
+    }
+}
+
+fn delivery_detail_from_postgres(row: sqlx::postgres::PgRow) -> DeliveryDetailView {
+    let last_http_status = row.get("last_http_status");
+    let last_request_body = row.get("last_request_body");
+    let last_response_body = row.get("last_response_body");
+    let event_payload_json = row.get("event_payload_json");
+    DeliveryDetailView {
+        delivery: delivery_view_from_postgres(row),
+        last_http_status,
+        last_request_body,
+        last_response_body,
+        event_payload_json,
     }
 }
 

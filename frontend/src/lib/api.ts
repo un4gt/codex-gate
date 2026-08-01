@@ -20,6 +20,7 @@ import type {
   NotificationChannelCreateResponse,
   NotificationChannelInput,
   NotificationDelivery,
+  NotificationDeliveryDetail,
   NotificationDeliveryList,
   NotificationLocale,
   NotificationRule,
@@ -283,6 +284,15 @@ export async function retryNotificationDelivery(settings: ConnectionSettings, id
     `/api/v1/notifications/deliveries/${encodeURIComponent(id)}/retry`,
     adminToken,
     {},
+  );
+}
+
+export async function loadNotificationDelivery(settings: ConnectionSettings, id: string) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<NotificationDeliveryDetail>(
+    apiBase,
+    `/api/v1/notifications/deliveries/${encodeURIComponent(id)}`,
+    adminToken,
   );
 }
 

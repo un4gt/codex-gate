@@ -6,7 +6,9 @@ use serde_json::json;
 use tokio::sync::{Semaphore, mpsc};
 
 use super::report::{AlertPayload, build_payload, metric_value};
-use super::store::{AlertStateRecord, AlertStateUpdate, RuleRecord};
+use super::store::{
+    AlertStateRecord, AlertStateUpdate, DeliveryAttemptDiagnostics, DeliveryFailure, RuleRecord,
+};
 use super::transport::{DeliveryContext, send_delivery};
 use super::{
     ChannelConfig, DELIVERY_LEASE_MS, HISTORY_RETENTION_MS, NotificationError, NotificationLocale,
@@ -432,9 +434,14 @@ async fn deliver_one(state: &SharedState, id: &str) -> Result<(), NotificationEr
                     .notification_finish_delivery_failure(
                         &work.id,
                         owner,
-                        None,
-                        "channel_decryption_failed",
-                        &format!("failed to decrypt channel configuration: {error}"),
+                        DeliveryFailure {
+                            retry_at_ms: None,
+                            error_code: "channel_decryption_failed",
+                            error_message: &format!(
+                                "failed to decrypt channel configuration: {error}"
+                            ),
+                            diagnostics: DeliveryAttemptDiagnostics::default(),
+                        },
                         now_ms,
                     )
                     .await?;
@@ -455,10 +462,19 @@ async fn deliver_one(state: &SharedState, id: &str) -> Result<(), NotificationEr
     )
     .await;
     match result {
-        Ok(()) => {
+        Ok(diagnostics) => {
             state
                 .db
-                .notification_finish_delivery_success(&work.id, owner, util::now_ms())
+                .notification_finish_delivery_success(
+                    &work.id,
+                    owner,
+                    DeliveryAttemptDiagnostics {
+                        http_status: diagnostics.http_status.map(i32::from),
+                        request_body: diagnostics.request_body.as_deref(),
+                        response_body: diagnostics.response_body.as_deref(),
+                    },
+                    util::now_ms(),
+                )
                 .await?;
         }
         Err(error) => {
@@ -476,9 +492,16 @@ async fn deliver_one(state: &SharedState, id: &str) -> Result<(), NotificationEr
                 .notification_finish_delivery_failure(
                     &work.id,
                     owner,
-                    retry_at_ms,
-                    error.code,
-                    &error.message,
+                    DeliveryFailure {
+                        retry_at_ms,
+                        error_code: error.code,
+                        error_message: &error.message,
+                        diagnostics: DeliveryAttemptDiagnostics {
+                            http_status: error.diagnostics.http_status.map(i32::from),
+                            request_body: error.diagnostics.request_body.as_deref(),
+                            response_body: error.diagnostics.response_body.as_deref(),
+                        },
+                    },
                     util::now_ms(),
                 )
                 .await?;

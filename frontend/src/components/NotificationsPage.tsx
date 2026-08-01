@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   BellRing,
   CalendarClock,
   Check,
   Copy,
+  Eye,
   Mail,
   Pencil,
   Play,
@@ -40,8 +41,10 @@ import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 
+import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge, type StatusTone } from '@/components/console/StatusBadge';
 import {
@@ -49,6 +52,7 @@ import {
   createNotificationRule,
   deleteNotificationChannel,
   deleteNotificationRule,
+  loadNotificationDelivery,
   loadNotificationChannels,
   loadNotificationDeliveries,
   loadNotificationRules,
@@ -71,12 +75,14 @@ import type {
   NotificationChannel,
   NotificationChannelInput,
   NotificationDelivery,
+  NotificationDeliveryDetail,
   NotificationLocale,
   NotificationRule,
   NotificationRuleInput,
   NotificationRuleKind,
   NotificationSmtpSecurity,
   NotificationSummary,
+  NotificationWebhookFormat,
   ProviderWorkspace,
 } from '@/lib/types';
 
@@ -101,6 +107,7 @@ interface ChannelDraft {
   fromEmail: string;
   recipients: string;
   webhookUrl: string;
+  webhookFormat: NotificationWebhookFormat;
   signingSecret: string;
   headers: string;
 }
@@ -166,6 +173,7 @@ function emptyChannelDraft(kind: 'smtp' | 'webhook'): ChannelDraft {
     fromEmail: '',
     recipients: '',
     webhookUrl: '',
+    webhookFormat: 'generic',
     signingSecret: '',
     headers: '',
   };
@@ -193,6 +201,7 @@ function channelDraftFrom(channel: NotificationChannel): ChannelDraft {
     name: channel.name,
     enabled: channel.enabled,
     webhookUrl: '',
+    webhookFormat: channel.config.format,
     headers: channel.config.headers.map((header) => `${header.name}:`).join('\n'),
   };
 }
@@ -310,6 +319,7 @@ function channelInputFromDraft(draft: ChannelDraft): NotificationChannelInput {
     kind: 'webhook',
     config: {
       url: draft.webhookUrl.trim(),
+      format: draft.webhookFormat,
       signing_secret: draft.signingSecret.trim(),
       headers: parseHeaders(draft.headers),
     },
@@ -389,6 +399,93 @@ function statusLabel(status: string) {
   return labels[status] ?? status;
 }
 
+function webhookFormatLabel(format: NotificationWebhookFormat) {
+  const labels: Record<NotificationWebhookFormat, string> = {
+    generic: '通用 JSON',
+    feishu: '飞书',
+    wecom: '企业微信',
+    dingtalk: '钉钉',
+    slack: 'Slack',
+    discord: 'Discord',
+  };
+  return labels[format];
+}
+
+function prettyJson(raw: string | null) {
+  if (!raw) return '—';
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+function formatOptionalDateTime(value: number | null) {
+  return value === null ? '—' : formatDateTime(value);
+}
+
+function DetailValue(props: { label: string; children: ReactNode; mono?: boolean }) {
+  return <Box className="min-w-0">
+      <Typography className="text-xs text-muted-foreground" component="div">{t(props.label)}</Typography>
+      <Box className={`mt-1 break-words text-sm text-foreground${props.mono ? ' font-mono' : ''}`}>{props.children}</Box>
+    </Box>;
+}
+
+function DiagnosticBody(props: { title: string; value: string }) {
+  return <Box>
+      <Typography className="mb-2 text-sm font-semibold" component="h3">{t(props.title)}</Typography>
+      <Box component="pre" className="max-h-80 overflow-auto whitespace-pre-wrap break-all border border-border bg-muted/20 p-4 font-mono text-xs leading-5 text-foreground">{props.value}</Box>
+    </Box>;
+}
+
+function DeliveryDetailDrawer(props: {
+  delivery: NotificationDelivery | null;
+  detail: NotificationDeliveryDetail | null;
+  loading: boolean;
+  error: string;
+  onClose: () => void;
+}) {
+  const delivery = props.detail ?? props.delivery;
+  return <DetailDrawer
+      open={props.delivery !== null}
+      title="投递详情"
+      description={delivery?.id}
+      onClose={props.onClose}
+    >
+      {props.loading ? <Box className="flex min-h-40 items-center justify-center"><CircularProgress size={24} /></Box> : null}
+      {props.error ? <Alert severity="error">{props.error}</Alert> : null}
+      {!props.loading && delivery ? <Box className="grid gap-6">
+          <Box className="grid gap-4 sm:grid-cols-2">
+            <DetailValue label="状态"><StatusBadge tone={deliveryTone(delivery.status)}>{t(statusLabel(delivery.status))}</StatusBadge></DetailValue>
+            <DetailValue label="HTTP 状态">{props.detail?.last_http_status ?? '—'}</DetailValue>
+            <DetailValue label="事件">{t(delivery.event_type)}</DetailValue>
+            <DetailValue label="尝试次数">{delivery.attempts}</DetailValue>
+            <DetailValue label="规则">{delivery.rule_name}</DetailValue>
+            <DetailValue label="通道">{delivery.channel_name}</DetailValue>
+            <DetailValue label="创建时间">{formatDateTime(delivery.created_at_ms)}</DetailValue>
+            <DetailValue label="最近尝试">{formatOptionalDateTime(delivery.last_attempt_at_ms)}</DetailValue>
+            <DetailValue label="送达时间">{formatOptionalDateTime(delivery.delivered_at_ms)}</DetailValue>
+            <DetailValue label="下次尝试">{formatOptionalDateTime(delivery.next_attempt_at_ms)}</DetailValue>
+            <DetailValue label="投递 ID" mono>{delivery.id}</DetailValue>
+            <DetailValue label="运行 ID" mono>{delivery.run_id}</DetailValue>
+          </Box>
+          {delivery.last_error_code || delivery.last_error_message ? <>
+              <Divider />
+              <Box className="grid gap-4 sm:grid-cols-2">
+                <DetailValue label="错误代码" mono>{delivery.last_error_code ?? '—'}</DetailValue>
+                <DetailValue label="错误信息">{delivery.last_error_message ?? '—'}</DetailValue>
+              </Box>
+            </> : null}
+          {props.detail ? <>
+              <Divider />
+              <DiagnosticBody title="实际请求体" value={prettyJson(props.detail.last_request_body)} />
+              <DiagnosticBody title="平台响应体" value={prettyJson(props.detail.last_response_body)} />
+              <DiagnosticBody title="事件载荷" value={JSON.stringify(props.detail.event_payload, null, 2) ?? '—'} />
+            </> : null}
+        </Box> : null}
+    </DetailDrawer>;
+}
+
 function metricLabel(metric: NotificationAlertMetric) {
   const labels: Record<NotificationAlertMetric, string> = {
     cpu_usage_percent: 'CPU 使用率',
@@ -437,6 +534,11 @@ export function NotificationsPage(props: NotificationsPageProps) {
   const [channelDraft, setChannelDraft] = useState<ChannelDraft | null>(null);
   const [ruleDraft, setRuleDraft] = useState<RuleDraft | null>(null);
   const [schedulePreview, setSchedulePreview] = useState<number[]>([]);
+  const [selectedDelivery, setSelectedDelivery] = useState<NotificationDelivery | null>(null);
+  const [deliveryDetail, setDeliveryDetail] = useState<NotificationDeliveryDetail | null>(null);
+  const [deliveryDetailLoading, setDeliveryDetailLoading] = useState(false);
+  const [deliveryDetailError, setDeliveryDetailError] = useState('');
+  const detailRequestId = useRef(0);
 
   const scheduledRules = useMemo(
     () => rules.filter((rule): rule is Extract<NotificationRule, { kind: 'scheduled_report' }> => rule.kind === 'scheduled_report'),
@@ -490,6 +592,33 @@ export function NotificationsPage(props: NotificationsPageProps) {
       setError(loadError instanceof Error ? loadError.message : t('刷新发送历史失败。'));
     }
   }, [props.settings]);
+
+  const openDeliveryDetail = useCallback(async (delivery: NotificationDelivery) => {
+    const requestId = detailRequestId.current + 1;
+    detailRequestId.current = requestId;
+    setSelectedDelivery(delivery);
+    setDeliveryDetail(null);
+    setDeliveryDetailError('');
+    setDeliveryDetailLoading(true);
+    try {
+      const detail = await loadNotificationDelivery(props.settings, delivery.id);
+      if (detailRequestId.current === requestId) setDeliveryDetail(detail);
+    } catch (detailError) {
+      if (detailRequestId.current === requestId) {
+        setDeliveryDetailError(detailError instanceof Error ? detailError.message : t('读取投递详情失败。'));
+      }
+    } finally {
+      if (detailRequestId.current === requestId) setDeliveryDetailLoading(false);
+    }
+  }, [props.settings]);
+
+  const closeDeliveryDetail = useCallback(() => {
+    detailRequestId.current += 1;
+    setSelectedDelivery(null);
+    setDeliveryDetail(null);
+    setDeliveryDetailError('');
+    setDeliveryDetailLoading(false);
+  }, []);
 
   useEffect(() => {
     void refreshAll();
@@ -637,7 +766,7 @@ export function NotificationsPage(props: NotificationsPageProps) {
 
       <Card>
         <CardContent className="flex flex-col gap-5">
-          <SectionTitle title="投递通道" description="SMTP 邮件由 Rust 后端投递，邮件正文使用 EmailMD 生成；Webhook 使用版本化 JSON 和 HMAC-SHA256。" action={<Box className="flex flex-wrap gap-2">
+          <SectionTitle title="投递通道" description="SMTP 邮件由 Rust 后端投递；Webhook 支持通用 JSON 与常用消息平台格式。" action={<Box className="flex flex-wrap gap-2">
               <Button type="button" size="sm" variant="outline" onClick={() => setChannelDraft(emptyChannelDraft('smtp'))}><Mail className="mr-2 size-4" />{t('添加 SMTP')}</Button>
               <Button type="button" size="sm" onClick={() => setChannelDraft(emptyChannelDraft('webhook'))}><Webhook className="mr-2 size-4" />{t('添加 Webhook')}</Button>
             </Box>} />
@@ -651,14 +780,14 @@ export function NotificationsPage(props: NotificationsPageProps) {
                       <Box className="min-w-0">
                         <Typography className="truncate font-semibold" component="h3">{channel.name}</Typography>
                         <Typography className="mt-1 truncate text-xs text-muted-foreground" component="p">
-                          {channel.kind === 'smtp' ? `${channel.config.host}:${channel.config.port}` : channel.config.url_masked}
+                          {channel.kind === 'smtp' ? `${channel.config.host}:${channel.config.port}` : `${t(webhookFormatLabel(channel.config.format))} · ${channel.config.url_masked}`}
                         </Typography>
                       </Box>
                     </Box>
                     <StatusBadge tone={channel.enabled ? 'normal' : 'disabled'}>{channel.enabled ? '已启用' : '已禁用'}</StatusBadge>
                   </Box>
                   <Box className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
-                    <Box>{channel.kind === 'smtp' ? t('{{count}} 个收件人', { count: channel.config.recipients.length }) : t('HMAC 签名已启用')}</Box>
+                    <Box>{channel.kind === 'smtp' ? t('{{count}} 个收件人', { count: channel.config.recipients.length }) : t('{{format}} 消息格式', { format: t(webhookFormatLabel(channel.config.format)) })}</Box>
                     <Box>{t('更新于 {{time}}', { time: formatDateTime(channel.updated_at_ms) })}</Box>
                   </Box>
                   <Divider />
@@ -714,14 +843,17 @@ export function NotificationsPage(props: NotificationsPageProps) {
                     <TableCell className="whitespace-nowrap">{t(delivery.event_type)}</TableCell>
                     <TableCell>{delivery.rule_name}</TableCell>
                     <TableCell>{delivery.channel_name}</TableCell>
-                    <TableCell><StatusBadge tone={deliveryTone(delivery.status)}>{statusLabel(delivery.status)}</StatusBadge></TableCell>
+                    <TableCell><StatusBadge tone={deliveryTone(delivery.status)}>{t(statusLabel(delivery.status))}</StatusBadge></TableCell>
                     <TableCell>{delivery.attempts}</TableCell>
                     <TableCell className="max-w-72"><Box className="truncate text-xs text-muted-foreground" title={delivery.last_error_message ?? undefined}>{delivery.last_error_message ?? '—'}</Box></TableCell>
-                    <TableCell align="right">{delivery.status === 'failed' ? <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={() => void runAction(
-                      `delivery-retry-${delivery.id}`,
-                      async () => { await retryNotificationDelivery(props.settings, delivery.id); },
-                      t('失败投递已重新排队。'),
-                    )}><RotateCcw className="mr-2 size-3" />{t('重试')}</Button> : '—'}</TableCell>
+                    <TableCell align="right"><Box className="flex min-w-28 justify-end gap-1">
+                        <Tooltip title={t('查看详情')}><Button type="button" size="icon" variant="ghost" aria-label={t('查看详情')} onClick={() => void openDeliveryDetail(delivery)}><Eye className="size-4" /></Button></Tooltip>
+                        {delivery.status === 'failed' ? <Tooltip title={t('重试')}><Button type="button" size="icon" variant="outline" aria-label={t('重试')} disabled={busy !== null} onClick={() => void runAction(
+                          `delivery-retry-${delivery.id}`,
+                          async () => { await retryNotificationDelivery(props.settings, delivery.id); },
+                          t('失败投递已重新排队。'),
+                        )}><RotateCcw className="size-3" /></Button></Tooltip> : null}
+                      </Box></TableCell>
                   </TableRow>)}
               </TableBody>
             </Table>
@@ -743,6 +875,7 @@ export function NotificationsPage(props: NotificationsPageProps) {
           setBusy(null);
         }
       }} />
+      <DeliveryDetailDrawer delivery={selectedDelivery} detail={deliveryDetail} loading={deliveryDetailLoading} error={deliveryDetailError} onClose={closeDeliveryDetail} />
     </Box>;
 }
 
@@ -829,8 +962,14 @@ function ChannelDialog(props: {
                 </Box>
                 <FormControl><FormLabel>{t('收件人')}</FormLabel><InputBase multiline minRows={3} value={draft.recipients} onChange={(event) => update('recipients', event.target.value)} inputProps={{ 'aria-label': t('收件人') }} placeholder={t('每行一个邮箱，也可使用逗号分隔')} /><FormHelperText>{t('支持 1–50 个收件人。')}</FormHelperText></FormControl>
               </> : <>
-                <FormControl><FormLabel>{t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）')}</FormLabel><InputBase type="url" value={draft.webhookUrl} onChange={(event) => update('webhookUrl', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）') }} placeholder="https://example.com/hooks/little-gate" /></FormControl>
-                <FormControl><FormLabel>{t(draft.id === null ? '签名密钥（留空自动生成）' : '新签名密钥（留空则保留）')}</FormLabel><InputBase type="password" value={draft.signingSecret} onChange={(event) => update('signingSecret', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '签名密钥（留空自动生成）' : '新签名密钥（留空则保留）') }} /><FormHelperText>{t('请求使用 X-Little-Gate-Signature: v1=<HMAC-SHA256>。')}</FormHelperText></FormControl>
+                <Box className="grid gap-4 md:grid-cols-2">
+                  <FormControl><FormLabel>{t('消息格式')}</FormLabel><Select value={draft.webhookFormat} inputProps={{ 'aria-label': t('消息格式') }} onChange={(event) => update('webhookFormat', event.target.value as NotificationWebhookFormat)}>
+                      {(['generic', 'feishu', 'wecom', 'dingtalk', 'slack', 'discord'] as NotificationWebhookFormat[]).map((format) => <MenuItem key={format} value={format}>{t(webhookFormatLabel(format))}</MenuItem>)}
+                    </Select><FormHelperText>{t(draft.webhookFormat === 'generic' ? '发送版本化 little-gate 事件 JSON。' : '发送该平台机器人可直接接收的文本消息。')}</FormHelperText></FormControl>
+                  <FormControl><FormLabel>{t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）')}</FormLabel><InputBase type="url" value={draft.webhookUrl} onChange={(event) => update('webhookUrl', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）') }} placeholder="https://example.com/hooks/little-gate" /></FormControl>
+                </Box>
+                {draft.webhookFormat === 'generic' ? <FormControl><FormLabel>{t(draft.id === null ? '签名密钥（留空自动生成）' : '新签名密钥（留空则保留）')}</FormLabel><InputBase type="password" value={draft.signingSecret} onChange={(event) => update('signingSecret', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '签名密钥（留空自动生成）' : '新签名密钥（留空则保留）') }} /><FormHelperText>{t('请求使用 X-Little-Gate-Signature: v1=<HMAC-SHA256>。')}</FormHelperText></FormControl> : null}
+                {draft.webhookFormat === 'feishu' ? <FormControl><FormLabel>{t(draft.id === null ? '飞书签名密钥（可选）' : '新飞书签名密钥（留空则保留）')}</FormLabel><InputBase type="password" value={draft.signingSecret} onChange={(event) => update('signingSecret', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '飞书签名密钥（可选）' : '新飞书签名密钥（留空则保留）') }} /><FormHelperText>{t('仅在飞书机器人启用了签名校验时填写。')}</FormHelperText></FormControl> : null}
                 <FormControl><FormLabel>{t('自定义请求头')}</FormLabel><InputBase multiline minRows={3} value={draft.headers} onChange={(event) => update('headers', event.target.value)} inputProps={{ 'aria-label': t('自定义请求头') }} placeholder={'X-Team: platform\nX-Environment: production'} /><FormHelperText>{t('每行使用“名称: 值”格式；签名和内容相关请求头不可覆盖。')}</FormHelperText></FormControl>
               </>}
           </DialogContent>

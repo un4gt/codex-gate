@@ -41,6 +41,16 @@ struct DeliveryListResponse {
 }
 
 #[derive(Serialize)]
+struct DeliveryDetailResponse {
+    #[serde(flatten)]
+    delivery: DeliveryView,
+    last_http_status: Option<i32>,
+    last_request_body: Option<String>,
+    last_response_body: Option<String>,
+    event_payload: serde_json::Value,
+}
+
+#[derive(Serialize)]
 struct EnqueuedResponse {
     run_id: String,
 }
@@ -101,6 +111,7 @@ struct PublicSmtpConfig {
 #[derive(Serialize)]
 struct PublicWebhookConfig {
     url_masked: String,
+    format: super::WebhookFormat,
     has_signing_secret: bool,
     headers: Vec<PublicWebhookHeader>,
 }
@@ -524,12 +535,22 @@ async fn list_deliveries(
 }
 
 async fn get_delivery(id: &str, state: &SharedState) -> Result<HttpResponse, NotificationError> {
-    let delivery = state
+    let detail = state
         .db
-        .notification_get_delivery(id)
+        .notification_get_delivery_detail(id)
         .await?
         .ok_or_else(|| NotificationError::not_found("notification delivery not found"))?;
-    Ok(http::json(StatusCode::OK, &delivery))
+    let event_payload = serde_json::from_str(&detail.event_payload_json)?;
+    Ok(http::json(
+        StatusCode::OK,
+        &DeliveryDetailResponse {
+            delivery: detail.delivery,
+            last_http_status: detail.last_http_status,
+            last_request_body: detail.last_request_body,
+            last_response_body: detail.last_response_body,
+            event_payload,
+        },
+    ))
 }
 
 async fn retry_delivery(id: &str, state: &SharedState) -> Result<HttpResponse, NotificationError> {
@@ -600,6 +621,7 @@ fn channel_view(
         }),
         ChannelConfig::Webhook(config) => PublicChannelConfig::Webhook(PublicWebhookConfig {
             url_masked: mask_webhook_url(&config.url),
+            format: config.format,
             has_signing_secret: !config.signing_secret.is_empty(),
             headers: config
                 .headers
@@ -678,7 +700,7 @@ fn ensure_create_secret(config: &mut ChannelConfig) -> Option<String> {
     let ChannelConfig::Webhook(config) = config else {
         return None;
     };
-    if !config.signing_secret.trim().is_empty() {
+    if config.format != super::WebhookFormat::Generic || !config.signing_secret.trim().is_empty() {
         return None;
     }
     let secret = format!("{}{}", util::new_ulid(), util::new_ulid());
@@ -701,7 +723,7 @@ fn merge_channel_secrets(
             if incoming.url.trim().is_empty() {
                 incoming.url.clone_from(&existing.url);
             }
-            if incoming.signing_secret.trim().is_empty() {
+            if incoming.format == existing.format && incoming.signing_secret.trim().is_empty() {
                 incoming.signing_secret.clone_from(&existing.signing_secret);
             }
             for header in &mut incoming.headers {
@@ -930,6 +952,7 @@ mod tests {
     fn missing_webhook_secret_is_generated_once() {
         let mut config = ChannelConfig::Webhook(crate::notification::WebhookChannelConfig {
             url: "https://example.com/hook".to_string(),
+            format: crate::notification::WebhookFormat::Generic,
             signing_secret: String::new(),
             headers: Vec::new(),
         });
@@ -938,6 +961,18 @@ mod tests {
             panic!("webhook config");
         };
         assert_eq!(config.signing_secret, generated);
+    }
+
+    #[test]
+    fn chat_platform_webhook_does_not_generate_little_gate_secret() {
+        let mut config = ChannelConfig::Webhook(crate::notification::WebhookChannelConfig {
+            url: "https://open.feishu.cn/open-apis/bot/v2/hook/example".to_string(),
+            format: crate::notification::WebhookFormat::Feishu,
+            signing_secret: String::new(),
+            headers: Vec::new(),
+        });
+
+        assert!(ensure_create_secret(&mut config).is_none());
     }
 
     #[test]

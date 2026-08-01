@@ -73,6 +73,32 @@ describe('notification management page', () => {
           window_to_ms: null,
         });
       }
+      if (method === 'GET' && url.pathname.endsWith('/deliveries/delivery-1')) {
+        return jsonResponse({
+          id: 'delivery-1',
+          run_id: 'run-1',
+          rule_id: 7,
+          rule_name: 'Daily report',
+          event_type: 'scheduled_report',
+          channel_id: 3,
+          channel_name: 'Ops webhook',
+          channel_kind: 'webhook',
+          status: 'failed',
+          attempts: 1,
+          next_attempt_at_ms: null,
+          last_attempt_at_ms: 1_900_000_000_000,
+          delivered_at_ms: null,
+          last_error_code: 'webhook_platform_rejected',
+          last_error_message: 'Webhook platform returned code 19001: param invalid',
+          created_at_ms: 1_900_000_000_000,
+          window_from_ms: 1_899_000_000_000,
+          window_to_ms: 1_900_000_000_000,
+          last_http_status: 200,
+          last_request_body: '{"msg_type":"text","content":{"text":"Daily report"}}',
+          last_response_body: '{"code":19001,"msg":"param invalid"}',
+          event_payload: { schema_version: 1 },
+        });
+      }
       if (url.pathname.endsWith('/summary')) {
         return jsonResponse({ enabled_channels: 1, enabled_rules: 1, firing_alerts: 0, failed_deliveries_24h: 1 });
       }
@@ -82,7 +108,7 @@ describe('notification management page', () => {
           name: 'Ops webhook',
           enabled: true,
           kind: 'webhook',
-          config: { url_masked: 'https://example.test/…', has_signing_secret: true, headers: [] },
+          config: { url_masked: 'https://example.test/…', format: 'feishu', has_signing_secret: false, headers: [] },
           created_at_ms: 1_900_000_000_000,
           updated_at_ms: 1_900_000_000_000,
         }] });
@@ -143,7 +169,13 @@ describe('notification management page', () => {
       'GET /api/v1/notifications/deliveries',
     ]));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'View Details' }));
+    expect(await screen.findByText('Actual Request Body')).toBeDefined();
+    expect(screen.getByText((content) => content.includes('"msg_type": "text"'))).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    const retry = await screen.findByRole('button', { name: 'Retry' });
+    fireEvent.click(retry);
     await waitFor(() => expect(requests).toContain('POST /api/v1/notifications/deliveries/delivery-1/retry'));
     expect(consoleError).not.toHaveBeenCalled();
   });

@@ -189,9 +189,23 @@ pub struct WebhookHeader {
     pub value: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookFormat {
+    #[default]
+    Generic,
+    Feishu,
+    Wecom,
+    Dingtalk,
+    Slack,
+    Discord,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WebhookChannelConfig {
     pub url: String,
+    #[serde(default)]
+    pub format: WebhookFormat,
     #[serde(default)]
     pub signing_secret: String,
     #[serde(default)]

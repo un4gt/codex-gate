@@ -144,6 +144,7 @@ export interface RequestLogSearchParams {
 export type NotificationLocale = 'zh-CN' | 'en-US';
 export type NotificationSmtpSecurity = 'starttls' | 'tls' | 'none';
 export type NotificationChannelKind = 'smtp' | 'webhook';
+export type NotificationWebhookFormat = 'generic' | 'feishu' | 'wecom' | 'dingtalk' | 'slack' | 'discord';
 export type NotificationRuleKind = 'scheduled_report' | 'threshold_alert';
 export type NotificationAlertMetric =
   | 'cpu_usage_percent'
@@ -174,6 +175,7 @@ export interface NotificationSmtpPublicConfig {
 
 export interface NotificationWebhookPublicConfig {
   url_masked: string;
+  format: NotificationWebhookFormat;
   has_signing_secret: boolean;
   headers: Array<{ name: string; has_value: boolean }>;
 }
@@ -212,6 +214,7 @@ export type NotificationChannelInput = {
       kind: 'webhook';
       config: {
         url: string;
+        format: NotificationWebhookFormat;
         signing_secret?: string;
         headers: NotificationWebhookHeader[];
       };
@@ -309,6 +312,13 @@ export interface NotificationDeliveryList {
   items: NotificationDelivery[];
   offset: number;
   limit: number;
+}
+
+export interface NotificationDeliveryDetail extends NotificationDelivery {
+  last_http_status: number | null;
+  last_request_body: string | null;
+  last_response_body: string | null;
+  event_payload: unknown;
 }
 
 export interface NotificationSchedulePreview {
