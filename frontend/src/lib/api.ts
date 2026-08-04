@@ -19,12 +19,14 @@ import type {
   NotificationChannel,
   NotificationChannelCreateResponse,
   NotificationChannelInput,
+  NotificationChannelUpdateInput,
   NotificationDelivery,
   NotificationDeliveryDetail,
   NotificationDeliveryList,
   NotificationLocale,
   NotificationRule,
   NotificationRuleInput,
+  NotificationRuleUpdateInput,
   NotificationSchedulePreview,
   NotificationSummary,
   ProviderModel,
@@ -160,7 +162,7 @@ export async function createNotificationChannel(
 export async function updateNotificationChannel(
   settings: ConnectionSettings,
   id: number,
-  payload: NotificationChannelInput,
+  payload: NotificationChannelUpdateInput,
 ) {
   const { apiBase, adminToken } = requireConnection(settings);
   return patchJson<NotificationChannel>(
@@ -220,7 +222,7 @@ export async function createNotificationRule(
 export async function updateNotificationRule(
   settings: ConnectionSettings,
   id: number,
-  payload: NotificationRuleInput,
+  payload: NotificationRuleUpdateInput,
 ) {
   const { apiBase, adminToken } = requireConnection(settings);
   return patchJson<NotificationRule>(

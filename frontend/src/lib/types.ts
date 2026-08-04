@@ -221,6 +221,10 @@ export type NotificationChannelInput = {
     }
 );
 
+export type NotificationChannelUpdateInput =
+  | NotificationChannelInput
+  | { name?: string; enabled?: boolean };
+
 export interface NotificationChannelCreateResponse {
   channel: NotificationChannel;
   generated_signing_secret?: string;
@@ -279,6 +283,10 @@ export type NotificationRuleInput = {
   | { kind: 'scheduled_report'; config: ScheduledNotificationConfig }
   | { kind: 'threshold_alert'; config: ThresholdNotificationConfig }
 );
+
+export type NotificationRuleUpdateInput =
+  | NotificationRuleInput
+  | { name?: string; enabled?: boolean; channel_ids?: number[] };
 
 export interface NotificationSummary {
   enabled_channels: number;

@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use super::runtime::{enqueue_channel_test, enqueue_rule_run};
 use super::store::{ChannelRecord, DeliveryView, RuleRecord};
 use super::{
-    ChannelConfig, CreateChannelRequest, CreateRuleRequest, NotificationError, NotificationLocale,
-    RuleConfig, SchedulePreviewRequest, UpdateChannelRequest, UpdateRuleRequest,
-    decode_rule_config, encode_json, next_occurrences, validate_channel_config,
+    ChannelConfig, ChannelKind, CreateChannelRequest, CreateRuleRequest, NotificationError,
+    NotificationLocale, RuleConfig, RuleKind, SchedulePreviewRequest, UpdateChannelRequest,
+    UpdateRuleRequest, decode_rule_config, encode_json, next_occurrences, validate_channel_config,
     validate_rule_config,
 };
 use crate::http::{self, HttpResponse};
@@ -289,14 +289,21 @@ async fn update_channel(
     state: &SharedState,
 ) -> Result<HttpResponse, NotificationError> {
     let body = read_json::<UpdateChannelRequest>(req, state.config.max_request_bytes).await?;
+    let UpdateChannelRequest {
+        name: requested_name,
+        enabled: requested_enabled,
+        kind,
+        config,
+    } = body;
+    let requested_config = decode_update_channel_config(kind, config)?;
     let current = get_channel_record(id, state).await?;
     let current_config = decrypt_channel_config(&current.config_enc, state)?;
-    let name = match body.name {
+    let name = match requested_name {
         Some(name) => validated_name(&name)?,
         None => current.name.clone(),
     };
-    let enabled = body.enabled.unwrap_or(current.enabled);
-    let config = match body.config {
+    let enabled = requested_enabled.unwrap_or(current.enabled);
+    let config = match requested_config {
         Some(config) => merge_channel_secrets(config, &current_config)?,
         None => current_config,
     };
@@ -315,6 +322,54 @@ async fn update_channel(
     state.notifications.wake();
     let record = get_channel_record(id, state).await?;
     Ok(http::json(StatusCode::OK, &channel_view(record, state)?))
+}
+
+fn decode_update_channel_config(
+    kind: Option<ChannelKind>,
+    config: Option<serde_json::Value>,
+) -> Result<Option<ChannelConfig>, NotificationError> {
+    decode_update_config(kind, config, "invalid_channel_config", "channel")
+}
+
+fn decode_update_rule_config(
+    kind: Option<RuleKind>,
+    config: Option<serde_json::Value>,
+) -> Result<Option<RuleConfig>, NotificationError> {
+    decode_update_config(kind, config, "invalid_rule_config", "rule")
+}
+
+fn decode_update_config<T, K>(
+    kind: Option<K>,
+    config: Option<serde_json::Value>,
+    error_code: &'static str,
+    subject: &'static str,
+) -> Result<Option<T>, NotificationError>
+where
+    T: DeserializeOwned,
+    K: Serialize,
+{
+    let value = match (kind, config) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => {
+            return Err(NotificationError::bad_request(
+                error_code,
+                format!("{subject} config is required when kind is provided"),
+                Some("config"),
+            ));
+        }
+        (Some(kind), Some(config)) => serde_json::json!({
+            "kind": kind,
+            "config": config,
+        }),
+        (None, Some(config)) => config,
+    };
+    serde_json::from_value(value).map(Some).map_err(|error| {
+        NotificationError::bad_request(
+            error_code,
+            format!("invalid {subject} config: {error}"),
+            Some("config"),
+        )
+    })
 }
 
 async fn delete_channel(id: i64, state: &SharedState) -> Result<HttpResponse, NotificationError> {
@@ -420,9 +475,17 @@ async fn update_rule(
     state: &SharedState,
 ) -> Result<HttpResponse, NotificationError> {
     let body = read_json::<UpdateRuleRequest>(req, state.config.max_request_bytes).await?;
+    let UpdateRuleRequest {
+        name: requested_name,
+        enabled: requested_enabled,
+        channel_ids: requested_channel_ids,
+        kind,
+        config,
+    } = body;
+    let requested_config = decode_update_rule_config(kind, config)?;
     let current = get_rule_record(id, state).await?;
     let current_config = decode_rule_config(&current.config_json)?;
-    let config = body.config.unwrap_or(current_config);
+    let config = requested_config.unwrap_or(current_config);
     if config.kind().as_str() != current.kind {
         return Err(NotificationError::conflict(
             "rule_kind_immutable",
@@ -431,15 +494,15 @@ async fn update_rule(
     }
     validate_rule_config(&config)?;
     validate_rule_scope(&config, state).await?;
-    let channel_ids = match body.channel_ids {
+    let channel_ids = match requested_channel_ids {
         Some(channel_ids) => validate_channel_ids(&channel_ids, state).await?,
         None => state.db.notification_rule_channel_ids(id).await?,
     };
-    let name = match body.name {
+    let name = match requested_name {
         Some(name) => validated_name(&name)?,
         None => current.name,
     };
-    let enabled = body.enabled.unwrap_or(current.enabled);
+    let enabled = requested_enabled.unwrap_or(current.enabled);
     let now_ms = util::now_ms();
     let next_run_at_ms = initial_next_run(&config, now_ms)?;
     let config_json = encode_json(&config)?;
@@ -973,6 +1036,83 @@ mod tests {
         });
 
         assert!(ensure_create_secret(&mut config).is_none());
+    }
+
+    #[test]
+    fn flat_channel_update_contract_accepts_frontend_payload() {
+        let body: UpdateChannelRequest = serde_json::from_str(
+            r#"{"name":"feishu","enabled":false,"kind":"webhook","config":{"url":"","format":"generic","signing_secret":"","headers":[]}}"#,
+        )
+        .expect("deserialize frontend channel update");
+        let config = decode_update_channel_config(body.kind, body.config)
+            .expect("decode channel config")
+            .expect("channel config");
+        let ChannelConfig::Webhook(config) = config else {
+            panic!("webhook config");
+        };
+
+        assert_eq!(config.format, crate::notification::WebhookFormat::Generic);
+    }
+
+    #[test]
+    fn nested_channel_update_contract_remains_supported() {
+        let body: UpdateChannelRequest = serde_json::from_str(
+            r#"{"config":{"kind":"webhook","config":{"url":"https://example.com/hook","format":"feishu","signing_secret":"","headers":[]}}}"#,
+        )
+        .expect("deserialize nested channel update");
+        let config = decode_update_channel_config(body.kind, body.config)
+            .expect("decode channel config")
+            .expect("channel config");
+        let ChannelConfig::Webhook(config) = config else {
+            panic!("webhook config");
+        };
+
+        assert_eq!(config.format, crate::notification::WebhookFormat::Feishu);
+    }
+
+    #[test]
+    fn channel_update_rejects_kind_without_config() {
+        let error = decode_update_channel_config(Some(ChannelKind::Webhook), None)
+            .expect_err("missing channel config must fail");
+
+        assert_eq!(error.code, "invalid_channel_config");
+    }
+
+    #[test]
+    fn flat_rule_update_contract_accepts_frontend_payload() {
+        let body: UpdateRuleRequest = serde_json::from_str(
+            r#"{"name":"Daily report","enabled":false,"channel_ids":[3],"kind":"scheduled_report","config":{"cron":"0 9 * * *","timezone":"Asia/Shanghai","locale":"zh-CN","top_n":20}}"#,
+        )
+        .expect("deserialize frontend rule update");
+        let config = decode_update_rule_config(body.kind, body.config)
+            .expect("decode rule config")
+            .expect("rule config");
+        let RuleConfig::ScheduledReport(config) = config else {
+            panic!("scheduled report config");
+        };
+
+        assert_eq!(config.top_n, 20);
+    }
+
+    #[test]
+    fn nested_rule_update_contract_remains_supported() {
+        let body: UpdateRuleRequest = serde_json::from_str(
+            r#"{"config":{"kind":"scheduled_report","config":{"cron":"0 9 * * *","timezone":"Asia/Shanghai","locale":"zh-CN","top_n":20}}}"#,
+        )
+        .expect("deserialize nested rule update");
+        let config = decode_update_rule_config(body.kind, body.config)
+            .expect("decode rule config")
+            .expect("rule config");
+
+        assert!(matches!(config, RuleConfig::ScheduledReport(_)));
+    }
+
+    #[test]
+    fn rule_update_rejects_kind_without_config() {
+        let error = decode_update_rule_config(Some(RuleKind::ScheduledReport), None)
+            .expect_err("missing rule config must fail");
+
+        assert_eq!(error.code, "invalid_rule_config");
     }
 
     #[test]

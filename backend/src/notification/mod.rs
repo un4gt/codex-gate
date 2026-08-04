@@ -295,7 +295,9 @@ pub struct UpdateChannelRequest {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
-    pub config: Option<ChannelConfig>,
+    pub kind: Option<ChannelKind>,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -317,7 +319,9 @@ pub struct UpdateRuleRequest {
     #[serde(default)]
     pub channel_ids: Option<Vec<i64>>,
     #[serde(default)]
-    pub config: Option<RuleConfig>,
+    pub kind: Option<RuleKind>,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

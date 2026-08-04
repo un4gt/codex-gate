@@ -102,13 +102,18 @@ interface ChannelDraft {
   port: string;
   security: NotificationSmtpSecurity;
   username: string;
+  savedUsername: string;
   password: string;
+  hasPassword: boolean;
   fromName: string;
   fromEmail: string;
   recipients: string;
   webhookUrl: string;
+  webhookUrlMasked: string;
   webhookFormat: NotificationWebhookFormat;
+  savedWebhookFormat: NotificationWebhookFormat;
   signingSecret: string;
+  hasSigningSecret: boolean;
   headers: string;
 }
 
@@ -168,13 +173,18 @@ function emptyChannelDraft(kind: 'smtp' | 'webhook'): ChannelDraft {
     port: kind === 'smtp' ? '587' : '',
     security: 'starttls',
     username: '',
+    savedUsername: '',
     password: '',
+    hasPassword: false,
     fromName: 'little-gate',
     fromEmail: '',
     recipients: '',
     webhookUrl: '',
+    webhookUrlMasked: '',
     webhookFormat: 'generic',
+    savedWebhookFormat: 'generic',
     signingSecret: '',
+    hasSigningSecret: false,
     headers: '',
   };
 }
@@ -190,6 +200,8 @@ function channelDraftFrom(channel: NotificationChannel): ChannelDraft {
       port: String(channel.config.port),
       security: channel.config.security,
       username: channel.config.username ?? '',
+      savedUsername: channel.config.username ?? '',
+      hasPassword: channel.config.has_password,
       fromName: channel.config.from_name ?? '',
       fromEmail: channel.config.from_email,
       recipients: channel.config.recipients.join('\n'),
@@ -201,7 +213,10 @@ function channelDraftFrom(channel: NotificationChannel): ChannelDraft {
     name: channel.name,
     enabled: channel.enabled,
     webhookUrl: '',
+    webhookUrlMasked: channel.config.url_masked,
     webhookFormat: channel.config.format,
+    savedWebhookFormat: channel.config.format,
+    hasSigningSecret: channel.config.has_signing_secret,
     headers: channel.config.headers.map((header) => `${header.name}:`).join('\n'),
   };
 }
@@ -313,6 +328,14 @@ function channelInputFromDraft(draft: ChannelDraft): NotificationChannelInput {
     };
   }
   if (draft.id === null && !draft.webhookUrl.trim()) throw new Error(t('Webhook 地址不能为空。'));
+  if (
+    draft.id !== null
+    && draft.savedWebhookFormat !== 'generic'
+    && draft.webhookFormat === 'generic'
+    && draft.signingSecret.trim().length < 32
+  ) {
+    throw new Error(t('切换到通用 JSON 时，请填写至少 32 个字符的新签名密钥。'));
+  }
   return {
     name,
     enabled: draft.enabled,
@@ -712,19 +735,17 @@ export function NotificationsPage(props: NotificationsPageProps) {
   };
 
   const toggleChannel = (channel: NotificationChannel) => {
-    const input = channelInputFromDraft({ ...channelDraftFrom(channel), enabled: !channel.enabled });
     void runAction(
       `channel-toggle-${channel.id}`,
-      async () => { await updateNotificationChannel(props.settings, channel.id, input); },
+      async () => { await updateNotificationChannel(props.settings, channel.id, { enabled: !channel.enabled }); },
       channel.enabled ? t('通知通道已禁用。') : t('通知通道已启用。'),
     );
   };
 
   const toggleRule = (rule: NotificationRule) => {
-    const input = ruleInputFromDraft({ ...ruleDraftFrom(rule), enabled: !rule.enabled });
     void runAction(
       `rule-toggle-${rule.id}`,
-      async () => { await updateNotificationRule(props.settings, rule.id, input); },
+      async () => { await updateNotificationRule(props.settings, rule.id, { enabled: !rule.enabled }); },
       rule.enabled ? t('通知规则已禁用。') : t('通知规则已启用。'),
     );
   };
@@ -932,6 +953,14 @@ function ChannelDialog(props: {
   onSubmit: (event: FormEvent) => void;
 }) {
   const draft = props.draft;
+  const smtpUsernameChanged = draft !== null
+    && draft.id !== null
+    && draft.kind === 'smtp'
+    && draft.username.trim() !== draft.savedUsername.trim();
+  const webhookFormatChanged = draft !== null
+    && draft.id !== null
+    && draft.kind === 'webhook'
+    && draft.webhookFormat !== draft.savedWebhookFormat;
   const update = <K extends keyof ChannelDraft>(key: K, value: ChannelDraft[K]) => {
     if (draft) props.onChange({ ...draft, [key]: value });
   };
@@ -954,7 +983,7 @@ function ChannelDialog(props: {
                   </Select></FormControl>
                 <Box className="grid gap-4 md:grid-cols-2">
                   <FormControl><FormLabel>{t('用户名（可选）')}</FormLabel><InputBase value={draft.username} onChange={(event) => update('username', event.target.value)} inputProps={{ 'aria-label': t('用户名（可选）') }} /></FormControl>
-                  <FormControl><FormLabel>{t(draft.id === null ? '密码（可选）' : '新密码（留空则保留）')}</FormLabel><InputBase type="password" value={draft.password} onChange={(event) => update('password', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '密码（可选）' : '新密码（留空则保留）') }} /></FormControl>
+                  <FormControl><FormLabel>{t(draft.id === null ? '密码（可选）' : '新密码（留空则保留）')}</FormLabel><InputBase name={`notification_smtp_password_${draft.id ?? 'new'}`} type="password" value={draft.password} autoComplete="new-password" onChange={(event) => update('password', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '密码（可选）' : '新密码（留空则保留）') }} />{draft.id !== null ? <FormHelperText>{t(smtpUsernameChanged ? '用户名已更改；原密码不会沿用，请按需重新填写。' : draft.hasPassword ? '当前密码已配置；留空保留原值。' : '当前未配置密码。')}</FormHelperText> : null}</FormControl>
                 </Box>
                 <Box className="grid gap-4 md:grid-cols-2">
                   <FormControl><FormLabel>{t('发件人名称')}</FormLabel><InputBase value={draft.fromName} onChange={(event) => update('fromName', event.target.value)} inputProps={{ 'aria-label': t('发件人名称') }} /></FormControl>
@@ -963,14 +992,17 @@ function ChannelDialog(props: {
                 <FormControl><FormLabel>{t('收件人')}</FormLabel><InputBase multiline minRows={3} value={draft.recipients} onChange={(event) => update('recipients', event.target.value)} inputProps={{ 'aria-label': t('收件人') }} placeholder={t('每行一个邮箱，也可使用逗号分隔')} /><FormHelperText>{t('支持 1–50 个收件人。')}</FormHelperText></FormControl>
               </> : <>
                 <Box className="grid gap-4 md:grid-cols-2">
-                  <FormControl><FormLabel>{t('消息格式')}</FormLabel><Select value={draft.webhookFormat} inputProps={{ 'aria-label': t('消息格式') }} onChange={(event) => update('webhookFormat', event.target.value as NotificationWebhookFormat)}>
+                  <FormControl><FormLabel>{t('消息格式')}</FormLabel><Select value={draft.webhookFormat} inputProps={{ 'aria-label': t('消息格式') }} onChange={(event) => {
+                    const webhookFormat = event.target.value as NotificationWebhookFormat;
+                    props.onChange({ ...draft, webhookFormat, signingSecret: webhookFormat === draft.webhookFormat ? draft.signingSecret : '' });
+                  }}>
                       {(['generic', 'feishu', 'wecom', 'dingtalk', 'slack', 'discord'] as NotificationWebhookFormat[]).map((format) => <MenuItem key={format} value={format}>{t(webhookFormatLabel(format))}</MenuItem>)}
                     </Select><FormHelperText>{t(draft.webhookFormat === 'generic' ? '发送版本化 little-gate 事件 JSON。' : '发送该平台机器人可直接接收的文本消息。')}</FormHelperText></FormControl>
-                  <FormControl><FormLabel>{t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）')}</FormLabel><InputBase type="url" value={draft.webhookUrl} onChange={(event) => update('webhookUrl', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）') }} placeholder="https://example.com/hooks/little-gate" /></FormControl>
+                  <FormControl><FormLabel>{t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）')}</FormLabel><InputBase name={`notification_webhook_url_${draft.id ?? 'new'}`} type="url" value={draft.webhookUrl} autoComplete="off" onChange={(event) => update('webhookUrl', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? 'Webhook 地址' : '新 Webhook 地址（留空则保留）') }} placeholder="https://example.com/hooks/little-gate" />{draft.id !== null ? <FormHelperText>{t('当前地址：{{url}}', { url: draft.webhookUrlMasked })}</FormHelperText> : null}</FormControl>
                 </Box>
-                {draft.webhookFormat === 'generic' ? <FormControl><FormLabel>{t(draft.id === null ? '签名密钥（留空自动生成）' : '新签名密钥（留空则保留）')}</FormLabel><InputBase type="password" value={draft.signingSecret} onChange={(event) => update('signingSecret', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '签名密钥（留空自动生成）' : '新签名密钥（留空则保留）') }} /><FormHelperText>{t('请求使用 X-Little-Gate-Signature: v1=<HMAC-SHA256>。')}</FormHelperText></FormControl> : null}
-                {draft.webhookFormat === 'feishu' ? <FormControl><FormLabel>{t(draft.id === null ? '飞书签名密钥（可选）' : '新飞书签名密钥（留空则保留）')}</FormLabel><InputBase type="password" value={draft.signingSecret} onChange={(event) => update('signingSecret', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '飞书签名密钥（可选）' : '新飞书签名密钥（留空则保留）') }} /><FormHelperText>{t('仅在飞书机器人启用了签名校验时填写。')}</FormHelperText></FormControl> : null}
-                <FormControl><FormLabel>{t('自定义请求头')}</FormLabel><InputBase multiline minRows={3} value={draft.headers} onChange={(event) => update('headers', event.target.value)} inputProps={{ 'aria-label': t('自定义请求头') }} placeholder={'X-Team: platform\nX-Environment: production'} /><FormHelperText>{t('每行使用“名称: 值”格式；签名和内容相关请求头不可覆盖。')}</FormHelperText></FormControl>
+                {draft.webhookFormat === 'generic' ? <FormControl><FormLabel>{t(draft.id === null ? '签名密钥（留空自动生成）' : webhookFormatChanged ? '新签名密钥（至少 32 个字符）' : '新签名密钥（留空则保留）')}</FormLabel><InputBase name={`notification_webhook_secret_${draft.id ?? 'new'}`} type="password" value={draft.signingSecret} autoComplete="new-password" onChange={(event) => update('signingSecret', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null ? '签名密钥（留空自动生成）' : webhookFormatChanged ? '新签名密钥（至少 32 个字符）' : '新签名密钥（留空则保留）') }} />{draft.id !== null ? <FormHelperText>{t(webhookFormatChanged ? '消息格式已更改；原签名密钥不会沿用，请重新填写。' : draft.hasSigningSecret ? '当前签名密钥已配置；留空保留原值。' : '当前未配置签名密钥。')}</FormHelperText> : null}<FormHelperText>{t('请求使用 X-Little-Gate-Signature: v1=<HMAC-SHA256>。')}</FormHelperText></FormControl> : null}
+                {draft.webhookFormat === 'feishu' ? <FormControl><FormLabel>{t(draft.id === null || webhookFormatChanged ? '飞书签名密钥（可选）' : '新飞书签名密钥（留空则保留）')}</FormLabel><InputBase name={`notification_feishu_secret_${draft.id ?? 'new'}`} type="password" value={draft.signingSecret} autoComplete="new-password" onChange={(event) => update('signingSecret', event.target.value)} inputProps={{ 'aria-label': t(draft.id === null || webhookFormatChanged ? '飞书签名密钥（可选）' : '新飞书签名密钥（留空则保留）') }} />{draft.id !== null ? <FormHelperText>{t(webhookFormatChanged ? '消息格式已更改；原签名密钥不会沿用，请按需重新填写。' : draft.hasSigningSecret ? '当前签名密钥已配置；留空保留原值。' : '当前未配置签名密钥。')}</FormHelperText> : null}<FormHelperText>{t('仅在飞书机器人启用了签名校验时填写。')}</FormHelperText></FormControl> : null}
+                <FormControl><FormLabel>{t('自定义请求头')}</FormLabel><InputBase name={`notification_webhook_headers_${draft.id ?? 'new'}`} multiline minRows={3} value={draft.headers} autoComplete="off" onChange={(event) => update('headers', event.target.value)} inputProps={{ 'aria-label': t('自定义请求头') }} placeholder={'X-Team: platform\nX-Environment: production'} /><FormHelperText>{t('每行使用“名称: 值”格式；签名和内容相关请求头不可覆盖。')}</FormHelperText>{draft.id !== null && draft.headers.trim() ? <FormHelperText>{t('已有请求头值不会回显；保留名称并将值留空可保留原值。')}</FormHelperText> : null}</FormControl>
               </>}
           </DialogContent>
           <DialogActions><Button type="button" variant="ghost" onClick={props.onClose} disabled={props.busy}>{t('取消')}</Button><Button type="submit" disabled={props.busy}>{props.busy ? <CircularProgress size={16} /> : <Check className="mr-2 size-4" />}{t('保存')}</Button></DialogActions>
