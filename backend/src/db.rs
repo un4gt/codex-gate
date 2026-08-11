@@ -8,6 +8,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool, postgres::Pg
 
 use crate::crypto;
 use crate::pricing::{PriceCard, PriceVersion};
+use crate::request_overrides::RequestOverrides;
 use crate::types::{
     ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelRoute,
     PricingUsageGroupRow, ProviderGroup, ProviderGroupMembership, ProviderGroupRef, ProviderModel,
@@ -486,6 +487,7 @@ WHERE id = $1
         supports_include_usage: bool,
         websocket_enabled: bool,
         beta_features: &[String],
+        request_overrides: &RequestOverrides,
         key_selection_strategy: &str,
         max_attempts: i32,
         max_concurrency: Option<i32>,
@@ -501,11 +503,11 @@ WHERE id = $1
                     r#"
 INSERT INTO upstream_providers (
   name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled,
-  beta_features, key_selection_strategy, max_attempts, max_concurrency,
+  beta_features, request_overrides_json, key_selection_strategy, max_attempts, max_concurrency,
   circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms,
   circuit_breaker_half_open_success_threshold, created_at_ms, updated_at_ms
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
                 )
                 .bind(name)
@@ -516,6 +518,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 .bind(if supports_include_usage { 1_i64 } else { 0_i64 })
                 .bind(if websocket_enabled { 1_i64 } else { 0_i64 })
                 .bind(beta_features_to_json(beta_features))
+                .bind(request_overrides.to_storage())
                 .bind(key_selection_strategy)
                 .bind(max_attempts as i64)
                 .bind(max_concurrency.map(i64::from))
@@ -538,11 +541,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     r#"
 INSERT INTO upstream_providers (
   name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled,
-  beta_features, key_selection_strategy, max_attempts, max_concurrency,
+  beta_features, request_overrides_json, key_selection_strategy, max_attempts, max_concurrency,
   circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms,
   circuit_breaker_half_open_success_threshold, created_at_ms, updated_at_ms
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 RETURNING id
 "#,
                 )
@@ -554,6 +557,7 @@ RETURNING id
                 .bind(supports_include_usage)
                 .bind(websocket_enabled)
                 .bind(beta_features_to_json(beta_features))
+                .bind(request_overrides.to_storage())
                 .bind(key_selection_strategy)
                 .bind(max_attempts)
                 .bind(max_concurrency)
@@ -580,7 +584,7 @@ RETURNING id
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, websocket_enabled = ?, beta_features = ?, key_selection_strategy = ?, max_attempts = ?, max_concurrency = ?, circuit_breaker_enabled = ?, circuit_breaker_failure_threshold = ?, circuit_breaker_open_ms = ?, circuit_breaker_half_open_success_threshold = ?, updated_at_ms = ?
+SET name = ?, provider_type = ?, enabled = ?, priority = ?, weight = ?, supports_include_usage = ?, websocket_enabled = ?, beta_features = ?, request_overrides_json = ?, key_selection_strategy = ?, max_attempts = ?, max_concurrency = ?, circuit_breaker_enabled = ?, circuit_breaker_failure_threshold = ?, circuit_breaker_open_ms = ?, circuit_breaker_half_open_success_threshold = ?, updated_at_ms = ?
 WHERE id = ?
 "#,
                 )
@@ -592,6 +596,7 @@ WHERE id = ?
                 .bind(if provider.supports_include_usage { 1_i64 } else { 0_i64 })
                 .bind(if provider.websocket_enabled { 1_i64 } else { 0_i64 })
                 .bind(beta_features_to_json(&provider.beta_features))
+                .bind(provider.request_overrides.to_storage())
                 .bind(&provider.key_selection_strategy)
                 .bind(provider.max_attempts as i64)
                 .bind(provider.max_concurrency.map(i64::from))
@@ -613,8 +618,8 @@ WHERE id = ?
                 sqlx::query(
                     r#"
 UPDATE upstream_providers
-SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, websocket_enabled = $7, beta_features = $8, key_selection_strategy = $9, max_attempts = $10, max_concurrency = $11, circuit_breaker_enabled = $12, circuit_breaker_failure_threshold = $13, circuit_breaker_open_ms = $14, circuit_breaker_half_open_success_threshold = $15, updated_at_ms = $16
-WHERE id = $17
+SET name = $1, provider_type = $2, enabled = $3, priority = $4, weight = $5, supports_include_usage = $6, websocket_enabled = $7, beta_features = $8, request_overrides_json = $9, key_selection_strategy = $10, max_attempts = $11, max_concurrency = $12, circuit_breaker_enabled = $13, circuit_breaker_failure_threshold = $14, circuit_breaker_open_ms = $15, circuit_breaker_half_open_success_threshold = $16, updated_at_ms = $17
+WHERE id = $18
 "#,
                 )
                 .bind(&provider.name)
@@ -625,6 +630,7 @@ WHERE id = $17
                 .bind(provider.supports_include_usage)
                 .bind(provider.websocket_enabled)
                 .bind(beta_features_to_json(&provider.beta_features))
+                .bind(provider.request_overrides.to_storage())
                 .bind(&provider.key_selection_strategy)
                 .bind(provider.max_attempts)
                 .bind(provider.max_concurrency)
@@ -1692,7 +1698,7 @@ RETURNING id
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, max_attempts, max_concurrency, circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms, circuit_breaker_half_open_success_threshold
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, request_overrides_json, key_selection_strategy, max_attempts, max_concurrency, circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms, circuit_breaker_half_open_success_threshold
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1714,6 +1720,9 @@ ORDER BY priority ASC, id ASC
                         beta_features: beta_features_from_json(
                             &row.get::<String, _>("beta_features"),
                         ),
+                        request_overrides: crate::request_overrides::RequestOverrides::from_storage(
+                            &row.get::<String, _>("request_overrides_json"),
+                        ),
                         key_selection_strategy: row.get::<String, _>("key_selection_strategy"),
                         max_attempts: row.get::<i64, _>("max_attempts") as i32,
                         max_concurrency: row
@@ -1733,7 +1742,7 @@ ORDER BY priority ASC, id ASC
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, key_selection_strategy, max_attempts, max_concurrency, circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms, circuit_breaker_half_open_success_threshold
+SELECT id, name, provider_type, enabled, priority, weight, supports_include_usage, websocket_enabled, beta_features, request_overrides_json, key_selection_strategy, max_attempts, max_concurrency, circuit_breaker_enabled, circuit_breaker_failure_threshold, circuit_breaker_open_ms, circuit_breaker_half_open_success_threshold
 FROM upstream_providers
 ORDER BY priority ASC, id ASC
 "#,
@@ -1754,6 +1763,9 @@ ORDER BY priority ASC, id ASC
                         websocket_enabled: row.get::<bool, _>("websocket_enabled"),
                         beta_features: beta_features_from_json(
                             &row.get::<String, _>("beta_features"),
+                        ),
+                        request_overrides: crate::request_overrides::RequestOverrides::from_storage(
+                            &row.get::<String, _>("request_overrides_json"),
                         ),
                         key_selection_strategy: row.get::<String, _>("key_selection_strategy"),
                         max_attempts: row.get::<i32, _>("max_attempts"),
@@ -4774,6 +4786,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   supports_include_usage INTEGER NOT NULL,
   websocket_enabled INTEGER NOT NULL DEFAULT 0,
   beta_features TEXT NOT NULL DEFAULT '[]',
+  request_overrides_json TEXT NOT NULL DEFAULT '{"headers":[],"body":[]}',
   key_selection_strategy TEXT NOT NULL DEFAULT 'round_robin',
   max_attempts INTEGER NOT NULL DEFAULT 2,
   max_concurrency INTEGER,
@@ -5145,6 +5158,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_sqlite_token_usage_columns(pool).await?;
     ensure_sqlite_upstream_providers_websocket_enabled(pool).await?;
     ensure_sqlite_upstream_providers_beta_features(pool).await?;
+    ensure_sqlite_upstream_providers_request_overrides(pool).await?;
     ensure_sqlite_upstream_providers_key_selection_strategy(pool).await?;
     ensure_sqlite_upstream_providers_resilience(pool).await?;
     ensure_sqlite_default_provider_group(pool).await?;
@@ -5190,6 +5204,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
   supports_include_usage BOOLEAN NOT NULL,
   websocket_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   beta_features TEXT NOT NULL DEFAULT '[]',
+  request_overrides_json TEXT NOT NULL DEFAULT '{"headers":[],"body":[]}',
   key_selection_strategy TEXT NOT NULL DEFAULT 'round_robin',
   max_attempts INTEGER NOT NULL DEFAULT 2,
   max_concurrency INTEGER,
@@ -5549,6 +5564,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_postgres_token_usage_columns(pool).await?;
     ensure_postgres_upstream_providers_websocket_enabled(pool).await?;
     ensure_postgres_upstream_providers_beta_features(pool).await?;
+    ensure_postgres_upstream_providers_request_overrides(pool).await?;
     ensure_postgres_upstream_providers_key_selection_strategy(pool).await?;
     ensure_postgres_upstream_providers_resilience(pool).await?;
     ensure_postgres_default_provider_group(pool).await?;
@@ -5605,6 +5621,19 @@ async fn ensure_sqlite_upstream_providers_beta_features(pool: &SqlitePool) -> Re
     if !sqlite_column_exists(pool, "upstream_providers", "beta_features").await? {
         sqlx::query(
             "ALTER TABLE upstream_providers ADD COLUMN beta_features TEXT NOT NULL DEFAULT '[]'",
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn ensure_sqlite_upstream_providers_request_overrides(
+    pool: &SqlitePool,
+) -> Result<(), DbError> {
+    if !sqlite_column_exists(pool, "upstream_providers", "request_overrides_json").await? {
+        sqlx::query(
+            "ALTER TABLE upstream_providers ADD COLUMN request_overrides_json TEXT NOT NULL DEFAULT '{\"headers\":[],\"body\":[]}'",
         )
         .execute(pool)
         .await?;
@@ -5879,6 +5908,17 @@ async fn ensure_postgres_upstream_providers_websocket_enabled(
 async fn ensure_postgres_upstream_providers_beta_features(pool: &PgPool) -> Result<(), DbError> {
     sqlx::query(
         "ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS beta_features TEXT NOT NULL DEFAULT '[]'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_postgres_upstream_providers_request_overrides(
+    pool: &PgPool,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS request_overrides_json TEXT NOT NULL DEFAULT '{\"headers\":[],\"body\":[]}'",
     )
     .execute(pool)
     .await?;
@@ -6637,6 +6677,73 @@ mod tests {
         db
     }
 
+    #[tokio::test]
+    async fn provider_request_overrides_should_round_trip_through_sqlite() {
+        let db = sqlite_memory_db().await;
+        let overrides: RequestOverrides = serde_json::from_value(serde_json::json!({
+            "headers": [{
+                "scope": "all",
+                "operation": "set",
+                "name": "x-codex-window-id",
+                "value": "{{request_id}}"
+            }],
+            "body": [{
+                "scope": "responses",
+                "operation": "set",
+                "path": "client_metadata.x-codex-window-id",
+                "value": "{{request_id}}"
+            }]
+        }))
+        .expect("request overrides");
+        let provider_id = db
+            .insert_upstream_provider(
+                "provider-a",
+                "openai_compatible_responses",
+                true,
+                100,
+                1,
+                true,
+                false,
+                &[],
+                &overrides,
+                "round_robin",
+                2,
+                None,
+                true,
+                3,
+                30_000,
+                2,
+                1,
+            )
+            .await
+            .expect("insert provider");
+
+        let mut provider = db
+            .list_upstream_providers()
+            .await
+            .expect("list providers")
+            .into_iter()
+            .find(|provider| provider.id == provider_id)
+            .expect("provider");
+        assert_eq!(provider.request_overrides, overrides);
+
+        provider.request_overrides.headers[0].value = "updated".to_string();
+        db.update_upstream_provider(&provider, 2)
+            .await
+            .expect("update provider");
+        let updated = db
+            .list_upstream_providers()
+            .await
+            .expect("list updated providers")
+            .into_iter()
+            .find(|provider| provider.id == provider_id)
+            .expect("updated provider");
+        assert_eq!(
+            updated.request_overrides.headers[0].value.as_str(),
+            "updated"
+        );
+    }
+
     fn stats_event(id: &str, time_ms: i64, http_status: Option<i32>) -> StatsEventRow {
         StatsEventRow {
             id: id.to_string(),
@@ -7042,6 +7149,7 @@ CREATE TABLE stats_events (
                 true,
                 false,
                 &[],
+                &RequestOverrides::default(),
                 "round_robin",
                 2,
                 None,
@@ -7228,6 +7336,7 @@ CREATE TABLE stats_events (
                 true,
                 false,
                 &[],
+                &RequestOverrides::default(),
                 "round_robin",
                 2,
                 None,
@@ -7313,6 +7422,7 @@ CREATE TABLE stats_events (
                 true,
                 false,
                 &[],
+                &RequestOverrides::default(),
                 "round_robin",
                 2,
                 None,
@@ -7376,6 +7486,7 @@ CREATE TABLE stats_events (
                 true,
                 false,
                 &[],
+                &RequestOverrides::default(),
                 "round_robin",
                 2,
                 None,

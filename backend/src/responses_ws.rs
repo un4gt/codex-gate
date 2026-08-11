@@ -25,6 +25,7 @@ use crate::http::{self, HttpResponse};
 use crate::metrics::RequestMetric;
 use crate::pricing::{PricingEvaluation, evaluate_price};
 use crate::proxy::{self, ResolvedUpstream};
+use crate::request_overrides::RequestOverrideContext;
 use crate::state::SharedState;
 use crate::telemetry::TelemetryEvent;
 use crate::types::{ApiFormat, ApiKeyAuth, Usage};
@@ -43,6 +44,7 @@ struct WsContext {
     state: SharedState,
     api_key: ApiKeyAuth,
     request_headers: HeaderMap,
+    request_override_context: RequestOverrideContext,
     session_id: String,
     session_log_id: String,
     session_started_at_ms: i64,
@@ -198,6 +200,7 @@ pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpRespo
         state,
         api_key,
         request_headers,
+        request_override_context: RequestOverrideContext::new(),
         session_id: util::new_ulid(),
         session_log_id: util::new_ulid(),
         session_started_at_ms: util::now_ms(),
@@ -467,6 +470,25 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                             &mut routed_value,
                             &selected.resolved.upstream_model,
                         );
+                    }
+                    if let Err(error) = selected
+                        .resolved
+                        .provider
+                        .request_overrides
+                        .apply_body_value(
+                            &mut routed_value,
+                            ApiFormat::Responses,
+                            &ctx.request_override_context,
+                        )
+                    {
+                        let _ = send_ws_error(
+                            &mut downstream,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "request_override_failed",
+                            &format!("failed to apply provider request body overrides: {error}"),
+                        )
+                        .await;
+                        break;
                     }
                     let payload = match serde_json::to_string(&routed_value) {
                         Ok(payload) => payload,
@@ -901,6 +923,19 @@ async fn connect_upstream_ws_once(
     if let Some(auth) = prepared_codex_auth.as_ref() {
         crate::codex_oauth::apply_codex_headers(&mut headers, auth);
     }
+    if let Err(error) = resolved.provider.request_overrides.apply_headers(
+        &mut headers,
+        ApiFormat::Responses,
+        &ctx.request_override_context,
+    ) {
+        reservation.neutral();
+        return NativeWsConnectOutcome::Failed(WsBridgeError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error_type: "request_override_failed",
+            message: format!("failed to apply provider request header overrides: {error}"),
+            scope: proxy::FailureScope::Provider,
+        });
+    }
     let mut connected = connect_upstream_ws(&ctx.state, &ws_url, &headers).await;
     if connected
         .as_ref()
@@ -915,6 +950,19 @@ async fn connect_upstream_ws_once(
         let mut retry_headers =
             build_upstream_ws_headers(&ctx.request_headers, &refreshed.access_token);
         crate::codex_oauth::apply_codex_headers(&mut retry_headers, &refreshed);
+        if let Err(error) = resolved.provider.request_overrides.apply_headers(
+            &mut retry_headers,
+            ApiFormat::Responses,
+            &ctx.request_override_context,
+        ) {
+            reservation.neutral();
+            return NativeWsConnectOutcome::Failed(WsBridgeError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                error_type: "request_override_failed",
+                message: format!("failed to apply provider request header overrides: {error}"),
+                scope: proxy::FailureScope::Provider,
+            });
+        }
         connected = connect_upstream_ws(&ctx.state, &ws_url, &retry_headers).await;
     }
     if connected
@@ -1708,6 +1756,34 @@ where
     if let Some(auth) = prepared_codex_auth.as_ref() {
         crate::codex_oauth::apply_codex_headers(&mut headers, auth);
     }
+    if let Err(error) = resolved.provider.request_overrides.apply_headers(
+        &mut headers,
+        ApiFormat::Responses,
+        &ctx.request_override_context,
+    ) {
+        let message = format!("failed to apply provider request header overrides: {error}");
+        let outcome = TurnOutcome::provider_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "request_override_failed",
+            message.clone(),
+            turn_start,
+        );
+        record_turn(
+            ctx,
+            resolved,
+            requested_model,
+            TurnTransport::HttpBridge,
+            &outcome,
+            telemetry_permit,
+            Some(reservation),
+        );
+        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+            status: outcome.status,
+            error_type: "request_override_failed",
+            message,
+            scope: proxy::FailureScope::Provider,
+        });
+    }
     let mut response = proxy::dispatch_upstream_request(
         &ctx.state,
         &Method::POST,
@@ -1733,6 +1809,34 @@ where
             body.len(),
         );
         crate::codex_oauth::apply_codex_headers(&mut retry_headers, &refreshed);
+        if let Err(error) = resolved.provider.request_overrides.apply_headers(
+            &mut retry_headers,
+            ApiFormat::Responses,
+            &ctx.request_override_context,
+        ) {
+            let message = format!("failed to apply provider request header overrides: {error}");
+            let outcome = TurnOutcome::provider_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "request_override_failed",
+                message.clone(),
+                turn_start,
+            );
+            record_turn(
+                ctx,
+                resolved,
+                requested_model,
+                TurnTransport::HttpBridge,
+                &outcome,
+                telemetry_permit,
+                Some(reservation),
+            );
+            return ForwardResult::RetryableBeforeEvent(WsBridgeError {
+                status: outcome.status,
+                error_type: "request_override_failed",
+                message,
+                scope: proxy::FailureScope::Provider,
+            });
+        }
         response = proxy::dispatch_upstream_request(
             &ctx.state,
             &Method::POST,

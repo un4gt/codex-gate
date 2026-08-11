@@ -260,6 +260,61 @@ bash scripts/run-prek-checks.sh pre-push
 
 只有裸域名会为了兼容自动补 `/v1`；只要配置值已有路径，网关就会完整保留该路径。Base URL 不接受查询参数，模型同步固定请求 API Base URL 下的纯 `/models`。
 
+### Provider 请求覆写
+
+新建 Provider 的可选高级区和 Provider 详情页都提供“请求覆写”编辑器，可按 `all`、`chat_completions`、`responses` 作用域对发往该上游的 Header 和 JSON Body 执行 `set` / `remove`。Body 路径使用点路径，例如 `client_metadata.x-codex-window-id`；不存在的中间对象会自动创建。匹配具体协议的规则会在 `all` 规则之后执行，因此可用于覆盖通用值。
+
+覆写发生在模型改写、Responses→Chat 转换、Codex 请求规范化和 `include_usage` 注入之后，并在网关完成上游鉴权 Header 构造后执行，因此最终发送内容与管理台预览一致。HTTP Responses、Responses WebSocket 原生转发和 HTTP bridge 都会应用规则；`all` Header 规则也会用于普通兼容 Provider 的 `/models` 同步请求。
+
+规则值支持 `{{request_id}}` 模板。同一客户端请求的 Header、Body、OAuth 重试和 Provider failover 会复用同一个动态 ID；WebSocket 会话内也保持一致。管理台内置“Codex 客户端兼容预设”，会加入与当前 Codex TUI 形态配套的 `User-Agent`、`originator`、`version`、`x-codex-window-id`、`session-id`、`thread-id`，以及 Responses `client_metadata` 指纹，适合处理启用了 `codex_cli_only` 一类客户端门禁的兼容中转站。预设只是可编辑起点；中转若配置了 Codex 最低或最高版本边界，应将 `User-Agent` 中的版本与 `version` 一并调整到允许范围内。
+
+Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `instructions`，以免破坏 Code Agent 自己的系统提示词。如果中转通过门禁后改为返回 `instructions is required` 一类 400，应先确认客户端发送了非空 `instructions`，再按实际协议补充 Body 规则。
+
+示例配置：
+
+```json
+{
+  "headers": [
+    {
+      "scope": "all",
+      "operation": "set",
+      "name": "User-Agent",
+      "value": "codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
+    },
+    {
+      "scope": "all",
+      "operation": "set",
+      "name": "originator",
+      "value": "codex-tui"
+    },
+    {
+      "scope": "all",
+      "operation": "set",
+      "name": "version",
+      "value": "0.146.0"
+    },
+    {
+      "scope": "all",
+      "operation": "set",
+      "name": "x-codex-window-id",
+      "value": "{{request_id}}"
+    }
+  ],
+  "body": [
+    {
+      "scope": "responses",
+      "operation": "set",
+      "path": "client_metadata.x-codex-window-id",
+      "value": "{{request_id}}"
+    }
+  ]
+}
+```
+
+为避免破坏路由与安全边界，网关拒绝覆写鉴权、Cookie、Host、Content-Length、压缩/连接控制、WebSocket 握手、代理转发/来源以及方法/路径重写 Header，也拒绝覆写 Body 根字段 `model`、`stream`、`type`。配置上限为 64 条 Header 规则、128 条 Body 规则和 256 KiB。
+
+覆写值按普通 Provider 配置持久化，不是密钥保险库；不要把真实 API Key、Access Token 或会话 Cookie 写入规则，鉴权应继续通过 Provider Key / Codex OAuth 配置管理。
+
 ## 环境变量说明
 
 ### `MASTER_KEY` vs `ADMIN_TOKEN`

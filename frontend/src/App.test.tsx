@@ -43,6 +43,7 @@ function providerWorkspace(): ProviderWorkspace {
       supports_include_usage: true,
       websocket_enabled: false,
       beta_features: [],
+      request_overrides: { headers: [], body: [] },
       key_selection_strategy: 'round_robin',
       groups: [],
       max_attempts: 2,
@@ -274,10 +275,33 @@ describe('admin console smoke test', () => {
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Priority' }), { target: { value: '25' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '4' } });
+    fireEvent.click(screen.getByText('Request Overrides (Optional)'));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply Codex Client Compatibility Preset' }));
     fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
 
     await waitFor(() => expect(providerPayload).toBeTruthy());
-    expect(providerPayload).toMatchObject({ priority: 25, weight: 4 });
+    expect(providerPayload).toMatchObject({
+      priority: 25,
+      weight: 4,
+      request_overrides: {
+        headers: expect.arrayContaining([
+          expect.objectContaining({
+            scope: 'all',
+            operation: 'set',
+            name: 'User-Agent',
+            value: 'codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color',
+          }),
+          expect.objectContaining({ name: 'x-codex-window-id', value: '{{request_id}}' }),
+        ]),
+        body: expect.arrayContaining([
+          expect.objectContaining({
+            scope: 'responses',
+            path: 'client_metadata.x-codex-window-id',
+            value: '{{request_id}}',
+          }),
+        ]),
+      },
+    });
     expect(await screen.findByText('Model Sync Complete')).toBeTruthy();
     expect(requests).toContain('POST /api/v1/providers/9/endpoints');
     expect(requests).toContain('POST /api/v1/providers/9/keys');
@@ -591,7 +615,7 @@ describe('admin console smoke test', () => {
     expect(screen.queryByRole('heading', { name: 'Provider A' })).toBeNull();
   });
 
-  it('sends edited provider priority and weight', async () => {
+  it('sends edited provider routing and request overrides', async () => {
     let patchPayload: Record<string, unknown> | null = null;
     fetchRequest.mockImplementation(async (input, init) => {
       const url = String(input);
@@ -615,10 +639,25 @@ describe('admin console smoke test', () => {
     fireEvent.click(screen.getByText('Provider A'));
     fireEvent.change(await screen.findByRole('spinbutton', { name: 'Priority' }), { target: { value: '50' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply Codex Client Compatibility Preset' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save Provider' }));
 
     await waitFor(() => expect(patchPayload).toBeTruthy());
-    expect(patchPayload).toMatchObject({ priority: 50, weight: 3 });
+    expect(patchPayload).toMatchObject({
+      priority: 50,
+      weight: 3,
+      request_overrides: {
+        headers: expect.arrayContaining([
+          expect.objectContaining({ name: 'originator', value: 'codex-tui' }),
+        ]),
+        body: expect.arrayContaining([
+          expect.objectContaining({
+            path: 'client_metadata.x-codex-installation-id',
+            value: '{{request_id}}',
+          }),
+        ]),
+      },
+    });
     expect(consoleError).not.toHaveBeenCalled();
   });
 

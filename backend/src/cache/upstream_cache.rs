@@ -485,6 +485,7 @@ mod tests {
             supports_include_usage: true,
             websocket_enabled: false,
             beta_features: Vec::new(),
+            request_overrides: crate::request_overrides::RequestOverrides::default(),
             key_selection_strategy: "weighted".to_string(),
             max_attempts: 2,
             max_concurrency: None,

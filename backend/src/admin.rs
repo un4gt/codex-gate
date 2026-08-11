@@ -14,6 +14,7 @@ use crate::health::{
 };
 use crate::http::{self, HttpResponse};
 use crate::pricing::PriceCard;
+use crate::request_overrides::{RequestOverrideContext, RequestOverrideTarget, RequestOverrides};
 use crate::state::SharedState;
 use crate::types::{
     ApiKeyAuth, ModelAlias, ModelAliasTarget, UpstreamEndpoint, UpstreamKeyMeta, UpstreamProvider,
@@ -586,15 +587,29 @@ async fn fetch_upstream_model_ids(
     state: &SharedState,
     base_url: &str,
     key_secret: &str,
+    provider: &UpstreamProvider,
 ) -> Result<Vec<String>, HttpResponse> {
     let uri = upstream_url::build_upstream_uri(base_url, "/models")
         .map_err(|error| http::json_error(StatusCode::BAD_REQUEST, error))?;
-    let upstream_req = Request::builder()
+    let mut upstream_req = Request::builder()
         .method(Method::GET)
         .uri(uri)
         .header("Authorization", format!("Bearer {key_secret}"))
         .body(Full::new(Bytes::new()))
         .map_err(|error| http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    provider
+        .request_overrides
+        .apply_headers_for_target(
+            upstream_req.headers_mut(),
+            RequestOverrideTarget::Models,
+            &RequestOverrideContext::new(),
+        )
+        .map_err(|error| {
+            http::json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to apply provider request header overrides: {error}"),
+            )
+        })?;
 
     let response = match tokio_time::timeout(
         state.config.upstream_request_timeout,
@@ -755,10 +770,11 @@ async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
         return http::json_error(StatusCode::CONFLICT, "no available upstream endpoints");
     };
 
-    let models = match fetch_upstream_model_ids(&state, &endpoint.base_url, &key.secret).await {
-        Ok(models) => models,
-        Err(response) => return response,
-    };
+    let models =
+        match fetch_upstream_model_ids(&state, &endpoint.base_url, &key.secret, provider).await {
+            Ok(models) => models,
+            Err(response) => return response,
+        };
 
     if let Err(e) = state
         .db
@@ -955,10 +971,11 @@ async fn sync_key_models(req: Request<Incoming>, state: SharedState) -> HttpResp
         return http::json_error(StatusCode::CONFLICT, "no available upstream endpoints");
     };
 
-    let models = match fetch_upstream_model_ids(&state, &endpoint.base_url, &key.secret).await {
-        Ok(models) => models,
-        Err(response) => return response,
-    };
+    let models =
+        match fetch_upstream_model_ids(&state, &endpoint.base_url, &key.secret, provider).await {
+            Ok(models) => models,
+            Err(response) => return response,
+        };
 
     if let Err(e) = state
         .db
@@ -1901,6 +1918,8 @@ struct CreateProviderReq {
     websocket_enabled: Option<bool>,
     #[serde(default, alias = "betaFeatures")]
     beta_features: Vec<String>,
+    #[serde(default, alias = "requestOverrides")]
+    request_overrides: RequestOverrides,
     #[serde(alias = "keySelectionStrategy")]
     key_selection_strategy: Option<String>,
     #[serde(default)]
@@ -2049,6 +2068,9 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     if let Err(message) = validate_provider_routing(Some(priority), Some(weight)) {
         return http::json_error(StatusCode::BAD_REQUEST, message);
     }
+    if let Err(message) = body.request_overrides.validate() {
+        return http::json_error(StatusCode::BAD_REQUEST, message);
+    }
     let supports_include_usage = body.supports_include_usage.unwrap_or(true);
     let is_codex_oauth = body.provider_type.trim() == crate::codex_oauth::PROVIDER_TYPE;
     let websocket_enabled = body.websocket_enabled.unwrap_or(is_codex_oauth);
@@ -2123,6 +2145,7 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
             supports_include_usage,
             websocket_enabled,
             &beta_features,
+            &body.request_overrides,
             key_selection_strategy,
             max_attempts,
             max_concurrency,
@@ -2169,6 +2192,8 @@ struct PatchProviderReq {
     websocket_enabled: Option<bool>,
     #[serde(default, alias = "betaFeatures")]
     beta_features: Option<Vec<String>>,
+    #[serde(default, alias = "requestOverrides")]
+    request_overrides: Option<RequestOverrides>,
     #[serde(alias = "keySelectionStrategy")]
     key_selection_strategy: Option<String>,
     groups: Option<Vec<ProviderGroupAssignmentReq>>,
@@ -2249,6 +2274,12 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     }
     if let Some(v) = patch.beta_features {
         current.beta_features = normalize_beta_features(v);
+    }
+    if let Some(value) = patch.request_overrides {
+        if let Err(message) = value.validate() {
+            return http::json_error(StatusCode::BAD_REQUEST, message);
+        }
+        current.request_overrides = value;
     }
     if let Some(v) = patch.key_selection_strategy {
         let value = v.trim();
@@ -3615,6 +3646,7 @@ fn provider_to_json(
         "supports_include_usage": p.supports_include_usage,
         "websocket_enabled": p.websocket_enabled,
         "beta_features": p.beta_features,
+        "request_overrides": p.request_overrides,
         "key_selection_strategy": p.key_selection_strategy,
         "groups": groups,
         "max_attempts": p.max_attempts,

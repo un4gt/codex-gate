@@ -2856,6 +2856,7 @@ mod tests {
                 true,
                 true,
                 &["responses-http-to-ws".to_string()],
+                &crate::request_overrides::RequestOverrides::default(),
                 "round_robin",
                 2,
                 None,

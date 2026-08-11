@@ -27,6 +27,7 @@ use crate::metrics::{FailoverKind, RequestMetric};
 use crate::openai::{OpenAiRequestInfo, ensure_include_usage, parse_request_info};
 use crate::pricing::{PriceVersion, PricingEvaluation, evaluate_price};
 use crate::provider_runtime::{BreakerTransition, ProviderAttemptGuard, ProviderCapacityPermit};
+use crate::request_overrides::RequestOverrideContext;
 use crate::responses_via_chat::{
     ChatSseToResponses, ConversionContext, chat_response_to_responses, has_previous_response_id,
     responses_request_to_chat,
@@ -290,6 +291,7 @@ async fn proxy_openai(
     let request_version = parts.version;
     let request_headers = parts.headers.clone();
     let request_path_and_query = parts.uri.path_and_query().cloned();
+    let request_override_context = RequestOverrideContext::new();
     let affinity_identity = extract_affinity_identity(&request_headers, &body_bytes, api_key.id);
     let existing_affinity_binding = affinity_identity
         .as_ref()
@@ -528,6 +530,33 @@ async fn proxy_openai(
             out_body = body;
         }
 
+        out_body = match resolved.provider.request_overrides.apply_body(
+            out_body,
+            resolved.protocol.upstream_api_format,
+            &request_override_context,
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                reservation.neutral();
+                let message = format!("failed to apply provider request body overrides: {error}");
+                submit_err(
+                    &mut telemetry_permit,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "request_override_failed",
+                    message.clone(),
+                    Some(resolved.provider.id),
+                    Some(resolved.endpoint.id),
+                    Some(resolved.key.id),
+                    Some(model_name.clone()),
+                );
+                record_request_metric(
+                    Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i32),
+                    Some("request_override_failed"),
+                );
+                return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, message);
+            }
+        };
+
         let upstream_path_and_query =
             upstream_path_and_query(request_path_and_query.as_ref(), resolved.protocol);
         let upstream_uri = match build_upstream_uri(
@@ -662,6 +691,29 @@ async fn proxy_openai(
         if let Some(auth) = prepared_codex_auth.as_ref() {
             crate::codex_oauth::apply_codex_headers(&mut headers, auth);
         }
+        if let Err(error) = resolved.provider.request_overrides.apply_headers(
+            &mut headers,
+            resolved.protocol.upstream_api_format,
+            &request_override_context,
+        ) {
+            reservation.neutral();
+            let message = format!("failed to apply provider request header overrides: {error}");
+            submit_err(
+                &mut telemetry_permit,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "request_override_failed",
+                message.clone(),
+                Some(resolved.provider.id),
+                Some(resolved.endpoint.id),
+                Some(resolved.key.id),
+                Some(model_name.clone()),
+            );
+            record_request_metric(
+                Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i32),
+                Some("request_override_failed"),
+            );
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, message);
+        }
 
         let mut upstream_response = dispatch_upstream_request(
             &state,
@@ -685,6 +737,29 @@ async fn proxy_openai(
             let mut retry_headers =
                 build_upstream_headers(&request_headers, out_body.len(), &refreshed.access_token);
             crate::codex_oauth::apply_codex_headers(&mut retry_headers, &refreshed);
+            if let Err(error) = resolved.provider.request_overrides.apply_headers(
+                &mut retry_headers,
+                resolved.protocol.upstream_api_format,
+                &request_override_context,
+            ) {
+                reservation.neutral();
+                let message = format!("failed to apply provider request header overrides: {error}");
+                submit_err(
+                    &mut telemetry_permit,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "request_override_failed",
+                    message.clone(),
+                    Some(resolved.provider.id),
+                    Some(resolved.endpoint.id),
+                    Some(resolved.key.id),
+                    Some(model_name.clone()),
+                );
+                record_request_metric(
+                    Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i32),
+                    Some("request_override_failed"),
+                );
+                return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, message);
+            }
             upstream_response = dispatch_upstream_request(
                 &state,
                 &request_method,
@@ -4734,6 +4809,7 @@ mod tests {
             supports_include_usage: true,
             websocket_enabled: true,
             beta_features: Vec::new(),
+            request_overrides: crate::request_overrides::RequestOverrides::default(),
             key_selection_strategy: "round_robin".to_string(),
             max_attempts,
             max_concurrency: None,

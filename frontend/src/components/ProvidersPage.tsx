@@ -5,6 +5,12 @@ import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
+import {
+  RequestOverridesEditor,
+  createRequestOverridesDraft,
+  parseRequestOverridesDraft,
+  type RequestOverridesDraft,
+} from '@/components/console/RequestOverridesEditor';
 import { CodexOAuthLoginDialog, CodexOAuthPanel } from '@/components/CodexOAuthPanel';
 import { t } from '@/lib/i18n';
 import { addUpstreamKeyModels, createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, loadUpstreamKeyModels, resetProviderCircuit, syncProviderModels, syncUpstreamKeyModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateUpstreamKeyModel, updateProviderKey } from '../lib/api';
@@ -146,6 +152,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const [createResources, setCreateResources] = useState<CreatedProviderResources | null>(null);
   const [createSyncedCount, setCreateSyncedCount] = useState<number | null>(null);
   const [createFormVersion, setCreateFormVersion] = useState(0);
+  const [createOverridesDraft, setCreateOverridesDraft] = useState<RequestOverridesDraft>(
+    () => createRequestOverridesDraft(),
+  );
   const [createdCodexLogin, setCreatedCodexLogin] = useState<{
     providerId: number;
     attemptId: number;
@@ -156,6 +165,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const [providerPriorityDraft, setProviderPriorityDraft] = useState('');
   const [providerWeightDraft, setProviderWeightDraft] = useState('');
   const [providerGroupPriorities, setProviderGroupPriorities] = useState<Record<number, string>>({});
+  const [providerRequestOverridesDraft, setProviderRequestOverridesDraft] = useState<RequestOverridesDraft>(
+    () => createRequestOverridesDraft(),
+  );
   const [providerSubmitError, setProviderSubmitError] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleteProviderError, setDeleteProviderError] = useState<string | null>(null);
@@ -191,6 +203,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setCreateGroupIds(providerGroups.filter(group => group.is_default).map(group => group.id));
     setCreateBaseUrls([createDraftInputRow('url')]);
     setCreateApiKeys([createDraftInputRow('key')]);
+    setCreateOverridesDraft(createRequestOverridesDraft());
     setCreateSubmitError(null);
     setCreateStage('editing');
     setCreateResources(null);
@@ -340,6 +353,12 @@ export function ProvidersPage(props: ProvidersPageProps) {
       props.onMessage(message);
       return null;
     }
+    const parsedRequestOverrides = parseRequestOverridesDraft(createOverridesDraft);
+    if (!parsedRequestOverrides.ok) {
+      setCreateSubmitError(parsedRequestOverrides.error);
+      props.onMessage(parsedRequestOverrides.error);
+      return null;
+    }
     return {
       name: createName.trim(),
       provider_type: createProviderType || readString(formData, 'provider_type') || 'openai',
@@ -351,6 +370,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       beta_features: isCreateCodex || readBool(formData, 'responses_http_to_ws')
         ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS]
         : [],
+      request_overrides: parsedRequestOverrides.value,
       key_selection_strategy: 'round_robin',
       groups: createGroupIds.length > 0
         ? createGroupIds.map(groupId => ({
@@ -582,6 +602,12 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return;
     }
     const maxConcurrencyRaw = readString(formData, 'provider_max_concurrency');
+    const parsedRequestOverrides = parseRequestOverridesDraft(providerRequestOverridesDraft);
+    if (!parsedRequestOverrides.ok) {
+      setProviderSubmitError(parsedRequestOverrides.error);
+      props.onMessage(parsedRequestOverrides.error);
+      return;
+    }
     const payload: UpdateProviderInput = {
       name: readString(formData, 'provider_name'),
       provider_type: readString(formData, 'provider_type') || item.provider.provider_type,
@@ -591,6 +617,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       supports_include_usage: readBool(formData, 'supports_include_usage'),
       websocket_enabled: readBool(formData, 'provider_websocket_enabled'),
       beta_features: readBool(formData, 'provider_responses_http_to_ws') ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS] : [],
+      request_overrides: parsedRequestOverrides.value,
       key_selection_strategy: item.provider.key_selection_strategy || 'round_robin',
       groups: providerGroups.length > 0 ? groups : undefined,
       max_attempts: readInt(formData, 'provider_max_attempts', item.provider.max_attempts),
@@ -877,10 +904,19 @@ export function ProvidersPage(props: ProvidersPageProps) {
           group.priority_override === null ? '' : String(group.priority_override)
         ]))
       : {});
+    setProviderRequestOverridesDraft(
+      createRequestOverridesDraft(selected?.provider.request_overrides),
+    );
     setProviderSubmitError(null);
     setDeleteConfirmOpen(false);
     setDeleteProviderError(null);
-  }, [selectedProviderId, selected?.provider.priority, selected?.provider.weight, selected?.provider.groups]);
+  }, [
+    selectedProviderId,
+    selected?.provider.priority,
+    selected?.provider.weight,
+    selected?.provider.groups,
+    selected?.provider.request_overrides,
+  ]);
   useEffect(() => {
     const item = selected;
     if (!item) return;
@@ -1431,6 +1467,24 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <Box component="span">{t('HTTP→WS Beta')}</Box>
             </Box>
           </Box>
+          <Box className="border border-border/40" component="details">
+            <Box className="cursor-pointer px-4 py-3 text-sm font-medium" component="summary">
+              {t('请求覆写（可选）')}
+              <Box className="ml-2 text-xs font-normal text-muted-foreground" component="span">
+                {t('Codex-only 中转可在首次模型同步前应用兼容预设。')}
+              </Box>
+            </Box>
+            <Box className="border-t border-border/40 p-4">
+              <RequestOverridesEditor
+                value={createOverridesDraft}
+                disabled={createFieldsDisabled}
+                onChange={next => {
+                  setCreateOverridesDraft(next);
+                  setCreateSubmitError(null);
+                }}
+              />
+            </Box>
+          </Box>
           <Box className="grid gap-2 sm:grid-cols-3" aria-label={t('创建进度')}>
             {[t('基本配置'), t('连接信息'), t('模型同步')].map((label, index) => {
               const activeIndex = createStage === 'provider' ? 0
@@ -1640,6 +1694,14 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       <Box component="span">{t('HTTP→WS Beta')}</Box>
                     </Box>
                   </Box>
+                  <RequestOverridesEditor
+                    value={providerRequestOverridesDraft}
+                    disabled={busy === `provider-${item.provider.id}`}
+                    onChange={next => {
+                      setProviderRequestOverridesDraft(next);
+                      setProviderSubmitError(null);
+                    }}
+                  />
                   <Box className="border border-border/40" component="details">
                     <Box className="cursor-pointer px-4 py-3 text-sm font-medium" component="summary">
                       {t('韧性与故障转移')}

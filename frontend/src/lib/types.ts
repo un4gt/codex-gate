@@ -415,6 +415,28 @@ export interface ProviderHealthSummary extends RuntimeHealthSummary {
   key_counts: HealthCounts;
 }
 
+export type RequestOverrideScope = 'all' | 'chat_completions' | 'responses';
+export type RequestOverrideOperation = 'set' | 'remove';
+
+export interface RequestHeaderOverride {
+  scope: RequestOverrideScope;
+  operation: RequestOverrideOperation;
+  name: string;
+  value: string;
+}
+
+export interface RequestBodyOverride {
+  scope: RequestOverrideScope;
+  operation: RequestOverrideOperation;
+  path: string;
+  value: unknown;
+}
+
+export interface RequestOverrides {
+  headers: RequestHeaderOverride[];
+  body: RequestBodyOverride[];
+}
+
 export interface ProviderSummary {
   id: number;
   name: string;
@@ -425,6 +447,7 @@ export interface ProviderSummary {
   supports_include_usage: boolean;
   websocket_enabled: boolean;
   beta_features: string[];
+  request_overrides: RequestOverrides;
   key_selection_strategy: 'round_robin' | 'weighted';
   groups: ProviderGroupMembership[];
   max_attempts: number;
@@ -625,6 +648,7 @@ export interface CreateProviderInput {
   supports_include_usage: boolean;
   websocket_enabled: boolean;
   beta_features: string[];
+  request_overrides: RequestOverrides;
   key_selection_strategy: 'round_robin' | 'weighted';
   groups?: Array<{ group_id: number; priority_override: number | null }>;
   max_attempts: number;
@@ -644,6 +668,7 @@ export interface UpdateProviderInput {
   supports_include_usage?: boolean;
   websocket_enabled?: boolean;
   beta_features?: string[];
+  request_overrides?: RequestOverrides;
   key_selection_strategy?: 'round_robin' | 'weighted';
   groups?: Array<{ group_id: number; priority_override: number | null }>;
   max_attempts?: number;

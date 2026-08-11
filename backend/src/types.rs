@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::pricing::PriceCard;
+use crate::request_overrides::RequestOverrides;
 
 #[derive(Clone, Debug)]
 pub struct ApiKeyAuth {
@@ -24,6 +25,7 @@ pub struct UpstreamProvider {
     pub supports_include_usage: bool,
     pub websocket_enabled: bool,
     pub beta_features: Vec<String>,
+    pub request_overrides: RequestOverrides,
     pub key_selection_strategy: String,
     pub max_attempts: i32,
     pub max_concurrency: Option<i32>,
