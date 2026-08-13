@@ -33,17 +33,17 @@ jobs:
 
     steps:
       - name: Check Out
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set Up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -110,7 +110,7 @@ jobs:
         run: Compress-Archive -Path "dist/${{ steps.package.outputs.name }}" -DestinationPath "dist/${{ steps.package.outputs.name }}.zip"
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.name }}
           path: dist/${{ steps.package.outputs.name }}.${{ matrix.archive_ext }}
@@ -126,7 +126,7 @@ jobs:
 
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
 
