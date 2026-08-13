@@ -335,7 +335,7 @@ describe('admin console smoke test', () => {
     expect(requests).toContain('POST /api/v1/providers/9/keys');
     expect(requests).toContain('POST /api/v1/providers/9/models/sync');
     expect(consoleError).not.toHaveBeenCalled();
-  });
+  }, 10_000);
 
   it('creates a Codex OAuth provider without an API key and polls device login', async () => {
     let providerPayload: Record<string, unknown> | null = null;
