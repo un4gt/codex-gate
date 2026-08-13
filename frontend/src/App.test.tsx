@@ -202,6 +202,34 @@ describe('admin console smoke test', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it('keeps the connection gate closed when the submitted admin token is rejected', async () => {
+    fetchRequest.mockResolvedValue(jsonResponse({ error: 'invalid token' }, 401));
+
+    renderWithTheme(<Root />);
+
+    fireEvent.change(screen.getByPlaceholderText('Enter admin token'), {
+      target: { value: 'wrong-token' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /enter console/i }));
+
+    await waitFor(() => expect(fetchRequest).toHaveBeenCalled());
+    expect(await screen.findByText(/401/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /enter console/i })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+  });
+
+  it('validates a stored admin token before restoring the console', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'wrong-token');
+    fetchRequest.mockResolvedValue(jsonResponse({ error: 'invalid token' }, 401));
+
+    renderWithTheme(<Root />);
+
+    await waitFor(() => expect(fetchRequest).toHaveBeenCalled());
+    expect(await screen.findByText(/401/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /enter console/i })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+  });
+
   it('opens the pricing settings without the former Ark Field context crash', async () => {
     renderWithTheme(
       <SettingsPage
@@ -768,6 +796,10 @@ describe('admin console smoke test', () => {
   it('makes every navigation row sortable while preserving link navigation', async () => {
     window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
     window.history.replaceState({}, '', '/overview');
+    fetchRequest.mockImplementation(async input => {
+      if (String(input).endsWith('/api/v1/system/config')) return jsonResponse({});
+      throw new Error('offline');
+    });
 
     renderWithTheme(<Root />);
 
@@ -797,6 +829,10 @@ describe('admin console smoke test', () => {
       'logs', 'overview', 'upstreams', 'keys', 'settings',
     ]));
     window.history.replaceState({}, '', '/overview');
+    fetchRequest.mockImplementation(async input => {
+      if (String(input).endsWith('/api/v1/system/config')) return jsonResponse({});
+      throw new Error('offline');
+    });
 
     renderWithTheme(<Root />);
 

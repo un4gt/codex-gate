@@ -788,7 +788,7 @@ function Root() {
   const [status, setStatus] = useState<LoadState>('idle');
   const [message, setMessage] = useState(t('未连接后台。'));
   const [refreshKey, setRefreshKey] = useState(0);
-  const [consoleMode, setConsoleMode] = useState<ConsoleMode>(settings.adminToken.trim() ? 'console' : 'connect');
+  const [consoleMode, setConsoleMode] = useState<ConsoleMode>('connect');
   const clearWorkspace = useCallback(() => {
     setProviders([]);
     setModelAliases([]);
@@ -903,7 +903,7 @@ function Root() {
       return;
     }
     try {
-      const config = await loadSystemConfig(current).catch(() => null);
+      const config = await loadSystemConfig(current);
       setSystemConfig(config);
       setRefreshKey(value => value + 1);
       setMessage(successMessage ? t(successMessage) : t('已连接。'));
