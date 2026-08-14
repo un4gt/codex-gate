@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { RestrictToVerticalAxis } from '@dnd-kit/abstract/modifiers';
 import { KeyboardSensor, PointerActivationConstraints, PointerSensor } from '@dnd-kit/dom';
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
@@ -16,7 +16,7 @@ import { NotificationsPage } from '@/components/NotificationsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
-import { loadApiKeyWorkspace, loadPrices, loadModelAliases, loadProviderGroups, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
+import { ApiRequestError, loadApiKeyWorkspace, loadPrices, loadModelAliases, loadProviderGroups, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
 import { formatBytes, formatCommitShort, formatCompactInteger, formatMs, formatVersionLabel } from '@/lib/format';
 import { calculateOverviewPricing, formatUsd } from '@/lib/pricing';
 import type { ApiKeyWorkspace, ConnectionSettings, ModelPrice, ModelAlias, ProviderGroup, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingsResponse, StatsOverviewResponse, StatsPeriod, SystemConfigResponse } from '@/lib/types';
@@ -31,6 +31,11 @@ import Typography from "@mui/material/Typography";
 import useMediaQuery from '@mui/material/useMediaQuery';
 type LoadState = 'idle' | 'loading' | 'ready';
 type ConsoleMode = 'connect' | 'console';
+type ConnectionIssue = 'apiBase' | 'adminToken' | 'general' | null;
+interface ConnectionFailure {
+  issue: Exclude<ConnectionIssue, null>;
+  message: string;
+}
 interface AppDataContext {
   settings: ConnectionSettings;
   providers: ProviderWorkspace[];
@@ -180,6 +185,38 @@ function persistSettings(settings: ConnectionSettings) {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(API_BASE_KEY, settings.apiBase);
   window.sessionStorage.setItem(ADMIN_TOKEN_KEY, settings.adminToken);
+}
+function describeConnectionFailure(error: unknown): ConnectionFailure {
+  if (error instanceof ApiRequestError) {
+    if (error.status === 401 || error.status === 403) {
+      return {
+        issue: 'adminToken',
+        message: t('管理员口令不正确，请重新输入。')
+      };
+    }
+    if (error.status === 404) {
+      return {
+        issue: 'apiBase',
+        message: t('未找到管理接口，请检查服务地址。')
+      };
+    }
+    if (error.status >= 500) {
+      return {
+        issue: 'general',
+        message: t('服务暂时不可用，请稍后重试。')
+      };
+    }
+  }
+  if (error instanceof TypeError) {
+    return {
+      issue: 'apiBase',
+      message: t('无法连接服务，请检查服务地址和网络后重试。')
+    };
+  }
+  return {
+    issue: 'general',
+    message: t('登录失败，请检查服务地址后重试。')
+  };
 }
 function isNavKey(value: string): value is NavKey {
   return value in NAV_ITEMS_BY_KEY;
@@ -441,10 +478,17 @@ function ConnectionGate(props: {
   settings: ConnectionSettings;
   status: LoadState;
   message: string;
+  issue: ConnectionIssue;
   onApiBaseChange: (value: string) => void;
   onAdminTokenChange: (value: string) => void;
   onRefresh: (successMessage?: string) => Promise<void>;
 }) {
+  const apiBaseInputRef = useRef<HTMLInputElement>(null);
+  const adminTokenInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (props.issue === 'apiBase') apiBaseInputRef.current?.focus();
+    if (props.issue === 'adminToken') adminTokenInputRef.current?.focus();
+  }, [props.issue]);
   return <Box className="min-h-screen bg-background px-4 py-10 sm:px-6 lg:px-8">
       <Box className="mx-auto flex max-w-xl flex-col gap-10 mt-12">
         <Box className="flex justify-end">
@@ -462,28 +506,68 @@ function ConnectionGate(props: {
 
         <Card className="rounded-none border border-border bg-background shadow-none">
           <Box className="flex flex-col gap-3 p-6 pb-5">
-            <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("连接信息")}</Typography>
-            <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t("连接成功后进入控制台。")}</Typography>
+            <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("登录控制台")}</Typography>
+            <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t("输入管理员口令以验证身份。")}</Typography>
           </Box>
           <CardContent>
-            <Box className="flex flex-col gap-6" onSubmit={event => {
+            <Box className="flex flex-col gap-6" aria-busy={props.status === 'loading'} onSubmit={event => {
             event.preventDefault();
-            void props.onRefresh('连接信息已刷新。');
+            void props.onRefresh();
           }} component="form">
               <Box className="grid gap-6">
                 <Box className="flex flex-col gap-3" component="label">
                   <Box className="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('服务地址')}</Box>
-                  <InputBase value={props.settings.apiBase} onChange={event => props.onApiBaseChange(event.target.value)} placeholder={t("http://127.0.0.1:8080")} className="rounded-none font-mono text-sm" />
+                  <InputBase
+                    value={props.settings.apiBase}
+                    error={props.issue === 'apiBase'}
+                    inputRef={apiBaseInputRef}
+                    inputProps={{
+                      'aria-describedby': 'connection-status-message',
+                      'aria-invalid': props.issue === 'apiBase'
+                    }}
+                    autoComplete="url"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    onChange={event => props.onApiBaseChange(event.target.value)}
+                    placeholder={t("http://127.0.0.1:8080")}
+                    className="rounded-none font-mono text-sm"
+                  />
                 </Box>
                 <Box className="flex flex-col gap-3" component="label">
                   <Box className="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('管理员口令')}</Box>
-                  <InputBase type="password" value={props.settings.adminToken} onChange={event => props.onAdminTokenChange(event.target.value)} placeholder={t("输入管理员口令")} className="rounded-none font-mono text-sm" />
+                  <InputBase
+                    type="password"
+                    value={props.settings.adminToken}
+                    error={props.issue === 'adminToken'}
+                    inputRef={adminTokenInputRef}
+                    inputProps={{
+                      'aria-describedby': 'connection-status-message',
+                      'aria-invalid': props.issue === 'adminToken'
+                    }}
+                    autoComplete="current-password"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    onChange={event => props.onAdminTokenChange(event.target.value)}
+                    placeholder={t("输入管理员口令")}
+                    className="rounded-none font-mono text-sm"
+                  />
                 </Box>
               </Box>
 
-              <Alert className="rounded-none border-border/40 bg-muted/20">
-                <AlertTitle className="text-sm font-semibold">{t("连接状态")}</AlertTitle>
-                <Typography className="mt-2 text-sm leading-5 text-muted-foreground opacity-80" component="div">{props.message}</Typography>
+              <Alert
+                severity={props.issue ? 'error' : 'info'}
+                role={props.issue ? 'alert' : 'status'}
+                className="rounded-none border-border/40 bg-muted/20"
+                sx={props.issue ? {
+                  backgroundColor: 'color-mix(in oklab, var(--destructive) 5%, transparent)',
+                  borderColor: 'color-mix(in oklab, var(--destructive) 45%, var(--border))',
+                  '& .MuiAlertTitle-root': {
+                    color: 'var(--destructive)'
+                  }
+                } : undefined}
+              >
+                <AlertTitle className="text-sm font-semibold">{t(props.issue ? '登录失败' : '登录状态')}</AlertTitle>
+                <Typography id="connection-status-message" className="mt-2 text-sm leading-5 text-muted-foreground opacity-80" component="div">{props.message}</Typography>
               </Alert>
 
               <Box className="flex flex-wrap gap-2 pt-2">
@@ -789,6 +873,7 @@ function Root() {
   const [message, setMessage] = useState(t('未连接后台。'));
   const [refreshKey, setRefreshKey] = useState(0);
   const [consoleMode, setConsoleMode] = useState<ConsoleMode>('connect');
+  const [connectionIssue, setConnectionIssue] = useState<ConnectionIssue>(null);
   const clearWorkspace = useCallback(() => {
     setProviders([]);
     setModelAliases([]);
@@ -897,23 +982,27 @@ function Root() {
     if (!current.adminToken.trim()) {
       clearWorkspace();
       setMessage(t('请输入管理员口令。'));
+      setConnectionIssue('adminToken');
       setConsoleMode('connect');
       setRefreshKey(value => value + 1);
       setStatus('ready');
       return;
     }
+    setConnectionIssue(null);
+    setMessage(t('正在验证管理员口令…'));
     try {
       const config = await loadSystemConfig(current);
       setSystemConfig(config);
       setRefreshKey(value => value + 1);
       setMessage(successMessage ? t(successMessage) : t('已连接。'));
+      setConnectionIssue(null);
       setConsoleMode('console');
     } catch (error) {
       console.error('Failed to load admin console data', error);
       clearWorkspace();
-      setMessage(error instanceof Error ? t('{{message}}；请检查服务地址和管理员口令。', {
-        message: error.message
-      }) : t('连接失败；请检查服务地址和管理员口令。'));
+      const failure = describeConnectionFailure(error);
+      setMessage(failure.message);
+      setConnectionIssue(failure.issue);
       setConsoleMode('connect');
     } finally {
       setStatus('ready');
@@ -928,20 +1017,32 @@ function Root() {
     persistSettings(nextSettings);
     clearWorkspace();
     setMessage(t('已退出。'));
+    setConnectionIssue(null);
     setConsoleMode('connect');
     setRefreshKey(value => value + 1);
   }, [clearWorkspace, settings]);
-  const onApiBaseChange = useCallback((value: string) => setSettings(current => ({
-    ...current,
-    apiBase: value
-  })), []);
-  const onAdminTokenChange = useCallback((value: string) => setSettings(current => ({
-    ...current,
-    adminToken: value
-  })), []);
+  const clearConnectionFeedback = useCallback(() => {
+    if (consoleMode !== 'connect') return;
+    setConnectionIssue(null);
+    setMessage(t('未连接后台。'));
+  }, [consoleMode]);
+  const onApiBaseChange = useCallback((value: string) => {
+    setSettings(current => ({
+      ...current,
+      apiBase: value
+    }));
+    clearConnectionFeedback();
+  }, [clearConnectionFeedback]);
+  const onAdminTokenChange = useCallback((value: string) => {
+    setSettings(current => ({
+      ...current,
+      adminToken: value
+    }));
+    clearConnectionFeedback();
+  }, [clearConnectionFeedback]);
   const onMessage = useCallback((nextMessage: string) => setMessage(t(nextMessage)), []);
   useEffect(() => {
-    void refreshData();
+    if (settings.adminToken.trim()) void refreshData();
   }, []);
   const data = useMemo<AppDataContext>(() => ({
     settings,
@@ -1011,6 +1112,7 @@ function Root() {
       settings={settings}
       status={status}
       message={message}
+      issue={connectionIssue}
       onApiBaseChange={onApiBaseChange}
       onAdminTokenChange={onAdminTokenChange}
       onRefresh={refreshData}

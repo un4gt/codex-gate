@@ -51,6 +51,18 @@ import type {
   UpstreamKeyModel,
 } from './types';
 
+export class ApiRequestError extends Error {
+  readonly path: string;
+  readonly status: number;
+
+  constructor(path: string, status: number, details: string) {
+    super(`${path} 请求失败：${status}${details ? ` ${details}` : ''}`);
+    this.name = 'ApiRequestError';
+    this.path = path;
+    this.status = status;
+  }
+}
+
 function normalizeBase(apiBase: string): string {
   return apiBase.trim().replace(/\/$/, '');
 }
@@ -81,7 +93,7 @@ async function requestJson<T>(apiBase: string, path: string, adminToken: string,
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`${path} 请求失败：${response.status} ${body || response.statusText}`);
+    throw new ApiRequestError(path, response.status, body || response.statusText);
   }
 
   if (response.status === 204) {

@@ -259,6 +259,10 @@ export const theme = createTheme({
             borderColor: 'var(--primary)',
             boxShadow: '0 0 0 1px var(--ring)',
           },
+          '&.Mui-error': {
+            borderColor: 'var(--destructive)',
+            boxShadow: '0 0 0 1px color-mix(in oklab, var(--destructive) 35%, transparent)',
+          },
           '&.Mui-disabled': {
             cursor: 'not-allowed',
             opacity: 0.5,

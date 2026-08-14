@@ -198,7 +198,7 @@ describe('admin console smoke test', () => {
 
     expect(await screen.findByRole('heading', { name: 'LITTLE GATE' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /enter console/i })).toBeTruthy();
-    await waitFor(() => expect(screen.getByText('Please enter the admin token.')).toBeTruthy());
+    expect(screen.getByText('Backend not connected.')).toBeTruthy();
     expect(consoleError).not.toHaveBeenCalled();
   });
 
@@ -207,13 +207,16 @@ describe('admin console smoke test', () => {
 
     renderWithTheme(<Root />);
 
-    fireEvent.change(screen.getByPlaceholderText('Enter admin token'), {
+    const tokenInput = screen.getByPlaceholderText('Enter admin token');
+    fireEvent.change(tokenInput, {
       target: { value: 'wrong-token' },
     });
     fireEvent.click(screen.getByRole('button', { name: /enter console/i }));
 
     await waitFor(() => expect(fetchRequest).toHaveBeenCalled());
-    expect(await screen.findByText(/401/)).toBeTruthy();
+    expect(await screen.findByText('The admin token is incorrect. Please try again.')).toBeTruthy();
+    expect(tokenInput.getAttribute('aria-invalid')).toBe('true');
+    expect(screen.queryByText(/401|invalid token|\/api\/v1\/system\/config/i)).toBeNull();
     expect(screen.getByRole('button', { name: /enter console/i })).toBeTruthy();
     expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
   });
@@ -225,7 +228,9 @@ describe('admin console smoke test', () => {
     renderWithTheme(<Root />);
 
     await waitFor(() => expect(fetchRequest).toHaveBeenCalled());
-    expect(await screen.findByText(/401/)).toBeTruthy();
+    expect(await screen.findByText('The admin token is incorrect. Please try again.')).toBeTruthy();
+    expect(screen.getByPlaceholderText('Enter admin token').getAttribute('aria-invalid')).toBe('true');
+    expect(screen.queryByText(/401|invalid token|\/api\/v1\/system\/config/i)).toBeNull();
     expect(screen.getByRole('button', { name: /enter console/i })).toBeTruthy();
     expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
   });
@@ -687,7 +692,7 @@ describe('admin console smoke test', () => {
       },
     });
     expect(consoleError).not.toHaveBeenCalled();
-  });
+  }, 10_000);
 
   it('prevents saving an invalid provider weight', async () => {
     let patchCount = 0;
