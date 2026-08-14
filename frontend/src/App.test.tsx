@@ -8,6 +8,7 @@ import { CodexOAuthLoginDialog } from '@/components/CodexOAuthPanel';
 import { LogsPage } from '@/components/LogsPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { ModelsPage } from '@/components/ModelsPage';
+import { PricesPage } from '@/components/PricesPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { initializeI18n } from '@/lib/i18n';
 import type { ProviderWorkspace } from '@/lib/types';
@@ -254,6 +255,46 @@ describe('admin console smoke test', () => {
     fireEvent.click(screen.getByRole('button', { name: /pricing & cost/i }));
 
     expect(await screen.findByText('Base Pricing')).toBeTruthy();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps long model identifiers and pricing headers on one line', () => {
+    const modelName = 'openai/gpt-5.4-2026-08-14-long-model-identifier';
+    renderWithTheme(
+      <PricesPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        providers={[]}
+        items={[{
+          id: 11,
+          provider_id: null,
+          model_name: modelName,
+          price_data: {
+            schema_version: 2,
+            unit: 'usd_per_million_tokens',
+            base: {
+              input: '5',
+              output: '30',
+              cache_read: null,
+              cache_write: '0.5',
+            },
+            tiers: [],
+          },
+          created_at_ms: 1_900_000_000_000,
+          updated_at_ms: 1_900_000_000_000,
+        }]}
+        onRefresh={async () => undefined}
+        onMessage={() => undefined}
+      />,
+    );
+
+    const table = screen.getByRole('table', { name: 'Currently Available Price Items' });
+    const model = screen.getByTitle(modelName);
+    expect(model.className).toContain('truncate');
+    expect(model.className).toContain('block');
+    expect(model.closest('td')?.className).toContain('whitespace-nowrap');
+    expect(table.className).toContain('table-fixed');
+    expect(Array.from(table.querySelectorAll('th')).every(cell => cell.className.includes('whitespace-nowrap'))).toBe(true);
+    expect(table.closest('.grid')?.className).not.toContain('grid-cols');
     expect(consoleError).not.toHaveBeenCalled();
   });
 

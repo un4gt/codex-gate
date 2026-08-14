@@ -637,7 +637,11 @@ export async function refreshCodexOAuthQuota(
 
 export async function createPrice(settings: ConnectionSettings, payload: CreatePriceInput) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return postJson<{ id: number }>(apiBase, '/api/v1/prices', adminToken, payload);
+  return postJson<{
+    id: number;
+    backfilled_requests: number;
+    history_recalculation_pending: boolean;
+  }>(apiBase, '/api/v1/prices', adminToken, payload);
 }
 
 export async function createApiKey(settings: ConnectionSettings, payload: CreateApiKeyInput) {

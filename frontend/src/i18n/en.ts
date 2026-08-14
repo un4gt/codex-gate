@@ -324,6 +324,8 @@ export const dict: Record<string, string> = {
   '价格数据不合法。': 'Invalid pricing data.',
   '价格 {{name}} 已写入上游作用域。': 'Price {{name}} saved to provider scope.',
   '价格 {{name}} 已写入全局作用域。': 'Price {{name}} saved to global scope.',
+  '已按新价格回算 {{count}} 条未定价历史请求。': 'Recalculated {{count}} previously unpriced requests with the new price.',
+  '历史用量将在打开总览时继续回算。': 'Historical usage will be recalculated when the overview is opened.',
   '创建价格失败。': 'Failed to create price.',
   '模型价格与成本换算': 'Model Pricing and Cost Mapping',
   '已生效': 'Active',

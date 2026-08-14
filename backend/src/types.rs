@@ -278,6 +278,12 @@ pub struct PricingUsageGroupRow {
     pub cache_creation_input_tokens: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnpricedUsageKeyRow {
+    pub provider_id: Option<i64>,
+    pub model: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeSettingRow {
     pub key: String,

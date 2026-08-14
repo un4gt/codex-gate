@@ -13,8 +13,8 @@ use crate::types::{
     ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelRoute,
     PricingUsageGroupRow, ProviderGroup, ProviderGroupMembership, ProviderGroupRef, ProviderModel,
     RequestLogRow, RuntimeSettingRow, StatsDailyRow, StatsEventRow, StatsHourlyRow,
-    StatsOverviewAggRow, UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta, UpstreamKeyModel,
-    UpstreamProvider,
+    StatsOverviewAggRow, UnpricedUsageKeyRow, UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta,
+    UpstreamKeyModel, UpstreamProvider,
 };
 
 const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
@@ -1602,6 +1602,55 @@ RETURNING id
             }
             Database::Postgres(pool) => {
                 aggregate_pricing_usage_groups_postgres(pool, time_from_ms, time_to_ms).await
+            }
+        }
+    }
+
+    pub async fn list_unpriced_usage_keys(
+        &self,
+        time_from_ms: i64,
+        time_to_ms: i64,
+    ) -> Result<Vec<UnpricedUsageKeyRow>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                list_unpriced_usage_keys_sqlite(pool, time_from_ms, time_to_ms).await
+            }
+            Database::Postgres(pool) => {
+                list_unpriced_usage_keys_postgres(pool, time_from_ms, time_to_ms).await
+            }
+        }
+    }
+
+    pub async fn backfill_unpriced_usage(
+        &self,
+        provider_id: Option<i64>,
+        model: &str,
+        price: &PriceVersion,
+        time_from_ms: i64,
+        time_to_ms: i64,
+    ) -> Result<u64, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                backfill_unpriced_usage_sqlite(
+                    pool,
+                    provider_id,
+                    model,
+                    price,
+                    time_from_ms,
+                    time_to_ms,
+                )
+                .await
+            }
+            Database::Postgres(pool) => {
+                backfill_unpriced_usage_postgres(
+                    pool,
+                    provider_id,
+                    model,
+                    price,
+                    time_from_ms,
+                    time_to_ms,
+                )
+                .await
             }
         }
     }
@@ -3735,6 +3784,256 @@ ORDER BY price_version_id, price_tier_index
             cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
         })
         .collect())
+}
+
+async fn list_unpriced_usage_keys_sqlite(
+    pool: &SqlitePool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<Vec<UnpricedUsageKeyRow>, DbError> {
+    let rows = sqlx::query(
+        r#"
+SELECT provider_id, model
+FROM (
+  SELECT provider_id, model
+  FROM stats_events
+  WHERE time_ms >= ? AND time_ms <= ?
+    AND usage_observed != 0 AND price_version_id IS NULL
+    AND model IS NOT NULL AND TRIM(model) != ''
+  UNION
+  SELECT provider_id, model
+  FROM request_logs
+  WHERE time_ms >= ? AND time_ms <= ?
+    AND usage_observed != 0 AND price_version_id IS NULL
+    AND model IS NOT NULL AND TRIM(model) != '' AND span_kind = 'request'
+)
+ORDER BY provider_id, model
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| UnpricedUsageKeyRow {
+            provider_id: row.get::<Option<i64>, _>("provider_id"),
+            model: row.get::<String, _>("model"),
+        })
+        .collect())
+}
+
+async fn list_unpriced_usage_keys_postgres(
+    pool: &PgPool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<Vec<UnpricedUsageKeyRow>, DbError> {
+    let rows = sqlx::query(
+        r#"
+SELECT provider_id, model
+FROM (
+  SELECT provider_id, model
+  FROM stats_events
+  WHERE time_ms >= $1 AND time_ms <= $2
+    AND usage_observed AND price_version_id IS NULL
+    AND model IS NOT NULL AND BTRIM(model) != ''
+  UNION
+  SELECT provider_id, model
+  FROM request_logs
+  WHERE time_ms >= $1 AND time_ms <= $2
+    AND usage_observed AND price_version_id IS NULL
+    AND model IS NOT NULL AND BTRIM(model) != '' AND span_kind = 'request'
+) AS unpriced_usage
+ORDER BY provider_id, model
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| UnpricedUsageKeyRow {
+            provider_id: row.get::<Option<i64>, _>("provider_id"),
+            model: row.get::<String, _>("model"),
+        })
+        .collect())
+}
+
+fn push_sqlite_price_tier_case(query: &mut QueryBuilder<'_, Sqlite>, price: &PriceVersion) {
+    const TOTAL_INPUT: &str = "(MAX(input_tokens, 0) + MAX(cache_read_input_tokens, 0) + MAX(cache_creation_input_tokens, 0))";
+    query.push("CASE");
+    for (index, tier) in price.card.tiers.iter().enumerate().rev() {
+        query
+            .push(" WHEN ")
+            .push(TOTAL_INPUT)
+            .push(" > ")
+            .push_bind(tier.over_total_input_tokens)
+            .push(" THEN ")
+            .push_bind(index as i32 + 1);
+    }
+    query.push(" ELSE 0 END");
+}
+
+fn push_postgres_price_tier_case(query: &mut QueryBuilder<'_, Postgres>, price: &PriceVersion) {
+    const TOTAL_INPUT: &str = "(GREATEST(input_tokens, 0) + GREATEST(cache_read_input_tokens, 0) + GREATEST(cache_creation_input_tokens, 0))";
+    query.push("CASE");
+    for (index, tier) in price.card.tiers.iter().enumerate().rev() {
+        query
+            .push(" WHEN ")
+            .push(TOTAL_INPUT)
+            .push(" > ")
+            .push_bind(tier.over_total_input_tokens)
+            .push(" THEN ")
+            .push_bind(index as i32 + 1);
+    }
+    query.push(" ELSE 0 END");
+}
+
+async fn backfill_unpriced_table_sqlite(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    table: &str,
+    provider_id: Option<i64>,
+    model: &str,
+    price: &PriceVersion,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<u64, DbError> {
+    let mut query = QueryBuilder::<Sqlite>::new("UPDATE ");
+    query
+        .push(table)
+        .push(" SET price_version_id = ")
+        .push_bind(price.id)
+        .push(", price_tier_index = ");
+    push_sqlite_price_tier_case(&mut query, price);
+    query
+        .push(" WHERE time_ms >= ")
+        .push_bind(time_from_ms)
+        .push(" AND time_ms <= ")
+        .push_bind(time_to_ms)
+        .push(" AND usage_observed != 0 AND price_version_id IS NULL AND model = ")
+        .push_bind(model);
+    if table == "request_logs" {
+        query.push(" AND span_kind = 'request'");
+    }
+    match provider_id {
+        Some(provider_id) => {
+            query.push(" AND provider_id = ").push_bind(provider_id);
+        }
+        None => {
+            query.push(" AND provider_id IS NULL");
+        }
+    }
+    let result = query.build().execute(&mut **tx).await?;
+    Ok(result.rows_affected())
+}
+
+async fn backfill_unpriced_usage_sqlite(
+    pool: &SqlitePool,
+    provider_id: Option<i64>,
+    model: &str,
+    price: &PriceVersion,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<u64, DbError> {
+    let mut tx = pool.begin().await?;
+    let backfilled_requests = backfill_unpriced_table_sqlite(
+        &mut tx,
+        "stats_events",
+        provider_id,
+        model,
+        price,
+        time_from_ms,
+        time_to_ms,
+    )
+    .await?;
+    backfill_unpriced_table_sqlite(
+        &mut tx,
+        "request_logs",
+        provider_id,
+        model,
+        price,
+        time_from_ms,
+        time_to_ms,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(backfilled_requests)
+}
+
+async fn backfill_unpriced_table_postgres(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    table: &str,
+    provider_id: Option<i64>,
+    model: &str,
+    price: &PriceVersion,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<u64, DbError> {
+    let mut query = QueryBuilder::<Postgres>::new("UPDATE ");
+    query
+        .push(table)
+        .push(" SET price_version_id = ")
+        .push_bind(price.id)
+        .push(", price_tier_index = ");
+    push_postgres_price_tier_case(&mut query, price);
+    query
+        .push(" WHERE time_ms >= ")
+        .push_bind(time_from_ms)
+        .push(" AND time_ms <= ")
+        .push_bind(time_to_ms)
+        .push(" AND usage_observed AND price_version_id IS NULL AND model = ")
+        .push_bind(model);
+    if table == "request_logs" {
+        query.push(" AND span_kind = 'request'");
+    }
+    match provider_id {
+        Some(provider_id) => {
+            query.push(" AND provider_id = ").push_bind(provider_id);
+        }
+        None => {
+            query.push(" AND provider_id IS NULL");
+        }
+    }
+    let result = query.build().execute(&mut **tx).await?;
+    Ok(result.rows_affected())
+}
+
+async fn backfill_unpriced_usage_postgres(
+    pool: &PgPool,
+    provider_id: Option<i64>,
+    model: &str,
+    price: &PriceVersion,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<u64, DbError> {
+    let mut tx = pool.begin().await?;
+    let backfilled_requests = backfill_unpriced_table_postgres(
+        &mut tx,
+        "stats_events",
+        provider_id,
+        model,
+        price,
+        time_from_ms,
+        time_to_ms,
+    )
+    .await?;
+    backfill_unpriced_table_postgres(
+        &mut tx,
+        "request_logs",
+        provider_id,
+        model,
+        price,
+        time_from_ms,
+        time_to_ms,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(backfilled_requests)
 }
 
 async fn list_request_logs_before_sqlite(
@@ -7134,6 +7433,143 @@ CREATE TABLE stats_events (
         assert_eq!(priced.price_tier_index, Some(1));
         assert_eq!(priced.request_count, 2);
         assert_eq!(priced.input_tokens, 20);
+    }
+
+    #[tokio::test]
+    async fn backfill_unpriced_usage_should_bind_only_matching_observed_history() {
+        let db = sqlite_memory_db().await;
+        let price_data = r#"{
+          "schema_version": 2,
+          "unit": "usd_per_million_tokens",
+          "base": { "input": "1", "output": "2", "cache_read": "0.5", "cache_write": "3" },
+          "tiers": [{
+            "over_total_input_tokens": 15,
+            "rates": { "input": "2", "output": "4", "cache_read": "1", "cache_write": "6" }
+          }]
+        }"#;
+        let old_price_id = db
+            .insert_model_price(Some(2), "model-a", price_data, 800)
+            .await
+            .expect("insert old price version");
+        let price_id = db
+            .insert_model_price(Some(2), "model-a", price_data, 900)
+            .await
+            .expect("insert price version");
+        let price = db
+            .list_price_versions(&[price_id])
+            .await
+            .expect("load price version")
+            .pop()
+            .expect("price version");
+
+        let mut base_tier = stats_event("base-tier", 1_000, Some(200));
+        base_tier.input_tokens = 1;
+        base_tier.cache_read_input_tokens = 1;
+        base_tier.cache_creation_input_tokens = 1;
+        base_tier.price_version_id = None;
+        base_tier.price_tier_index = None;
+        let mut context_tier = stats_event("context-tier", 1_500, Some(200));
+        context_tier.price_version_id = None;
+        context_tier.price_tier_index = None;
+        let mut other_provider = stats_event("other-provider", 1_500, Some(200));
+        other_provider.provider_id = Some(9);
+        other_provider.price_version_id = None;
+        other_provider.price_tier_index = None;
+        let mut usage_missing = stats_event("usage-missing", 1_500, Some(200));
+        usage_missing.usage_observed = false;
+        usage_missing.price_version_id = None;
+        usage_missing.price_tier_index = None;
+        let mut already_priced = stats_event("already-priced", 1_500, Some(200));
+        already_priced.price_version_id = Some(old_price_id);
+        already_priced.price_tier_index = Some(0);
+        db.insert_stats_events(&[
+            base_tier,
+            context_tier,
+            other_provider,
+            usage_missing,
+            already_priced,
+        ])
+        .await
+        .expect("insert stats events");
+
+        let Database::Sqlite(pool) = &db else {
+            panic!("expected sqlite db");
+        };
+        sqlx::query(
+            r#"
+INSERT INTO request_logs (
+  id, time_ms, api_key_id, provider_id, api_format, model,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  usage_observed, span_kind, transport, created_at_ms
+) VALUES ('log-unpriced', 1500, 1, 2, 'chat_completions', 'model-a', 20, 2, 1, 2, 1, 'request', 'http', 1500)
+"#,
+        )
+        .execute(pool)
+        .await
+        .expect("insert unpriced request log");
+
+        let keys = db
+            .list_unpriced_usage_keys(1_000, 2_000)
+            .await
+            .expect("list unpriced usage keys");
+        assert_eq!(
+            keys,
+            vec![
+                UnpricedUsageKeyRow {
+                    provider_id: Some(2),
+                    model: "model-a".to_string(),
+                },
+                UnpricedUsageKeyRow {
+                    provider_id: Some(9),
+                    model: "model-a".to_string(),
+                },
+            ]
+        );
+
+        let backfilled = db
+            .backfill_unpriced_usage(Some(2), "model-a", &price, 1_000, 2_000)
+            .await
+            .expect("backfill unpriced usage");
+        assert_eq!(backfilled, 2);
+
+        let rows = sqlx::query(
+            "SELECT id, price_version_id, price_tier_index FROM stats_events ORDER BY id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("load backfilled stats events");
+        let pricing_by_id = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("id"),
+                    (
+                        row.get::<Option<i64>, _>("price_version_id"),
+                        row.get::<Option<i32>, _>("price_tier_index"),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(pricing_by_id["base-tier"], (Some(price_id), Some(0)));
+        assert_eq!(pricing_by_id["context-tier"], (Some(price_id), Some(1)));
+        assert_eq!(pricing_by_id["other-provider"], (None, None));
+        assert_eq!(pricing_by_id["usage-missing"], (None, None));
+        assert_eq!(
+            pricing_by_id["already-priced"],
+            (Some(old_price_id), Some(0))
+        );
+
+        let log = sqlx::query(
+            "SELECT price_version_id, price_tier_index FROM request_logs WHERE id = 'log-unpriced'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("load backfilled request log");
+        assert_eq!(
+            log.get::<Option<i64>, _>("price_version_id"),
+            Some(price_id)
+        );
+        assert_eq!(log.get::<Option<i32>, _>("price_tier_index"), Some(1));
     }
 
     #[tokio::test]

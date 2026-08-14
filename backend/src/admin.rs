@@ -13,7 +13,7 @@ use crate::health::{
     EndpointHealthView, ProviderHealthView, UpstreamKeyHealthView, summarize_provider_health,
 };
 use crate::http::{self, HttpResponse};
-use crate::pricing::PriceCard;
+use crate::pricing::{PriceCard, PriceVersion};
 use crate::request_overrides::{RequestOverrideContext, RequestOverrideTarget, RequestOverrides};
 use crate::state::SharedState;
 use crate::types::{
@@ -3078,6 +3078,63 @@ struct CreatePriceReq {
     price_data: Value,
 }
 
+async fn reconcile_unpriced_usage(
+    state: &SharedState,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<u64, crate::db::DbError> {
+    let (keys, prices) = tokio::join!(
+        state.db.list_unpriced_usage_keys(time_from_ms, time_to_ms),
+        state.db.list_latest_model_prices()
+    );
+    let keys = keys?;
+    if keys.is_empty() {
+        return Ok(0);
+    }
+
+    let mut provider_prices: HashMap<i64, HashMap<String, PriceVersion>> = HashMap::new();
+    let mut global_prices = HashMap::new();
+    for price in prices? {
+        let version = PriceVersion {
+            id: price.id,
+            card: price.price,
+        };
+        if let Some(provider_id) = price.provider_id {
+            provider_prices
+                .entry(provider_id)
+                .or_default()
+                .insert(price.model_name, version);
+        } else {
+            global_prices.insert(price.model_name, version);
+        }
+    }
+
+    let mut backfilled_requests = 0_u64;
+    for key in keys {
+        let price = key
+            .provider_id
+            .and_then(|provider_id| provider_prices.get(&provider_id))
+            .and_then(|prices| prices.get(&key.model))
+            .or_else(|| global_prices.get(&key.model));
+        let Some(price) = price else {
+            continue;
+        };
+        backfilled_requests = backfilled_requests.saturating_add(
+            state
+                .db
+                .backfill_unpriced_usage(
+                    key.provider_id,
+                    &key.model,
+                    price,
+                    time_from_ms,
+                    time_to_ms,
+                )
+                .await?,
+        );
+    }
+    Ok(backfilled_requests)
+}
+
 async fn create_price(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let (_, body, _raw) = match http::read_json_limited::<CreatePriceReq>(
         req,
@@ -3129,7 +3186,26 @@ async fn create_price(req: Request<Incoming>, state: SharedState) -> HttpRespons
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     state.caches.upstream.invalidate();
-    http::json(StatusCode::OK, &serde_json::json!({ "id": id }))
+    let (backfilled_requests, history_recalculation_pending) =
+        match reconcile_unpriced_usage(&state, i64::MIN, i64::MAX).await {
+            Ok(backfilled_requests) => (backfilled_requests, false),
+            Err(error) => {
+                log::warn!(
+                    "price version {} was saved but historical usage reconciliation failed: {}",
+                    id,
+                    error
+                );
+                (0, true)
+            }
+        };
+    http::json(
+        StatusCode::OK,
+        &serde_json::json!({
+            "id": id,
+            "backfilled_requests": backfilled_requests,
+            "history_recalculation_pending": history_recalculation_pending
+        }),
+    )
 }
 
 async fn get_price(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -3256,6 +3332,10 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         Some(window) => window,
         None => return http::json_error(StatusCode::BAD_REQUEST, "invalid period"),
     };
+
+    if let Err(error) = reconcile_unpriced_usage(&state, from_ms, to_ms).await {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
 
     let (agg, pricing_groups) = match tokio::join!(
         state.db.aggregate_stats_events_range(from_ms, to_ms),

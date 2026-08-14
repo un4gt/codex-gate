@@ -198,19 +198,27 @@ export function PricesPage(props: PricesPageProps) {
     }
     setBusy(true);
     try {
-      await createPrice(props.settings, payload);
+      const result = await createPrice(props.settings, payload);
       form.reset();
       setTiers([]);
-      await props.onRefresh(t(payload.provider_id ? '价格 {{name}} 已写入上游作用域。' : '价格 {{name}} 已写入全局作用域。', {
+      const scopeMessage = t(payload.provider_id ? '价格 {{name}} 已写入上游作用域。' : '价格 {{name}} 已写入全局作用域。', {
         name: payload.model_name
-      }));
+      });
+      const historyMessage = result.history_recalculation_pending
+        ? t('历史用量将在打开总览时继续回算。')
+        : result.backfilled_requests > 0
+          ? t('已按新价格回算 {{count}} 条未定价历史请求。', {
+              count: formatCompactInteger(result.backfilled_requests)
+            })
+          : '';
+      await props.onRefresh(`${scopeMessage}${historyMessage ? ` ${historyMessage}` : ''}`);
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建价格失败。');
     } finally {
       setBusy(false);
     }
   };
-  return <Box className="grid gap-6 xl:grid-cols-[minmax(360px,460px)_minmax(0,1fr)]">
+  return <Box className="grid gap-6">
       <Card>
         <Box className="flex flex-col gap-3 p-6 pb-5">
           <Box className="flex items-center justify-between gap-3">
@@ -305,43 +313,51 @@ export function PricesPage(props: PricesPageProps) {
           <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t('显示当前生效的模型价格。')}</Typography>
         </Box>
         <CardContent>
-          {sortedItems.length > 0 ? <TableContainer>
-              <Table>
+          {sortedItems.length > 0 ? <TableContainer className="max-w-full">
+              <Table className="table-fixed" size="small" aria-label={t('当前可用价格项')} sx={{ minWidth: 1344 }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell>{t('模型')}</TableCell>
-                    <TableCell>{t('范围')}</TableCell>
-                    <TableCell>{t('价格层级')}</TableCell>
-                    <TableCell>{t('输入')}</TableCell>
-                    <TableCell>{t('输出')}</TableCell>
-                    <TableCell>{t('缓存读取')}</TableCell>
-                    <TableCell>{t('缓存写入')}</TableCell>
-                    <TableCell>{t('更新时间')}</TableCell>
+                    <TableCell className="w-56 min-w-56 whitespace-nowrap">{t('模型')}</TableCell>
+                    <TableCell className="w-36 min-w-36 whitespace-nowrap">{t('范围')}</TableCell>
+                    <TableCell className="w-44 min-w-44 whitespace-nowrap">{t('价格层级')}</TableCell>
+                    <TableCell className="w-40 min-w-40 whitespace-nowrap">{t('输入')}</TableCell>
+                    <TableCell className="w-40 min-w-40 whitespace-nowrap">{t('输出')}</TableCell>
+                    <TableCell className="w-40 min-w-40 whitespace-nowrap">{t('缓存读取')}</TableCell>
+                    <TableCell className="w-40 min-w-40 whitespace-nowrap">{t('缓存写入')}</TableCell>
+                    <TableCell className="w-40 min-w-40 whitespace-nowrap">{t('更新时间')}</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {sortedItems.map((item, _index3) => [{
+                  {sortedItems.map(item => [{
                 threshold: null,
                 rates: item.price_data.base
               }, ...item.price_data.tiers.map(tier => ({
                 threshold: tier.over_total_input_tokens,
                 rates: tier.rates
               }))].map(tier => <TableRow key={`${item.id}:${tier.threshold ?? 'base'}`}>
-                            <TableCell className="font-medium text-foreground">{item.model_name}</TableCell>
-                            <TableCell>
-                              <Chip color={item.provider_id === null ? "default" : "success"} variant="outlined" label={item.provider_id === null ? t('全局默认') : providerNameMap.get(item.provider_id) ?? t('上游 #{{id}}', {
+                            <TableCell className="w-56 min-w-56 max-w-56 whitespace-nowrap">
+                              <Box className="block w-full truncate font-mono text-sm font-medium text-foreground" title={item.model_name} component="span">{item.model_name}</Box>
+                            </TableCell>
+                            <TableCell className="max-w-48 whitespace-nowrap">
+                              <Chip className="max-w-full" color={item.provider_id === null ? "default" : "success"} variant="outlined" label={item.provider_id === null ? t('全局默认') : providerNameMap.get(item.provider_id) ?? t('上游 #{{id}}', {
                     id: item.provider_id
-                  })} />
+                  })} sx={{
+                    '& .MuiChip-label': {
+                      display: 'block',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }
+                  }} />
                             </TableCell>
                             <TableCell className="whitespace-nowrap">
                               {tier.threshold === null ? t('基础') : t('超过 {{count}} 输入 token', {
                     count: formatCompactInteger(tier.threshold)
                   })}
                             </TableCell>
-                            <TableCell>{formatUnitCost(tier.rates.input)}</TableCell>
-                            <TableCell>{formatUnitCost(tier.rates.output)}</TableCell>
-                            <TableCell>{formatUnitCost(tier.rates.cache_read)}</TableCell>
-                            <TableCell>{formatUnitCost(tier.rates.cache_write)}</TableCell>
+                            <TableCell className="whitespace-nowrap font-mono tabular-nums">{formatUnitCost(tier.rates.input)}</TableCell>
+                            <TableCell className="whitespace-nowrap font-mono tabular-nums">{formatUnitCost(tier.rates.output)}</TableCell>
+                            <TableCell className="whitespace-nowrap font-mono tabular-nums">{formatUnitCost(tier.rates.cache_read)}</TableCell>
+                            <TableCell className="whitespace-nowrap font-mono tabular-nums">{formatUnitCost(tier.rates.cache_write)}</TableCell>
                             <TableCell className="whitespace-nowrap text-muted-foreground">{formatDateTime(item.updated_at_ms)}</TableCell>
                           </TableRow>))}
                 </TableBody>
