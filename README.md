@@ -103,6 +103,8 @@ docker compose down -v
 
 数据默认存储在 Docker 卷 `little-gate-data`。如果开启归档，路径为容器内 `/app/data/archive/request_logs`。
 
+如果在 Docker 前使用 Nginx、Cloudflare 或其他反向代理，Responses WebSocket 还要求代理透传 `Upgrade` 和 `Connection`，并使用足够长的空闲超时。完整配置和 `101 Switching Protocols` 验证命令见 [Nginx 与 Cloudflare 反向代理](docs/reverse-proxy.md)。
+
 ### 2) Docker Compose 从源码构建（开发/自托管）
 
 如果你就是在当前仓库目录里部署，并且希望按本地代码直接构建，可以使用仓库默认的 `docker-compose.yml`。
