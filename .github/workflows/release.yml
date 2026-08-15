@@ -10,8 +10,47 @@ permissions:
   contents: read
 
 jobs:
+  authorize:
+    name: Validate Main Release Source
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Out Release Ref
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require Main Release Source
+        shell: bash
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${RELEASE_EVENT}" == "workflow_dispatch" ]]; then
+            if [[ "${RELEASE_REF}" != "refs/heads/main" ]]; then
+              echo "manual release builds must run from main; received ${RELEASE_REF}" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+
+          if [[ "${RELEASE_EVENT}" != "push" || "${RELEASE_REF}" != refs/tags/v* ]]; then
+            echo "unsupported release event: ${RELEASE_EVENT} ${RELEASE_REF}" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "${RELEASE_SHA}^{commit}" refs/remotes/origin/main; then
+            echo "release tag ${RELEASE_REF} does not point to a commit contained in main" >&2
+            exit 1
+          fi
+
   verify:
     name: Verify Release Gate
+    needs: authorize
     uses: ./.github/workflows/quality-gate.yml
     with:
       upload_frontend_dist: true

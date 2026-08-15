@@ -7,11 +7,12 @@ Usage:
   bash scripts/git-push-with-next-tag.sh [--remote origin]
 
 Behavior:
-  1. Require a clean working tree
-  2. Run the complete prek pre-push release gate
-  3. Find latest tag matching vX.Y.Z
-  4. Create next patch tag (for example v0.0.23 -> v0.0.24)
-  5. Push the current branch and new tag together
+  1. Require the current branch to be main
+  2. Require a clean working tree
+  3. Run the complete prek pre-push release gate
+  4. Find latest tag matching vX.Y.Z
+  5. Create next patch tag (for example v0.0.23 -> v0.0.24)
+  6. Push main and the new tag together
 
 Options:
   --remote <name>   Remote name, default: origin
@@ -20,6 +21,7 @@ EOF
 }
 
 remote_name="origin"
+release_branch="main"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,14 +55,20 @@ if ! git remote get-url "$remote_name" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "working tree is not clean; commit or stash changes before creating a release tag" >&2
-  exit 1
-fi
-
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ -z "$current_branch" || "$current_branch" == "HEAD" ]]; then
   echo "detached HEAD is not supported" >&2
+  exit 1
+fi
+
+if [[ "$current_branch" != "$release_branch" ]]; then
+  echo "release tags can only be created from ${release_branch}; current branch: ${current_branch}" >&2
+  echo "push this branch normally, merge it into ${release_branch}, then run this script from ${release_branch}" >&2
+  exit 1
+fi
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "working tree is not clean; commit or stash changes before creating a release tag" >&2
   exit 1
 fi
 

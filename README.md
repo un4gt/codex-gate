@@ -247,7 +247,7 @@ bash scripts/run-prek-checks.sh pre-push
 
 不要用未指定 stage 的 `prek run --all-files` 代替；它默认只运行 `pre-commit` stage，可能遗漏 Rust tests。`manual` stage 也永远不会自动运行，只能通过 `bash scripts/docker-compose-up.sh ...` 或显式指定 `--stage manual` 调用。
 
-本地 hooks 可以被跳过，因此不是发布安全边界。统一的 `.github/workflows/release.yml` 在构建二进制或 Docker 镜像前只执行一次 `.github/workflows/quality-gate.yml`；`scripts/git-push-with-next-tag.sh` 也会在创建 tag 前要求 clean worktree 并执行同一个 pre-push 门禁。
+本地 hooks 可以被跳过，因此不是发布安全边界。`scripts/git-push-with-next-tag.sh` 只允许从 `main` 创建 tag，并会先要求 clean worktree、执行同一个 pre-push 门禁。统一的 `.github/workflows/release.yml` 还会在首个 job 中拒绝非 `main` 的手动运行，以及提交尚未进入 `main` 的 tag；校验通过后才会执行 `.github/workflows/quality-gate.yml`、构建二进制或发布 Docker 镜像。
 
 ### 上游 API Base URL
 
