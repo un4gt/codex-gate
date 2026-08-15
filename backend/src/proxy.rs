@@ -48,12 +48,24 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         (&Method::GET, "/v1/responses") if hyper_tungstenite::is_upgrade_request(&req) => {
             crate::responses_ws::handle(req, state).await
         }
+        (&Method::GET, "/v1/responses") => responses_websocket_upgrade_required(),
         (&Method::POST, "/v1/chat/completions") => {
             proxy_openai(ApiFormat::ChatCompletions, req, state).await
         }
         (&Method::POST, "/v1/responses") => proxy_openai(ApiFormat::Responses, req, state).await,
         _ => http::json_error(StatusCode::NOT_FOUND, "not found"),
     }
+}
+
+fn responses_websocket_upgrade_required() -> HttpResponse {
+    let mut response = http::json_error(
+        StatusCode::UPGRADE_REQUIRED,
+        "websocket upgrade headers are missing; reverse proxies must forward Upgrade and Connection",
+    );
+    response
+        .headers_mut()
+        .insert(UPGRADE, HeaderValue::from_static("websocket"));
+    response
 }
 
 async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -4197,8 +4209,8 @@ mod tests {
         build_scheduled_attempts, build_upstream_headers, classify_failure_scope,
         classify_failure_scope_with_body, collect_provider_routes,
         effective_priority_from_memberships, extract_usage_from_capture, parse_chat_usage,
-        parse_responses_usage, provider_protocol_plan, should_retry_response_status,
-        upstream_path_and_query,
+        parse_responses_usage, provider_protocol_plan, responses_websocket_upgrade_required,
+        should_retry_response_status, upstream_path_and_query,
     };
     use crate::cache::upstream_cache::{ProviderModelState, UpstreamSnapshot};
     use crate::health::RuntimeHealthBook;
@@ -4206,15 +4218,51 @@ mod tests {
     use crate::provider_runtime::ProviderRuntimeBook;
     use crate::types::{ApiFormat, UpstreamKey, UpstreamProvider};
     use bytes::Bytes;
+    use http_body_util::BodyExt;
     use hyper::StatusCode;
     use hyper::header::{
         ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderName,
-        HeaderValue, USER_AGENT,
+        HeaderValue, UPGRADE, USER_AGENT,
     };
     use hyper::http::HeaderMap;
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    #[test]
+    fn responses_websocket_without_upgrade_should_return_426() {
+        let response = responses_websocket_upgrade_required();
+
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[test]
+    fn responses_websocket_without_upgrade_should_advertise_websocket() {
+        let response = responses_websocket_upgrade_required();
+
+        assert_eq!(
+            response.headers().get(UPGRADE),
+            Some(&HeaderValue::from_static("websocket"))
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_without_upgrade_should_explain_proxy_headers() {
+        let body = responses_websocket_upgrade_required()
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+
+        assert_eq!(
+            body.get("error").and_then(serde_json::Value::as_str),
+            Some(
+                "websocket upgrade headers are missing; reverse proxies must forward Upgrade and Connection"
+            )
+        );
+    }
 
     #[test]
     fn upstream_path_should_remove_gateway_v1_prefix_for_chat() {
