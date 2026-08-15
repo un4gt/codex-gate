@@ -2,6 +2,12 @@ name: Prek Quality Gate
 
 on:
   workflow_call:
+    inputs:
+      upload_frontend_dist:
+        description: Upload the verified frontend build for downstream packaging
+        required: false
+        type: boolean
+        default: false
   pull_request:
   push:
     branches:
@@ -51,3 +57,12 @@ jobs:
         env:
           PREK_VERSION: 0.3.9
         run: bash scripts/run-prek-checks.sh pre-push
+
+      - name: Upload Verified Frontend Build
+        if: ${{ inputs.upload_frontend_dist }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 1

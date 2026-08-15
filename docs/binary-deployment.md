@@ -141,6 +141,6 @@ Copy-Item deploy\windows\run-little-gate.ps1 dist\little-gate-local\
 bash scripts/install-prek-hooks.sh
 ```
 
-本地 hooks 仍可能被 `--no-verify`、手工 tag 或 CI tag 绕过，所以发布安全边界位于 GitHub Actions：二进制和 Docker 发布 workflow 都依赖 `.github/workflows/quality-gate.yml`。质量门禁失败时不会生成二进制发布资产，也不会推送镜像。Dockerfile 自身还会在构建静态资源前再次运行 React smoke tests。
+本地 hooks 仍可能被 `--no-verify`、手工 tag 或 CI tag 绕过，所以发布安全边界位于 GitHub Actions：统一的 `.github/workflows/release.yml` 在二进制与 Docker 发布 job 之前只调用一次 `.github/workflows/quality-gate.yml`。质量门禁失败时不会生成二进制发布资产，也不会推送镜像。Dockerfile 自身还会在构建静态资源前再次运行 React smoke tests。
 
 `manual` stage 不会由 Git 自动触发。源码 Docker Compose 部署应使用 `bash scripts/docker-compose-up.sh -d --build` 显式运行它。
