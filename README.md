@@ -52,6 +52,7 @@ image: ghcr.io/un4gt/little-gate:v1.0.0
 ADMIN_TOKEN=replace-with-strong-admin-token
 MASTER_KEY=replace-with-strong-master-key
 LITTLE_GATE_PORT=8080
+CODEX_OAUTH_CALLBACK_LISTEN_ADDR=0.0.0.0:1455
 RUST_LOG=info
 ```
 
@@ -60,6 +61,7 @@ RUST_LOG=info
 - `ADMIN_TOKEN`：后台管理鉴权口令，必填
 - `MASTER_KEY`：用于密钥加密，强烈建议单独设置
 - `LITTLE_GATE_PORT`：宿主机映射端口，默认 `8080`
+- `CODEX_OAUTH_CALLBACK_LISTEN_ADDR`：容器内 Codex OAuth 回调监听地址，Docker 中保持为 `0.0.0.0:1455`
 
 #### 第四步：拉取镜像并启动
 
@@ -105,6 +107,21 @@ docker compose down -v
 
 如果在 Docker 前使用 Nginx、Cloudflare 或其他反向代理，Responses WebSocket 还要求代理透传 `Upgrade` 和 `Connection`，并使用足够长的空闲超时。完整配置和 `101 Switching Protocols` 验证命令见 [Nginx 与 Cloudflare 反向代理](docs/reverse-proxy.md)。
 
+### Codex OAuth 登录
+
+管理台侧边栏的“OAuth 登录”页面支持 OpenAI Codex 浏览器授权码 + PKCE 登录，设备码登录仍可在登录对话框中切换使用。没有 Codex Provider 时，页面会创建默认 Provider 和 `https://chatgpt.com/backend-api/codex` endpoint，然后立即启动登录。
+
+OpenAI Codex 客户端的 redirect URI 固定为 `http://localhost:1455/auth/callback`，因此回调监听端口必须是 `1455`：
+
+- 浏览器与 little-gate 在同一台机器时，登录完成后 `localhost:1455` 会自动接收回调。
+- 浏览器访问的是远程 little-gate 时，浏览器中的 `localhost` 指向操作者电脑，无法直接到达服务器。保留跳转失败后的地址栏内容，将完整 callback URL 粘贴到登录对话框即可完成登录。
+- Docker Compose 只把 `1455` 映射到宿主机 `127.0.0.1`，不会把回调监听器暴露到公网。
+- 如果宿主机 `1455` 已被占用，可以删除 Compose 中的 `127.0.0.1:1455:1455` 映射并使用手工 callback；独立二进制监听失败时同样会保留手工提交能力。
+
+OAuth pending 会话仅保存在内存中，服务重启后需要重新发起。Access Token、Refresh Token 和 ID Token 会沿用现有 `MASTER_KEY` 加密存储，不会写入日志或临时明文凭据文件。
+
+完整的登录步骤、Docker/二进制配置、远程回调、管理 API 和故障排查见 [Codex OAuth 登录](docs/codex-oauth.md)。
+
 ### 2) Docker Compose 从源码构建（开发/自托管）
 
 如果你就是在当前仓库目录里部署，并且希望按本地代码直接构建，可以使用仓库默认的 `docker-compose.yml`。
@@ -144,6 +161,7 @@ cp .env.example .env
 ADMIN_TOKEN=replace-with-strong-admin-token
 MASTER_KEY=replace-with-strong-master-key
 LISTEN_ADDR=0.0.0.0:8080
+CODEX_OAUTH_CALLBACK_LISTEN_ADDR=127.0.0.1:1455
 STATIC_DIR=./static
 DB_DSN=sqlite://./data/little_gate.sqlite
 ```
@@ -169,6 +187,7 @@ Copy-Item .env.example .env
 ADMIN_TOKEN=replace-with-strong-admin-token
 MASTER_KEY=replace-with-strong-master-key
 LISTEN_ADDR=0.0.0.0:8080
+CODEX_OAUTH_CALLBACK_LISTEN_ADDR=127.0.0.1:1455
 STATIC_DIR=./static
 DB_DSN=sqlite://./data/little_gate.sqlite
 ```
@@ -336,6 +355,7 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | `MASTER_KEY` | 空时回退 `ADMIN_TOKEN` | 加密上游密钥、哈希用户 API Key。 |
 | `LITTLE_GATE_PORT` | `8080` | Docker 对外映射端口。 |
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 网关监听地址。 |
+| `CODEX_OAUTH_CALLBACK_LISTEN_ADDR` | 二进制 `127.0.0.1:1455`；容器 `0.0.0.0:1455` | Codex OAuth 本机回调监听地址；端口必须为 `1455`。 |
 | `STATIC_DIR` | `/app/static`（容器） | 前端静态文件目录。 |
 | `DB_DSN` | `sqlite:///app/data/little_gate.sqlite` | 数据库连接串（SQLite/Postgres）。 |
 | `DB_MAX_CONNECTIONS` | `10` | 数据库连接池上限。 |

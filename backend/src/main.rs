@@ -2,6 +2,7 @@ mod admin;
 mod affinity;
 mod cache;
 mod codex_oauth;
+mod codex_oauth_callback;
 mod config;
 mod crypto;
 mod db;
@@ -304,6 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     notification::spawn(state.clone(), notification_rx);
+    codex_oauth_callback::spawn(state.clone());
 
     let addr: SocketAddr = state.config.listen_addr;
     log::info!("listening on {}", addr);

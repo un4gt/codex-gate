@@ -6,6 +6,7 @@ use crate::selector::EndpointSelectorStrategy;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub listen_addr: SocketAddr,
+    pub codex_oauth_callback_listen_addr: SocketAddr,
     pub db_dsn: String,
     pub db_max_connections: u32,
     pub admin_token: String,
@@ -45,6 +46,15 @@ impl Config {
         let listen_addr = getenv_parse("LISTEN_ADDR")
             .transpose()?
             .unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080));
+        let codex_oauth_callback_listen_addr = getenv_parse("CODEX_OAUTH_CALLBACK_LISTEN_ADDR")
+            .transpose()?
+            .unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1455));
+        if codex_oauth_callback_listen_addr.port() != 1455 {
+            return Err(
+                "env CODEX_OAUTH_CALLBACK_LISTEN_ADDR must use port 1455 for the OpenAI redirect URI"
+                    .to_string(),
+            );
+        }
 
         let db_dsn = getenv_string("DB_DSN")
             .or_else(|| getenv_string("DATABASE_URL"))
@@ -147,6 +157,7 @@ impl Config {
 
         Ok(Self {
             listen_addr,
+            codex_oauth_callback_listen_addr,
             db_dsn,
             db_max_connections,
             admin_token,

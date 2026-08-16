@@ -5,6 +5,7 @@ import type {
   ConsolePreferencesPatch,
   ConsolePreferences,
   CodexOAuthAccount,
+  CodexOAuthFlow,
   CodexOAuthSession,
   CreateApiKeyInput,
   CreateEndpointInput,
@@ -588,13 +589,14 @@ export async function startCodexOAuthSession(
   settings: ConnectionSettings,
   providerId: number,
   replaceKeyId: number | null,
+  flow: CodexOAuthFlow = 'device',
 ) {
   const { apiBase, adminToken } = requireConnection(settings);
   return postJson<CodexOAuthSession>(
     apiBase,
     `/api/v1/providers/${providerId}/codex-oauth/sessions`,
     adminToken,
-    { replace_key_id: replaceKeyId },
+    { replace_key_id: replaceKeyId, flow },
   );
 }
 
@@ -619,6 +621,20 @@ export async function cancelCodexOAuthSession(
     apiBase,
     `/api/v1/codex-oauth/sessions/${encodeURIComponent(sessionId)}`,
     adminToken,
+  );
+}
+
+export async function submitCodexOAuthCallback(
+  settings: ConnectionSettings,
+  sessionId: string,
+  redirectUrl: string,
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return postJson<CodexOAuthSession>(
+    apiBase,
+    `/api/v1/codex-oauth/sessions/${encodeURIComponent(sessionId)}/callback`,
+    adminToken,
+    { redirect_url: redirectUrl },
   );
 }
 

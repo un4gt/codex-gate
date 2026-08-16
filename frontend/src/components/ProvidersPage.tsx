@@ -119,7 +119,7 @@ const PROVIDER_TYPE_OPTIONS = [{
 }, {
   value: 'openai_codex_oauth',
   label: 'OpenAI Codex OAuth',
-  description: '通过设备登录连接 ChatGPT Codex，仅支持 Responses 协议'
+  description: '通过 OAuth 登录连接 ChatGPT Codex，仅支持 Responses 协议'
 }, {
   value: 'openai_compatible',
   label: 'OpenAI Compatible',
@@ -302,7 +302,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }
     if (createMissingFields().length === 0) {
       return t(isCreateCodex
-        ? '将创建上游和默认服务地址，然后启动 OpenAI 设备登录。'
+        ? '将创建上游和默认服务地址，然后启动 OpenAI OAuth 登录。'
         : '将创建上游、保存连接信息并同步模型。');
     }
     return t('请先填写：{{fields}}。', {
@@ -539,7 +539,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         setCreateOpen(false);
         resetCreateForm();
         try {
-          await props.onRefresh(t('上游 {{name}} 已创建，请完成 Codex 设备登录。', {
+          await props.onRefresh(t('上游 {{name}} 已创建，请完成 Codex OAuth 登录。', {
             name: providerName,
           }));
         } finally {
@@ -1427,7 +1427,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
             </FormControl>
             {isCreateCodex ? <Alert severity="info" variant="outlined">
                 <AlertTitle>{t('使用 OAuth 账号')}</AlertTitle>
-                {t('创建后将打开设备登录，不需要在此填写 API 密钥。')}
+                {t('创建后将打开 OAuth 登录，不需要在此填写 API 密钥。')}
                 <Typography className="mt-1 text-sm" component="div">
                   {t('Codex 创建时默认启用 WebSocket 和 HTTP→WS，之后可在上游设置中修改。')}
                 </Typography>

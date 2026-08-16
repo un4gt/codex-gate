@@ -48,3 +48,4 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 time = { version = "0.3", default-features = false, features = ["formatting", "parsing"] }
 thiserror = "2"
 ulid = { version = "1", default-features = false, features = ["std"] }
+url = "2"

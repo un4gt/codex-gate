@@ -551,8 +551,13 @@ export interface CodexOAuthAccount {
   quota_checked_at_ms: number | null;
 }
 
+export type CodexOAuthFlow = 'browser' | 'device';
+export type CodexOAuthStage = 'waiting_for_user' | 'exchanging' | 'finalizing' | 'finished';
+
 export interface CodexOAuthSession {
   session_id: string;
+  flow: CodexOAuthFlow;
+  stage: CodexOAuthStage;
   status: 'pending' | 'completed' | 'failed' | 'cancelled' | 'expired';
   verification_uri: string;
   user_code?: string;

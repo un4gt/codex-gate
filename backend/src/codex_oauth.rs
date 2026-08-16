@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use aes_gcm::aead::{OsRng, rand_core::RngCore};
 use base64::Engine;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -13,8 +14,10 @@ use hyper::{Method, Request, StatusCode, Uri};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, SqlitePool};
 use tokio::sync::Mutex as AsyncMutex;
+use url::Url;
 
 use crate::crypto;
 use crate::db::{Database, DbError};
@@ -24,9 +27,11 @@ use crate::util;
 pub const PROVIDER_TYPE: &str = "openai_codex_oauth";
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const DEVICE_VERIFICATION_URI: &str = "https://auth.openai.com/codex/device";
+pub const BROWSER_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 
 const DEVICE_USER_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -37,8 +42,10 @@ const CODEX_USER_AGENT: &str = "codex_cli_rs/0.144.1 (Linux; x86_64) little-gate
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
 const DEVICE_SESSION_TTL_MS: i64 = 15 * 60 * 1_000;
+const BROWSER_SESSION_TTL_MS: i64 = 5 * 60 * 1_000;
 const DEVICE_SESSION_TOMBSTONE_MS: i64 = 5 * 60 * 1_000;
 const DEVICE_DEFAULT_POLL_INTERVAL_MS: i64 = 5_000;
+const BROWSER_POLL_INTERVAL_MS: i64 = 1_000;
 const OAUTH_BODY_MAX_BYTES: usize = 1024 * 1024;
 const QUOTA_BODY_MAX_BYTES: usize = 512 * 1024;
 const MODEL_BODY_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -1051,12 +1058,62 @@ impl SessionStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexOAuthFlow {
+    Browser,
+    #[default]
+    Device,
+}
+
+impl CodexOAuthFlow {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Browser => "browser",
+            Self::Device => "device",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionStage {
+    WaitingForUser,
+    Exchanging,
+    Finalizing,
+    Finished,
+}
+
+impl SessionStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WaitingForUser => "waiting_for_user",
+            Self::Exchanging => "exchanging",
+            Self::Finalizing => "finalizing",
+            Self::Finished => "finished",
+        }
+    }
+}
+
+enum SessionFlowData {
+    Device {
+        device_auth_id: String,
+        user_code: String,
+    },
+    Browser {
+        state: String,
+        code_verifier: String,
+        authorization_url: String,
+        callback_claimed: bool,
+    },
+}
+
 struct SessionRecord {
     session_id: String,
     provider_id: i64,
     replace_key_id: Option<i64>,
-    device_auth_id: String,
-    user_code: String,
+    flow: CodexOAuthFlow,
+    flow_data: SessionFlowData,
+    stage: SessionStage,
     poll_interval_ms: i64,
     expires_at_ms: i64,
     terminal_at_ms: Option<i64>,
@@ -1074,6 +1131,8 @@ struct SessionRecord {
 pub struct CodexOAuthSessionView {
     pub session_id: String,
     pub status: String,
+    pub flow: String,
+    pub stage: String,
     pub verification_uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_code: Option<String>,
@@ -1144,6 +1203,7 @@ impl CodexOAuthManager {
         state: SharedState,
         provider_id: i64,
         replace_key_id: Option<i64>,
+        flow: CodexOAuthFlow,
     ) -> Result<CodexOAuthSessionView, CodexOAuthError> {
         let now_ms = util::now_ms();
         self.prune_sessions(now_ms);
@@ -1151,35 +1211,63 @@ impl CodexOAuthManager {
         let mut starting_guard = self.reserve_starting_target(target)?;
 
         let started = async {
-            let response = request_device_user_code(&state).await?;
-            let user_code = response
-                .user_code
-                .or(response.user_code_alt)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    CodexOAuthError::upstream(
-                        "device_code_invalid",
-                        "device code response did not include a user code",
+            let (flow_data, poll_interval_ms, expires_at_ms) = match flow {
+                CodexOAuthFlow::Device => {
+                    let response = request_device_user_code(&state).await?;
+                    let user_code = response
+                        .user_code
+                        .or(response.user_code_alt)
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            CodexOAuthError::upstream(
+                                "device_code_invalid",
+                                "device code response did not include a user code",
+                            )
+                        })?;
+                    let device_auth_id = response.device_auth_id.trim().to_string();
+                    if device_auth_id.is_empty() {
+                        return Err(CodexOAuthError::upstream(
+                            "device_code_invalid",
+                            "device code response did not include a device auth id",
+                        ));
+                    }
+                    (
+                        SessionFlowData::Device {
+                            device_auth_id,
+                            user_code,
+                        },
+                        parse_poll_interval_ms(response.interval.as_ref()),
+                        now_ms.saturating_add(DEVICE_SESSION_TTL_MS),
                     )
-                })?;
-            let device_auth_id = response.device_auth_id.trim().to_string();
-            if device_auth_id.is_empty() {
-                return Err(CodexOAuthError::upstream(
-                    "device_code_invalid",
-                    "device code response did not include a device auth id",
-                ));
-            }
-            let poll_interval_ms = parse_poll_interval_ms(response.interval.as_ref());
+                }
+                CodexOAuthFlow::Browser => {
+                    let state = random_urlsafe(32);
+                    let code_verifier = random_urlsafe(96);
+                    let code_challenge = pkce_challenge(&code_verifier);
+                    let authorization_url = build_authorization_url(&state, &code_challenge)?;
+                    (
+                        SessionFlowData::Browser {
+                            state,
+                            code_verifier,
+                            authorization_url,
+                            callback_claimed: false,
+                        },
+                        BROWSER_POLL_INTERVAL_MS,
+                        now_ms.saturating_add(BROWSER_SESSION_TTL_MS),
+                    )
+                }
+            };
             let session_id = util::new_ulid();
             let record = SessionRecord {
                 session_id: session_id.clone(),
                 provider_id,
                 replace_key_id,
-                device_auth_id,
-                user_code,
+                flow,
+                flow_data,
+                stage: SessionStage::WaitingForUser,
                 poll_interval_ms,
-                expires_at_ms: now_ms.saturating_add(DEVICE_SESSION_TTL_MS),
+                expires_at_ms,
                 terminal_at_ms: None,
                 status: SessionStatus::Pending,
                 cancel_requested: Arc::new(AtomicBool::new(false)),
@@ -1205,10 +1293,12 @@ impl CodexOAuthManager {
         }
         starting_guard.disarm();
 
-        let manager = self.clone();
-        tokio::spawn(async move {
-            manager.run_session(state, session_id).await;
-        });
+        if flow == CodexOAuthFlow::Device {
+            let manager = self.clone();
+            tokio::spawn(async move {
+                manager.run_device_session(state, session_id).await;
+            });
+        }
         Ok(view)
     }
 
@@ -1243,11 +1333,15 @@ impl CodexOAuthManager {
         let _save_guard = save_gate.lock().await;
         let mut sessions = self.sessions.lock();
         let record = sessions.get_mut(session_id)?;
-        if record.status == SessionStatus::Pending && now_ms >= record.expires_at_ms {
+        if record.status == SessionStatus::Pending
+            && record.stage != SessionStage::Finalizing
+            && now_ms >= record.expires_at_ms
+        {
             record.status = SessionStatus::Expired;
+            record.stage = SessionStage::Finished;
             record.terminal_at_ms = Some(now_ms);
             record.error_code = Some("oauth_session_expired".to_string());
-            record.error_message = Some("the device login session expired".to_string());
+            record.error_message = Some("the OAuth login session expired".to_string());
             record.cancel_requested.store(true, Ordering::SeqCst);
         }
         Some(session_view(record, true))
@@ -1264,9 +1358,10 @@ impl CodexOAuthManager {
         let Some(record) = sessions.get_mut(session_id) else {
             return false;
         };
-        record.cancel_requested.store(true, Ordering::SeqCst);
-        if record.status == SessionStatus::Pending {
+        if record.status == SessionStatus::Pending && record.stage != SessionStage::Finalizing {
+            record.cancel_requested.store(true, Ordering::SeqCst);
             record.status = SessionStatus::Cancelled;
+            record.stage = SessionStage::Finished;
             record.terminal_at_ms = Some(now_ms);
             record.error_code = None;
             record.error_message = None;
@@ -1295,7 +1390,202 @@ impl CodexOAuthManager {
         });
     }
 
-    async fn run_session(&self, state: SharedState, session_id: String) {
+    pub async fn submit_callback(
+        &self,
+        state: SharedState,
+        session_id: &str,
+        redirect_url: &str,
+    ) -> Result<CodexOAuthSessionView, CodexOAuthError> {
+        let callback = parse_browser_callback_url(redirect_url)?;
+        self.start_browser_callback(state, Some(session_id), callback)
+            .await
+    }
+
+    pub async fn submit_callback_url(
+        &self,
+        state: SharedState,
+        redirect_url: &str,
+    ) -> Result<CodexOAuthSessionView, CodexOAuthError> {
+        let callback = parse_browser_callback_url(redirect_url)?;
+        self.start_browser_callback(state, None, callback).await
+    }
+
+    async fn start_browser_callback(
+        &self,
+        state: SharedState,
+        session_id: Option<&str>,
+        callback: BrowserCallback,
+    ) -> Result<CodexOAuthSessionView, CodexOAuthError> {
+        let claimed = self.claim_browser_callback(session_id, &callback).await?;
+        let view = claimed.view.clone();
+        let manager = self.clone();
+        tokio::spawn(async move {
+            manager
+                .run_browser_session(
+                    state,
+                    claimed.session_id,
+                    claimed.code,
+                    claimed.code_verifier,
+                )
+                .await;
+        });
+        Ok(view)
+    }
+
+    async fn claim_browser_callback(
+        &self,
+        requested_session_id: Option<&str>,
+        callback: &BrowserCallback,
+    ) -> Result<ClaimedBrowserCallback, CodexOAuthError> {
+        let now_ms = util::now_ms();
+        self.prune_sessions(now_ms);
+        let session_id = if let Some(session_id) = requested_session_id {
+            session_id.to_string()
+        } else {
+            self.sessions
+                .lock()
+                .iter()
+                .find_map(|(session_id, record)| match &record.flow_data {
+                    SessionFlowData::Browser { state, .. } if state == &callback.state => {
+                        Some(session_id.clone())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    CodexOAuthError::bad_request(
+                        "oauth_state_invalid",
+                        "the OAuth callback state did not match an active session",
+                    )
+                })?
+        };
+        let save_gate = self.session_save_gate(&session_id).ok_or_else(|| {
+            CodexOAuthError::bad_request(
+                "oauth_session_not_found",
+                "the OAuth login session was not found",
+            )
+        })?;
+        let _save_guard = save_gate.lock().await;
+        let mut sessions = self.sessions.lock();
+        let record = sessions.get_mut(&session_id).ok_or_else(|| {
+            CodexOAuthError::bad_request(
+                "oauth_session_not_found",
+                "the OAuth login session was not found",
+            )
+        })?;
+        let (expected_state, code_verifier, already_claimed) = match &record.flow_data {
+            SessionFlowData::Browser {
+                state,
+                code_verifier,
+                callback_claimed,
+                ..
+            } => (state.clone(), code_verifier.clone(), *callback_claimed),
+            SessionFlowData::Device { .. } => {
+                return Err(CodexOAuthError::bad_request(
+                    "oauth_flow_mismatch",
+                    "the OAuth session does not accept browser callbacks",
+                ));
+            }
+        };
+        if expected_state != callback.state {
+            return Err(CodexOAuthError::bad_request(
+                "oauth_state_invalid",
+                "the OAuth callback state did not match the login session",
+            ));
+        }
+        if record.status != SessionStatus::Pending {
+            return Err(CodexOAuthError::conflict(
+                "oauth_session_not_pending",
+                "the OAuth login session is no longer pending",
+            ));
+        }
+        if now_ms >= record.expires_at_ms {
+            record.status = SessionStatus::Expired;
+            record.stage = SessionStage::Finished;
+            record.terminal_at_ms = Some(now_ms);
+            record.error_code = Some("oauth_session_expired".to_string());
+            record.error_message = Some("the OAuth login session expired".to_string());
+            record.cancel_requested.store(true, Ordering::SeqCst);
+            return Err(CodexOAuthError::conflict(
+                "oauth_session_expired",
+                "the OAuth login session expired",
+            ));
+        }
+        if already_claimed {
+            return Err(CodexOAuthError::conflict(
+                "oauth_callback_already_submitted",
+                "the OAuth callback was already submitted",
+            ));
+        }
+        if let Some(error) = callback.error.as_deref() {
+            if let SessionFlowData::Browser {
+                callback_claimed, ..
+            } = &mut record.flow_data
+            {
+                *callback_claimed = true;
+            }
+            let detail = callback
+                .error_description
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(error);
+            let message =
+                sanitize_persisted_error(&format!("OpenAI authorization failed: {detail}"));
+            record.status = SessionStatus::Failed;
+            record.stage = SessionStage::Finished;
+            record.terminal_at_ms = Some(now_ms);
+            record.error_code = Some("oauth_authorization_failed".to_string());
+            record.error_message = Some(message.clone());
+            return Err(CodexOAuthError::bad_request(
+                "oauth_authorization_failed",
+                message,
+            ));
+        }
+        let code = callback.code.clone().ok_or_else(|| {
+            CodexOAuthError::bad_request(
+                "oauth_callback_code_missing",
+                "the OAuth callback did not include an authorization code",
+            )
+        })?;
+        if let SessionFlowData::Browser {
+            callback_claimed, ..
+        } = &mut record.flow_data
+        {
+            *callback_claimed = true;
+        }
+        record.stage = SessionStage::Exchanging;
+        let view = session_view(record, true);
+        Ok(ClaimedBrowserCallback {
+            session_id,
+            code,
+            code_verifier,
+            view,
+        })
+    }
+
+    async fn run_browser_session(
+        &self,
+        state: SharedState,
+        session_id: String,
+        code: String,
+        code_verifier: String,
+    ) {
+        let token_bundle = match exchange_browser_code(&state, &code, &code_verifier).await {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                self.mark_session_error(
+                    &session_id,
+                    SessionStatus::Failed,
+                    error.code,
+                    &error.message,
+                );
+                return;
+            }
+        };
+        self.finish_token_bundle(state, session_id, token_bundle)
+            .await;
+    }
+
+    async fn run_device_session(&self, state: SharedState, session_id: String) {
         let token = loop {
             let Some(snapshot) = self.session_poll_snapshot(&session_id) else {
                 return;
@@ -1308,7 +1598,7 @@ impl CodexOAuthManager {
                     &session_id,
                     SessionStatus::Expired,
                     "oauth_session_expired",
-                    "the device login session expired",
+                    "the OAuth login session expired",
                 );
                 return;
             }
@@ -1320,7 +1610,12 @@ impl CodexOAuthManager {
                     ))
                     .await;
                 }
-                Ok(DevicePoll::Ready(token)) => break token,
+                Ok(DevicePoll::Ready(token)) => {
+                    if !self.mark_session_stage(&session_id, SessionStage::Exchanging) {
+                        return;
+                    }
+                    break token;
+                }
                 Err(error) => {
                     self.mark_session_error(
                         &session_id,
@@ -1333,9 +1628,6 @@ impl CodexOAuthManager {
             }
         };
 
-        if self.session_cancelled(&session_id) {
-            return;
-        }
         let token_bundle = match exchange_device_code(&state, &token).await {
             Ok(bundle) => bundle,
             Err(error) => {
@@ -1348,6 +1640,16 @@ impl CodexOAuthManager {
                 return;
             }
         };
+        self.finish_token_bundle(state, session_id, token_bundle)
+            .await;
+    }
+
+    async fn finish_token_bundle(
+        &self,
+        state: SharedState,
+        session_id: String,
+        token_bundle: TokenBundle,
+    ) {
         if self.session_cancelled(&session_id) {
             return;
         }
@@ -1375,49 +1677,64 @@ impl CodexOAuthManager {
         let Some(save_gate) = self.session_save_gate(&session_id) else {
             return;
         };
-        let _save_guard = save_gate.lock().await;
-        if self.session_cancelled(&session_id) {
-            return;
-        }
-        let Some(target) = self.session_target(&session_id) else {
-            return;
-        };
-        let now_ms = util::now_ms();
-        let account_hash =
-            crypto::hash_codex_account(&state.config.master_key, claims.account_id.trim());
-        let saved = state
-            .db
-            .save_codex_oauth_login(
-                &state.config.master_key,
-                SaveCodexLogin {
-                    provider_id: target.0,
-                    replace_key_id: target.1,
-                    account_hash: &account_hash,
-                    access_token: &token_bundle.access_token,
-                    refresh_token: &token_bundle.refresh_token,
-                    id_token: &token_bundle.id_token,
-                    account_id: claims.account_id.trim(),
-                    email: claims.email.trim(),
-                    plan_type: claims.plan_type.as_deref(),
-                    token_expires_at_ms: Some(
-                        now_ms
-                            .saturating_add(token_bundle.expires_in_seconds.saturating_mul(1_000)),
-                    ),
-                    now_ms,
-                },
-            )
-            .await;
-        let saved = match saved {
-            Ok(saved) => saved,
-            Err(error) => {
+        let (target, saved) = {
+            let _save_guard = save_gate.lock().await;
+            if self.session_cancelled(&session_id) {
+                return;
+            }
+            if self.session_expired(&session_id, util::now_ms()) {
                 self.mark_session_error(
                     &session_id,
-                    SessionStatus::Failed,
-                    "credential_save_failed",
-                    &sanitize_persisted_error(&error.to_string()),
+                    SessionStatus::Expired,
+                    "oauth_session_expired",
+                    "the OAuth login session expired",
                 );
                 return;
             }
+            let Some(target) = self.session_target(&session_id) else {
+                return;
+            };
+            let now_ms = util::now_ms();
+            let account_hash =
+                crypto::hash_codex_account(&state.config.master_key, claims.account_id.trim());
+            let saved =
+                state
+                    .db
+                    .save_codex_oauth_login(
+                        &state.config.master_key,
+                        SaveCodexLogin {
+                            provider_id: target.0,
+                            replace_key_id: target.1,
+                            account_hash: &account_hash,
+                            access_token: &token_bundle.access_token,
+                            refresh_token: &token_bundle.refresh_token,
+                            id_token: &token_bundle.id_token,
+                            account_id: claims.account_id.trim(),
+                            email: claims.email.trim(),
+                            plan_type: claims.plan_type.as_deref(),
+                            token_expires_at_ms: Some(now_ms.saturating_add(
+                                token_bundle.expires_in_seconds.saturating_mul(1_000),
+                            )),
+                            now_ms,
+                        },
+                    )
+                    .await;
+            let saved = match saved {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.mark_session_error(
+                        &session_id,
+                        SessionStatus::Failed,
+                        "credential_save_failed",
+                        &sanitize_persisted_error(&error.to_string()),
+                    );
+                    return;
+                }
+            };
+            if !self.mark_session_stage(&session_id, SessionStage::Finalizing) {
+                return;
+            }
+            (target, saved)
         };
         state.caches.upstream.invalidate();
 
@@ -1448,13 +1765,22 @@ impl CodexOAuthManager {
     fn session_poll_snapshot(&self, session_id: &str) -> Option<SessionPollSnapshot> {
         let sessions = self.sessions.lock();
         let record = sessions.get(session_id)?;
-        (record.status == SessionStatus::Pending).then(|| SessionPollSnapshot {
-            device_auth_id: record.device_auth_id.clone(),
-            user_code: record.user_code.clone(),
-            poll_interval_ms: record.poll_interval_ms,
-            expires_at_ms: record.expires_at_ms,
-            cancel_requested: record.cancel_requested.clone(),
-        })
+        if record.status != SessionStatus::Pending || record.stage != SessionStage::WaitingForUser {
+            return None;
+        }
+        match &record.flow_data {
+            SessionFlowData::Device {
+                device_auth_id,
+                user_code,
+            } => Some(SessionPollSnapshot {
+                device_auth_id: device_auth_id.clone(),
+                user_code: user_code.clone(),
+                poll_interval_ms: record.poll_interval_ms,
+                expires_at_ms: record.expires_at_ms,
+                cancel_requested: record.cancel_requested.clone(),
+            }),
+            SessionFlowData::Browser { .. } => None,
+        }
     }
 
     fn session_target(&self, session_id: &str) -> Option<(i64, Option<i64>)> {
@@ -1469,6 +1795,26 @@ impl CodexOAuthManager {
             record.status != SessionStatus::Pending
                 || record.cancel_requested.load(Ordering::SeqCst)
         })
+    }
+
+    fn session_expired(&self, session_id: &str, now_ms: i64) -> bool {
+        self.sessions
+            .lock()
+            .get(session_id)
+            .is_none_or(|record| now_ms >= record.expires_at_ms)
+    }
+
+    fn mark_session_stage(&self, session_id: &str, stage: SessionStage) -> bool {
+        let mut sessions = self.sessions.lock();
+        let Some(record) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        if record.status != SessionStatus::Pending || record.cancel_requested.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        record.stage = stage;
+        true
     }
 
     fn mark_session_error(
@@ -1486,6 +1832,7 @@ impl CodexOAuthManager {
             return;
         }
         record.status = status;
+        record.stage = SessionStage::Finished;
         record.terminal_at_ms = Some(util::now_ms());
         record.error_code = Some(code.to_string());
         record.error_message = Some(sanitize_persisted_error(message));
@@ -1506,6 +1853,7 @@ impl CodexOAuthManager {
             return;
         }
         record.status = SessionStatus::Completed;
+        record.stage = SessionStage::Finished;
         record.terminal_at_ms = Some(util::now_ms());
         record.key_id = Some(saved.key_id);
         record.operation = Some(saved.operation);
@@ -1875,12 +2223,39 @@ struct SessionPollSnapshot {
     cancel_requested: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrowserCallback {
+    state: String,
+    code: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Debug)]
+struct ClaimedBrowserCallback {
+    session_id: String,
+    code: String,
+    code_verifier: String,
+    view: CodexOAuthSessionView,
+}
+
 fn session_view(record: &SessionRecord, include_user_code: bool) -> CodexOAuthSessionView {
+    let (verification_uri, user_code) = match &record.flow_data {
+        SessionFlowData::Device { user_code, .. } => (
+            DEVICE_VERIFICATION_URI.to_string(),
+            include_user_code.then(|| user_code.clone()),
+        ),
+        SessionFlowData::Browser {
+            authorization_url, ..
+        } => (authorization_url.clone(), None),
+    };
     CodexOAuthSessionView {
         session_id: record.session_id.clone(),
         status: record.status.as_str().to_string(),
-        verification_uri: DEVICE_VERIFICATION_URI.to_string(),
-        user_code: include_user_code.then(|| record.user_code.clone()),
+        flow: record.flow.as_str().to_string(),
+        stage: record.stage.as_str().to_string(),
+        verification_uri,
+        user_code,
         expires_at_ms: record.expires_at_ms,
         poll_interval_ms: record.poll_interval_ms,
         key_id: record.key_id,
@@ -2028,6 +2403,109 @@ struct IdTokenClaims {
     plan_type: Option<String>,
 }
 
+fn random_urlsafe(byte_len: usize) -> String {
+    let mut bytes = vec![0_u8; byte_len];
+    OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn pkce_challenge(code_verifier: &str) -> String {
+    let digest = Sha256::digest(code_verifier.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn build_authorization_url(state: &str, code_challenge: &str) -> Result<String, CodexOAuthError> {
+    let mut url = Url::parse(AUTHORIZE_URL).map_err(|_| {
+        CodexOAuthError::bad_request(
+            "oauth_authorize_url_invalid",
+            "the OAuth authorization URL is invalid",
+        )
+    })?;
+    url.query_pairs_mut()
+        .append_pair("client_id", CODEX_CLIENT_ID)
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", BROWSER_REDIRECT_URI)
+        .append_pair("scope", "openid email profile offline_access")
+        .append_pair("code_challenge", code_challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state)
+        .append_pair("prompt", "login")
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true");
+    Ok(url.into())
+}
+
+fn parse_browser_callback_url(redirect_url: &str) -> Result<BrowserCallback, CodexOAuthError> {
+    if redirect_url.len() > 16 * 1024 {
+        return Err(CodexOAuthError::bad_request(
+            "oauth_callback_url_too_long",
+            "the OAuth callback URL is too long",
+        ));
+    }
+    let url = Url::parse(redirect_url.trim()).map_err(|_| {
+        CodexOAuthError::bad_request(
+            "oauth_callback_url_invalid",
+            "the OAuth callback URL is invalid",
+        )
+    })?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("localhost")
+        || url.port() != Some(1455)
+        || url.path() != "/auth/callback"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(CodexOAuthError::bad_request(
+            "oauth_callback_url_invalid",
+            format!("the OAuth callback URL must use {BROWSER_REDIRECT_URI}"),
+        ));
+    }
+
+    let mut state = None;
+    let mut code = None;
+    let mut error = None;
+    let mut error_description = None;
+    for (key, value) in url.query_pairs() {
+        let target = match key.as_ref() {
+            "state" => &mut state,
+            "code" => &mut code,
+            "error" => &mut error,
+            "error_description" => &mut error_description,
+            _ => continue,
+        };
+        if target.is_some() {
+            return Err(CodexOAuthError::bad_request(
+                "oauth_callback_parameter_duplicate",
+                "the OAuth callback URL contains a duplicate parameter",
+            ));
+        }
+        *target = Some(value.into_owned());
+    }
+    let state = state
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CodexOAuthError::bad_request(
+                "oauth_callback_state_missing",
+                "the OAuth callback did not include state",
+            )
+        })?;
+    let code = code.filter(|value| !value.trim().is_empty());
+    let error = error.filter(|value| !value.trim().is_empty());
+    if code.is_some() == error.is_some() {
+        return Err(CodexOAuthError::bad_request(
+            "oauth_callback_payload_invalid",
+            "the OAuth callback must include exactly one of code or error",
+        ));
+    }
+    Ok(BrowserCallback {
+        state,
+        code,
+        error,
+        error_description,
+    })
+}
+
 async fn request_device_user_code(
     state: &SharedState,
 ) -> Result<DeviceUserCodeResponse, CodexOAuthError> {
@@ -2110,13 +2588,46 @@ async fn exchange_device_code(
     state: &SharedState,
     device: &DeviceTokenResponse,
 ) -> Result<TokenBundle, CodexOAuthError> {
-    let form = form_urlencode(&[
+    exchange_authorization_code(
+        state,
+        device.authorization_code.trim(),
+        DEVICE_REDIRECT_URI,
+        device.code_verifier.trim(),
+    )
+    .await
+}
+
+async fn exchange_browser_code(
+    state: &SharedState,
+    code: &str,
+    code_verifier: &str,
+) -> Result<TokenBundle, CodexOAuthError> {
+    exchange_authorization_code(
+        state,
+        code.trim(),
+        BROWSER_REDIRECT_URI,
+        code_verifier.trim(),
+    )
+    .await
+}
+
+fn authorization_code_form(code: &str, redirect_uri: &str, code_verifier: &str) -> String {
+    form_urlencode(&[
         ("grant_type", "authorization_code"),
         ("client_id", CODEX_CLIENT_ID),
-        ("code", device.authorization_code.trim()),
-        ("redirect_uri", DEVICE_REDIRECT_URI),
-        ("code_verifier", device.code_verifier.trim()),
-    ]);
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("code_verifier", code_verifier),
+    ])
+}
+
+async fn exchange_authorization_code(
+    state: &SharedState,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<TokenBundle, CodexOAuthError> {
+    let form = authorization_code_form(code, redirect_uri, code_verifier);
     let (status, bytes) = request_form(state, TOKEN_URL, form).await?;
     if status != StatusCode::OK {
         return Err(CodexOAuthError::upstream(
@@ -2876,9 +3387,41 @@ mod tests {
             session_id: session_id.to_string(),
             provider_id,
             replace_key_id: None,
-            device_auth_id: "device-auth".to_string(),
-            user_code: "ABCD-EFGH".to_string(),
+            flow: CodexOAuthFlow::Device,
+            flow_data: SessionFlowData::Device {
+                device_auth_id: "device-auth".to_string(),
+                user_code: "ABCD-EFGH".to_string(),
+            },
+            stage: SessionStage::WaitingForUser,
             poll_interval_ms: 5_000,
+            expires_at_ms: util::now_ms().saturating_add(60_000),
+            terminal_at_ms: None,
+            status: SessionStatus::Pending,
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            save_gate: Arc::new(AsyncMutex::new(())),
+            key_id: None,
+            operation: None,
+            warnings: Vec::new(),
+            error_code: None,
+            error_message: None,
+        }
+    }
+
+    fn pending_browser_session(session_id: &str, provider_id: i64) -> SessionRecord {
+        SessionRecord {
+            session_id: session_id.to_string(),
+            provider_id,
+            replace_key_id: None,
+            flow: CodexOAuthFlow::Browser,
+            flow_data: SessionFlowData::Browser {
+                state: "state-123".to_string(),
+                code_verifier: "verifier-123".to_string(),
+                authorization_url: build_authorization_url("state-123", "challenge-123")
+                    .expect("authorization URL"),
+                callback_claimed: false,
+            },
+            stage: SessionStage::WaitingForUser,
+            poll_interval_ms: BROWSER_POLL_INTERVAL_MS,
             expires_at_ms: util::now_ms().saturating_add(60_000),
             terminal_at_ms: None,
             status: SessionStatus::Pending,
@@ -2904,6 +3447,220 @@ mod tests {
         assert_eq!(parse_poll_interval_ms(Some(&Value::from(7))), 7_000);
         assert_eq!(parse_poll_interval_ms(Some(&Value::from("9"))), 9_000);
         assert_eq!(parse_poll_interval_ms(Some(&Value::from(0))), 5_000);
+    }
+
+    #[test]
+    fn browser_flow_deserializes_and_device_remains_the_default() {
+        let browser: CodexOAuthFlow = serde_json::from_str("\"browser\"").expect("browser flow");
+        assert_eq!(browser, CodexOAuthFlow::Browser);
+        assert_eq!(CodexOAuthFlow::default(), CodexOAuthFlow::Device);
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc_7636_vector() {
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+        let verifier = random_urlsafe(96);
+        assert_eq!(verifier.len(), 128);
+        assert!(
+            verifier
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        );
+    }
+
+    #[test]
+    fn browser_authorization_url_contains_codex_pkce_contract() {
+        let raw =
+            build_authorization_url("state-value", "challenge-value").expect("authorization URL");
+        let url = Url::parse(&raw).expect("parse authorization URL");
+        let params = url.query_pairs().into_owned().collect::<HashMap<_, _>>();
+        assert_eq!(url.as_str().split('?').next(), Some(AUTHORIZE_URL));
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some(CODEX_CLIENT_ID)
+        );
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some(BROWSER_REDIRECT_URI)
+        );
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("openid email profile offline_access")
+        );
+        assert_eq!(
+            params.get("code_challenge").map(String::as_str),
+            Some("challenge-value")
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert_eq!(params.get("state").map(String::as_str), Some("state-value"));
+        assert_eq!(params.get("prompt").map(String::as_str), Some("login"));
+        assert_eq!(
+            params.get("id_token_add_organizations").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            params.get("codex_cli_simplified_flow").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn browser_token_exchange_form_uses_localhost_redirect_and_verifier() {
+        let form = authorization_code_form("code + value", BROWSER_REDIRECT_URI, "verifier/value");
+        let params = url::form_urlencoded::parse(form.as_bytes())
+            .into_owned()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            params.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some(CODEX_CLIENT_ID)
+        );
+        assert_eq!(params.get("code").map(String::as_str), Some("code + value"));
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some(BROWSER_REDIRECT_URI)
+        );
+        assert_eq!(
+            params.get("code_verifier").map(String::as_str),
+            Some("verifier/value")
+        );
+    }
+
+    #[test]
+    fn browser_callback_url_requires_exact_redirect_and_single_payload() {
+        let parsed = parse_browser_callback_url(
+            "http://localhost:1455/auth/callback?code=code-123&state=state-123",
+        )
+        .expect("valid callback");
+        assert_eq!(
+            parsed,
+            BrowserCallback {
+                state: "state-123".to_string(),
+                code: Some("code-123".to_string()),
+                error: None,
+                error_description: None,
+            }
+        );
+        for invalid in [
+            "http://127.0.0.1:1455/auth/callback?code=x&state=y",
+            "http://localhost:1456/auth/callback?code=x&state=y",
+            "http://localhost:1455/wrong?code=x&state=y",
+            "https://localhost:1455/auth/callback?code=x&state=y",
+            "http://localhost:1455/auth/callback?code=x&error=nope&state=y",
+            "http://localhost:1455/auth/callback?code=x&state=y&state=z",
+        ] {
+            assert!(parse_browser_callback_url(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_callback_is_claimed_once_and_moves_to_exchange_stage() {
+        let manager = CodexOAuthManager::new();
+        manager.sessions.lock().insert(
+            "browser-session".to_string(),
+            pending_browser_session("browser-session", 7),
+        );
+        let callback = BrowserCallback {
+            state: "state-123".to_string(),
+            code: Some("authorization-code".to_string()),
+            error: None,
+            error_description: None,
+        };
+        let claimed = manager
+            .claim_browser_callback(None, &callback)
+            .await
+            .expect("claim callback");
+        assert_eq!(claimed.code, "authorization-code");
+        assert_eq!(claimed.code_verifier, "verifier-123");
+        assert_eq!(claimed.view.flow, "browser");
+        assert_eq!(claimed.view.stage, "exchanging");
+
+        let duplicate = manager
+            .claim_browser_callback(Some("browser-session"), &callback)
+            .await
+            .expect_err("duplicate callback");
+        assert_eq!(duplicate.kind, CodexOAuthErrorKind::Conflict);
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_expired_browser_session_rejects_callback() {
+        let manager = CodexOAuthManager::new();
+        manager.sessions.lock().insert(
+            "cancelled-browser".to_string(),
+            pending_browser_session("cancelled-browser", 7),
+        );
+        assert!(manager.cancel_session("cancelled-browser").await);
+        let callback = BrowserCallback {
+            state: "state-123".to_string(),
+            code: Some("authorization-code".to_string()),
+            error: None,
+            error_description: None,
+        };
+        let cancelled = manager
+            .claim_browser_callback(Some("cancelled-browser"), &callback)
+            .await
+            .expect_err("cancelled callback");
+        assert_eq!(cancelled.kind, CodexOAuthErrorKind::Conflict);
+
+        let mut expired = pending_browser_session("expired-browser", 8);
+        expired.expires_at_ms = util::now_ms().saturating_sub(1);
+        manager
+            .sessions
+            .lock()
+            .insert("expired-browser".to_string(), expired);
+        let expired = manager
+            .claim_browser_callback(Some("expired-browser"), &callback)
+            .await
+            .expect_err("expired callback");
+        assert_eq!(expired.code, "oauth_session_expired");
+        let view = manager
+            .get_session("expired-browser")
+            .await
+            .expect("expired tombstone");
+        assert_eq!(view.status, "expired");
+        assert_eq!(view.stage, "finished");
+    }
+
+    #[tokio::test]
+    async fn authorization_error_finishes_browser_session_without_exposing_callback_secrets() {
+        let manager = CodexOAuthManager::new();
+        manager.sessions.lock().insert(
+            "denied-browser".to_string(),
+            pending_browser_session("denied-browser", 7),
+        );
+        let callback = BrowserCallback {
+            state: "state-123".to_string(),
+            code: None,
+            error: Some("access_denied".to_string()),
+            error_description: Some("The user denied access".to_string()),
+        };
+        let denied = manager
+            .claim_browser_callback(Some("denied-browser"), &callback)
+            .await
+            .expect_err("authorization denial");
+        assert_eq!(denied.code, "oauth_authorization_failed");
+        let view = manager
+            .get_session("denied-browser")
+            .await
+            .expect("failed tombstone");
+        assert_eq!(view.status, "failed");
+        assert_eq!(view.stage, "finished");
+        let serialized = serde_json::to_string(&view).expect("session JSON");
+        assert!(!serialized.contains("authorization-code"));
+        assert!(!serialized.contains("verifier-123"));
     }
 
     #[test]

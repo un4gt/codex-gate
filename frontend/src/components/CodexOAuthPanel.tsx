@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Copy, ExternalLink, LogIn, RefreshCw, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { Copy, ExternalLink, Globe2, KeyRound, LogIn, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Alert from '@mui/material/Alert';
 import AlertTitle from '@mui/material/AlertTitle';
 import Box from '@mui/material/Box';
@@ -10,7 +10,12 @@ import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
+import FormControl from '@mui/material/FormControl';
+import FormLabel from '@mui/material/FormLabel';
+import InputBase from '@mui/material/InputBase';
 import LinearProgress from '@mui/material/LinearProgress';
+import ToggleButton from '@mui/material/ToggleButton';
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Typography from '@mui/material/Typography';
 import { StatusBadge, type StatusTone } from '@/components/console/StatusBadge';
 import {
@@ -19,12 +24,14 @@ import {
   loadCodexOAuthSession,
   refreshCodexOAuthQuota,
   startCodexOAuthSession,
+  submitCodexOAuthCallback,
   updateProviderKey,
 } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import { getIntlLocale, t } from '@/lib/i18n';
 import type {
   CodexOAuthSession,
+  CodexOAuthFlow,
   CodexQuotaWindow,
   ConnectionSettings,
   ProviderWorkspace,
@@ -43,27 +50,52 @@ interface CodexOAuthLoginDialogProps {
 }
 
 export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
+  const [flow, setFlow] = useState<CodexOAuthFlow>('browser');
   const [session, setSession] = useState<CodexOAuthSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const [submittingCallback, setSubmittingCallback] = useState(false);
   const [nowMs, setNowMs] = useState(Date.now());
-  const startedAttemptRef = useRef<number | null>(null);
+  const startedAttemptRef = useRef<string | null>(null);
+  const activeAttemptRef = useRef<string | null>(null);
   const completedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!props.open || startedAttemptRef.current === props.attemptId) return;
-    startedAttemptRef.current = props.attemptId;
+    const attemptKey = `${props.attemptId}:${flow}`;
+    if (!props.open) return;
+    activeAttemptRef.current = attemptKey;
+    const deactivate = () => {
+      if (activeAttemptRef.current === attemptKey) activeAttemptRef.current = null;
+    };
+    if (startedAttemptRef.current === attemptKey) return deactivate;
+    startedAttemptRef.current = attemptKey;
     completedSessionRef.current = null;
     setSession(null);
     setError(null);
+    setCallbackUrl('');
     setStarting(true);
-    void startCodexOAuthSession(props.settings, props.providerId, props.replaceKeyId)
-      .then(next => setSession(next))
-      .catch(cause => {
-        setError(cause instanceof Error ? cause.message : t('启动设备登录失败。'));
+    void startCodexOAuthSession(props.settings, props.providerId, props.replaceKeyId, flow)
+      .then(next => {
+        if (activeAttemptRef.current === attemptKey) {
+          setSession(next);
+          return;
+        }
+        void cancelCodexOAuthSession(props.settings, next.session_id).catch(cause => {
+          props.onMessage(cause instanceof Error ? cause.message : t('取消 OAuth 登录失败。'));
+        });
       })
-      .finally(() => setStarting(false));
-  }, [props.attemptId, props.open, props.providerId, props.replaceKeyId, props.settings]);
+      .catch(cause => {
+        if (activeAttemptRef.current === attemptKey) {
+          setError(cause instanceof Error ? cause.message : t('启动 OAuth 登录失败。'));
+        }
+      })
+      .finally(() => {
+        if (activeAttemptRef.current === attemptKey) setStarting(false);
+      });
+    return deactivate;
+  }, [flow, props.attemptId, props.onMessage, props.open, props.providerId, props.replaceKeyId, props.settings]);
 
   useEffect(() => {
     if (!props.open) return;
@@ -72,27 +104,31 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
   }, [props.open]);
 
   useEffect(() => {
-    if (!props.open || session?.status !== 'pending') return;
+    const sessionId = session?.session_id;
+    if (!props.open || !sessionId || session.status !== 'pending') return;
     let disposed = false;
-    const timer = window.setTimeout(() => {
-      void loadCodexOAuthSession(props.settings, session.session_id)
-        .then(next => {
-          if (!disposed) {
-            setError(null);
-            setSession(next);
-          }
-        })
-        .catch(cause => {
-          if (!disposed) {
-            setError(cause instanceof Error ? cause.message : t('读取登录状态失败。'));
-          }
-        });
-    }, Math.max(500, session.poll_interval_ms));
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await loadCodexOAuthSession(props.settings, sessionId);
+        if (disposed) return;
+        setError(null);
+        setSession(next);
+        if (next.status === 'pending') {
+          timer = window.setTimeout(() => void poll(), Math.max(500, next.poll_interval_ms));
+        }
+      } catch (cause) {
+        if (disposed) return;
+        setError(cause instanceof Error ? cause.message : t('读取登录状态失败。'));
+        timer = window.setTimeout(() => void poll(), Math.max(1_000, session.poll_interval_ms));
+      }
+    };
+    timer = window.setTimeout(() => void poll(), Math.max(500, session.poll_interval_ms));
     return () => {
       disposed = true;
-      window.clearTimeout(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [props.open, props.settings, session]);
+  }, [props.open, props.settings, session?.poll_interval_ms, session?.session_id, session?.status]);
 
   useEffect(() => {
     if (session?.status !== 'completed') return;
@@ -107,10 +143,45 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
       try {
         await cancelCodexOAuthSession(props.settings, current.session_id);
       } catch (cause) {
-        props.onMessage(cause instanceof Error ? cause.message : t('取消设备登录失败。'));
+        props.onMessage(cause instanceof Error ? cause.message : t('取消 OAuth 登录失败。'));
       }
     }
     props.onClose();
+  };
+  const switchFlow = async (nextFlow: CodexOAuthFlow) => {
+    if (nextFlow === flow || switching) return;
+    setSwitching(true);
+    const current = session;
+    if (current?.status === 'pending') {
+      try {
+        await cancelCodexOAuthSession(props.settings, current.session_id);
+      } catch (cause) {
+        props.onMessage(cause instanceof Error ? cause.message : t('取消 OAuth 登录失败。'));
+      }
+    }
+    startedAttemptRef.current = null;
+    setSession(null);
+    setError(null);
+    setCallbackUrl('');
+    setFlow(nextFlow);
+    setSwitching(false);
+  };
+  const submitCallback = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const current = session;
+    const redirectUrl = callbackUrl.trim();
+    if (!current || current.flow !== 'browser' || current.status !== 'pending' || !redirectUrl) return;
+    setSubmittingCallback(true);
+    setError(null);
+    try {
+      const next = await submitCodexOAuthCallback(props.settings, current.session_id, redirectUrl);
+      setSession(next);
+      setCallbackUrl('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t('提交回调地址失败。'));
+    } finally {
+      setSubmittingCallback(false);
+    }
   };
   const copyCode = async () => {
     if (!session?.user_code || !navigator.clipboard) {
@@ -128,6 +199,7 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
     ? Math.max(0, Math.ceil((session.expires_at_ms - nowMs) / 1_000))
     : 0;
   const terminal = session && session.status !== 'pending';
+  const activeFlow = session?.flow ?? flow;
   const alertSeverity = session?.status === 'completed'
     ? 'success'
     : session && ['failed', 'expired'].includes(session.status)
@@ -145,13 +217,81 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
       aria-describedby="codex-oauth-login-description"
       onClose={() => void cancelAndClose()}
     >
-      <DialogTitle id="codex-oauth-login-title">{t('OpenAI Codex 设备登录')}</DialogTitle>
+      <DialogTitle id="codex-oauth-login-title">{t('OpenAI Codex OAuth 登录')}</DialogTitle>
       <DialogContent className="grid gap-5 pt-4">
         <Typography id="codex-oauth-login-description" className="text-sm leading-6 text-muted-foreground">
-          {t('打开 OpenAI 登录页并输入下方验证码。验证码和 OAuth Token 不会写入日志。')}
+          {t('授权码和 OAuth Token 不会写入日志。')}
         </Typography>
 
-        {session?.user_code ? (
+        <ToggleButtonGroup
+          exclusive
+          fullWidth
+          value={activeFlow}
+          aria-label={t('OAuth 登录方式')}
+          disabled={starting || switching || Boolean(terminal)}
+          onChange={(_event, value: CodexOAuthFlow | null) => {
+            if (value) void switchFlow(value);
+          }}
+        >
+          <ToggleButton value="browser" className="min-h-11 gap-2">
+            <Globe2 className="size-4" aria-hidden="true" />
+            {t('浏览器登录')}
+          </ToggleButton>
+          <ToggleButton value="device" className="min-h-11 gap-2">
+            <KeyRound className="size-4" aria-hidden="true" />
+            {t('设备码登录')}
+          </ToggleButton>
+        </ToggleButtonGroup>
+
+        {starting || switching ? <LinearProgress aria-label={t('正在启动 OAuth 登录')} /> : null}
+
+        {session && activeFlow === 'browser' ? (
+          <Box className="grid gap-4 border border-border bg-muted/10 p-4 sm:p-5">
+            <Box className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <Typography className="font-mono text-xs text-muted-foreground" component="div">
+                {t('剩余 {{seconds}} 秒', { seconds: remainingSeconds })}
+              </Typography>
+              <Button
+                component="a"
+                href={session.verification_uri}
+                target="_blank"
+                rel="noopener noreferrer"
+                disabled={session.status !== 'pending' || session.stage !== 'waiting_for_user'}
+              >
+                <ExternalLink className="mr-2 size-4" aria-hidden="true" />
+                {t('打开 OpenAI 登录页')}
+              </Button>
+            </Box>
+            <Box className="grid gap-3" component="form" onSubmit={event => void submitCallback(event)}>
+              <FormControl>
+                <FormLabel htmlFor="codex-oauth-callback-url">{t('回调地址')}</FormLabel>
+                <InputBase
+                  id="codex-oauth-callback-url"
+                  value={callbackUrl}
+                  disabled={session.status !== 'pending' || session.stage !== 'waiting_for_user'}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+                  className="font-mono text-xs"
+                  onChange={event => setCallbackUrl(event.target.value)}
+                />
+              </FormControl>
+              <Box className="flex justify-end">
+                <Button
+                  type="submit"
+                  variant="outline"
+                  disabled={!callbackUrl.trim() || submittingCallback || session.status !== 'pending' || session.stage !== 'waiting_for_user'}
+                >
+                  <Send className="mr-2 size-4" aria-hidden="true" />
+                  {t(submittingCallback ? '提交中…' : '提交回调地址')}
+                </Button>
+              </Box>
+            </Box>
+          </Box>
+        ) : null}
+
+        {session?.user_code && activeFlow === 'device' ? (
           <Box className="grid gap-3 border border-border bg-muted/10 p-6 text-center">
             <Typography className="font-mono text-4xl font-semibold tracking-[0.16em] text-foreground" component="div">
               {session.user_code}
@@ -162,8 +302,10 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
                 {t('复制验证码')}
               </Button>
               <Button
-                type="button"
-                onClick={() => window.open(session.verification_uri, '_blank', 'noopener,noreferrer')}
+                component="a"
+                href={session.verification_uri}
+                target="_blank"
+                rel="noopener noreferrer"
               >
                 <ExternalLink className="mr-2 size-4" aria-hidden="true" />
                 {t('打开 OpenAI 登录页')}
@@ -178,26 +320,10 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
         <Box aria-live="polite">
           <Alert severity={error ? 'error' : alertSeverity} variant="outlined">
             <AlertTitle>
-              {t(error
-                ? '登录请求失败'
-                : starting
-                  ? '正在获取验证码'
-                  : session?.status === 'pending'
-                    ? '等待登录确认'
-                    : session?.status === 'completed'
-                      ? '登录成功'
-                      : session?.status === 'cancelled'
-                        ? '登录已取消'
-                        : session?.status === 'expired'
-                          ? '登录已过期'
-                          : '登录失败')}
+              {loginStatusTitle(session, error, starting || switching)}
             </AlertTitle>
             <Typography className="text-sm leading-6" component="div">
-              {error
-                ?? session?.error_message
-                ?? (session?.status === 'completed'
-                  ? t('账号凭据已安全保存。')
-                  : t('完成浏览器中的 OpenAI 登录后，此处会自动更新。'))}
+              {loginStatusMessage(session, error, activeFlow)}
             </Typography>
           </Alert>
         </Box>
@@ -218,6 +344,42 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
       </DialogActions>
     </Dialog>
   );
+}
+
+function loginStatusTitle(
+  session: CodexOAuthSession | null,
+  error: string | null,
+  busy: boolean,
+) {
+  if (error) return t('登录请求失败');
+  if (busy) return t('正在启动 OAuth 登录');
+  if (!session) return t('准备登录');
+  if (session.status === 'completed') return t('登录成功');
+  if (session.status === 'cancelled') return t('登录已取消');
+  if (session.status === 'expired') return t('登录已过期');
+  if (session.status === 'failed') return t('登录失败');
+  if (session.stage === 'exchanging') return t('正在交换 OAuth Token');
+  if (session.stage === 'finalizing') return t('正在同步账号数据');
+  return t('等待登录确认');
+}
+
+function loginStatusMessage(
+  session: CodexOAuthSession | null,
+  error: string | null,
+  flow: CodexOAuthFlow,
+) {
+  if (error) return error;
+  if (!session) return t('正在建立安全登录会话。');
+  if (session.error_message) return session.error_message;
+  if (session.status === 'completed') return t('账号凭据已安全保存。');
+  if (session.status === 'cancelled') return t('本次 OAuth 登录已取消。');
+  if (session.status === 'expired') return t('登录会话已过期，请重新发起。');
+  if (session.status === 'failed') return t('OpenAI 未能完成本次登录。');
+  if (session.stage === 'exchanging') return t('已收到授权回调，正在交换 OAuth Token。');
+  if (session.stage === 'finalizing') return t('凭据已保存，正在刷新额度和模型。');
+  return flow === 'browser'
+    ? t('同机回调会自动完成；远程部署请粘贴浏览器地址栏中的回调地址。')
+    : t('打开 OpenAI 登录页并输入下方验证码。');
 }
 
 interface CodexOAuthPanelProps {

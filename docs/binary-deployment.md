@@ -26,6 +26,7 @@ cp .env.example .env
 ADMIN_TOKEN=replace-with-strong-admin-token
 MASTER_KEY=replace-with-strong-master-key
 LISTEN_ADDR=0.0.0.0:8080
+CODEX_OAUTH_CALLBACK_LISTEN_ADDR=127.0.0.1:1455
 STATIC_DIR=./static
 DB_DSN=sqlite://./data/little_gate.sqlite
 ```
@@ -82,6 +83,7 @@ Copy-Item .env.example .env
 ADMIN_TOKEN=replace-with-strong-admin-token
 MASTER_KEY=replace-with-strong-master-key
 LISTEN_ADDR=0.0.0.0:8080
+CODEX_OAUTH_CALLBACK_LISTEN_ADDR=127.0.0.1:1455
 STATIC_DIR=./static
 DB_DSN=sqlite://./data/little_gate.sqlite
 ```
@@ -100,6 +102,14 @@ Invoke-WebRequest http://127.0.0.1:8080/readyz
 ```
 
 如需作为 Windows 服务运行，建议使用 NSSM 或 WinSW 包装 `little-gate.exe`，并把工作目录设置为发布包目录，使 `STATIC_DIR=./static` 和 SQLite 相对路径稳定。
+
+## Codex OAuth 本机回调
+
+管理台“OAuth 登录”默认使用浏览器授权码 + PKCE。OpenAI 的 redirect URI 固定为 `http://localhost:1455/auth/callback`，所以 `CODEX_OAUTH_CALLBACK_LISTEN_ADDR` 可以修改监听 IP，但端口必须保持 `1455`。默认绑定回环地址，不需要对公网开放该端口。
+
+浏览器和 little-gate 在同一台机器时会自动完成回调。远程管理时，OpenAI 最终跳转到的是操作者电脑的 `localhost`；此时从浏览器地址栏取得完整 callback URL，粘贴到登录对话框即可。若 `1455` 被其他程序占用，服务会记录 warning 而不会退出，手工 callback 仍然可用。
+
+完整的登录步骤、回调 API、安全边界和故障排查见 [Codex OAuth 登录](codex-oauth.md)。
 
 ## 从源码构建二进制
 

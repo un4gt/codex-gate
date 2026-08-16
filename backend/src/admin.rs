@@ -226,6 +226,9 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         }
     }
     if path.starts_with("/api/v1/codex-oauth/sessions/") {
+        if req.method() == Method::POST && path.ends_with("/callback") {
+            return submit_codex_oauth_callback(req, state).await;
+        }
         if req.method() == Method::GET {
             return get_codex_oauth_session(req, state).await;
         }
@@ -2697,6 +2700,12 @@ struct PatchKeyReq {
 #[derive(Debug, Deserialize)]
 struct StartCodexOAuthSessionReq {
     replace_key_id: Option<i64>,
+    flow: Option<crate::codex_oauth::CodexOAuthFlow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmitCodexOAuthCallbackReq {
+    redirect_url: String,
 }
 
 async fn start_codex_oauth_session(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -2746,7 +2755,12 @@ async fn start_codex_oauth_session(req: Request<Incoming>, state: SharedState) -
     }
     match state
         .codex_oauth
-        .start_session(state.clone(), provider_id, body.replace_key_id)
+        .start_session(
+            state.clone(),
+            provider_id,
+            body.replace_key_id,
+            body.flow.unwrap_or_default(),
+        )
         .await
     {
         Ok(view) => http::json(StatusCode::OK, &view),
@@ -2755,15 +2769,9 @@ async fn start_codex_oauth_session(req: Request<Incoming>, state: SharedState) -
 }
 
 async fn get_codex_oauth_session(req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let session_id = req
-        .uri()
-        .path()
-        .strip_prefix("/api/v1/codex-oauth/sessions/")
-        .unwrap_or_default()
-        .trim_matches('/');
-    if session_id.is_empty() {
+    let Some(session_id) = parse_codex_oauth_session_id(req.uri().path(), "") else {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid OAuth session id");
-    }
+    };
     match state.codex_oauth.get_session(session_id).await {
         Some(view) => http::json(StatusCode::OK, &view),
         None => http::json_error(StatusCode::NOT_FOUND, "OAuth session not found"),
@@ -2771,20 +2779,44 @@ async fn get_codex_oauth_session(req: Request<Incoming>, state: SharedState) -> 
 }
 
 async fn cancel_codex_oauth_session(req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let session_id = req
-        .uri()
-        .path()
-        .strip_prefix("/api/v1/codex-oauth/sessions/")
-        .unwrap_or_default()
-        .trim_matches('/');
-    if session_id.is_empty() {
+    let Some(session_id) = parse_codex_oauth_session_id(req.uri().path(), "") else {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid OAuth session id");
-    }
+    };
     if state.codex_oauth.cancel_session(session_id).await {
         http::empty(StatusCode::NO_CONTENT)
     } else {
         http::json_error(StatusCode::NOT_FOUND, "OAuth session not found")
     }
+}
+
+async fn submit_codex_oauth_callback(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let Some(session_id) = parse_codex_oauth_session_id(req.uri().path(), "/callback") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid OAuth callback path");
+    };
+    let session_id = session_id.to_string();
+    let (_, body, _raw) = match http::read_json_limited::<SubmitCodexOAuthCallbackReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match state
+        .codex_oauth
+        .submit_callback(state.clone(), &session_id, &body.redirect_url)
+        .await
+    {
+        Ok(view) => http::json(StatusCode::ACCEPTED, &view),
+        Err(error) => codex_oauth_error_response(error),
+    }
+}
+
+fn parse_codex_oauth_session_id<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+    let value = path.strip_prefix("/api/v1/codex-oauth/sessions/")?;
+    let session_id = value.strip_suffix(suffix)?;
+    (!session_id.is_empty() && !session_id.contains('/')).then_some(session_id)
 }
 
 async fn refresh_codex_oauth_quota(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -4044,6 +4076,48 @@ mod tests {
         assert_eq!(
             parse_provider_id_with_suffix("/api/v1/providers/42/endpoints", ""),
             None
+        );
+    }
+
+    #[test]
+    fn codex_oauth_callback_path_extracts_only_exact_session_resource() {
+        assert_eq!(
+            parse_codex_oauth_session_id(
+                "/api/v1/codex-oauth/sessions/session-123/callback",
+                "/callback"
+            ),
+            Some("session-123")
+        );
+        assert_eq!(
+            parse_codex_oauth_session_id(
+                "/api/v1/codex-oauth/sessions/session-123/callback/extra",
+                "/callback"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_codex_oauth_session_id("/api/v1/codex-oauth/sessions/session-123/callback", ""),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_oauth_start_request_keeps_device_default_and_accepts_browser_flow() {
+        let legacy: StartCodexOAuthSessionReq =
+            serde_json::from_value(serde_json::json!({ "replace_key_id": null }))
+                .expect("legacy request");
+        assert_eq!(
+            legacy.flow.unwrap_or_default(),
+            crate::codex_oauth::CodexOAuthFlow::Device
+        );
+        let browser: StartCodexOAuthSessionReq = serde_json::from_value(serde_json::json!({
+            "replace_key_id": 42,
+            "flow": "browser"
+        }))
+        .expect("browser request");
+        assert_eq!(
+            browser.flow,
+            Some(crate::codex_oauth::CodexOAuthFlow::Browser)
         );
     }
 

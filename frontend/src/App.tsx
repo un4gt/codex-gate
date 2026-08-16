@@ -4,7 +4,7 @@ import { KeyboardSensor, PointerActivationConstraints, PointerSensor } from '@dn
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router';
-import { Activity, Bell, Boxes, Copy, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
+import { Activity, Bell, Boxes, Copy, Fingerprint, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
@@ -13,6 +13,7 @@ import { ApiKeysPage } from '@/components/ApiKeysPage';
 import { LogsPage } from '@/components/LogsPage';
 import { ModelsPage } from '@/components/ModelsPage';
 import { NotificationsPage } from '@/components/NotificationsPage';
+import { OAuthPage } from '@/components/OAuthPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
@@ -73,6 +74,11 @@ const NAV_ITEMS_BY_KEY = {
     label: '上游',
     icon: Server
   },
+  oauth: {
+    to: '/oauth',
+    label: 'OAuth 登录',
+    icon: Fingerprint
+  },
   models: {
     to: '/models',
     label: '模型',
@@ -100,7 +106,7 @@ const NAV_ITEMS_BY_KEY = {
   }
 } as const;
 type NavKey = keyof typeof NAV_ITEMS_BY_KEY;
-const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'models', 'logs', 'keys', 'notifications', 'settings'];
+const DEFAULT_NAV_ORDER: NavKey[] = ['overview', 'upstreams', 'oauth', 'models', 'logs', 'keys', 'notifications', 'settings'];
 const NAVIGATION_SORTABLE_TYPE = 'primary-navigation';
 const NAVIGATION_SORT_INSTRUCTIONS_ID = 'primary-nav-sort-instructions';
 const NAVIGATION_SORT_TRANSITION = {
@@ -234,6 +240,12 @@ function normalizeNavOrder(values: string[]): NavKey[] {
     const insertAt = upstreamIndex >= 0 ? upstreamIndex + 1 : logsIndex >= 0 ? logsIndex : ordered.length;
     ordered.splice(insertAt, 0, 'models');
   }
+  if (!ordered.includes('oauth')) {
+    const upstreamIndex = ordered.indexOf('upstreams');
+    const modelsIndex = ordered.indexOf('models');
+    const insertAt = upstreamIndex >= 0 ? upstreamIndex + 1 : modelsIndex >= 0 ? modelsIndex : ordered.length;
+    ordered.splice(insertAt, 0, 'oauth');
+  }
   for (const value of DEFAULT_NAV_ORDER) {
     if (!ordered.includes(value)) {
       ordered.push(value);
@@ -338,6 +350,7 @@ function pageDescription(pathname: string) {
   if (pathname.startsWith('/logs')) return '筛选并排查最近请求。';
   if (pathname.startsWith('/models')) return '管理模型库存、别名与协议能力。';
   if (pathname.startsWith('/upstreams')) return '查看连接目标与健康状态。';
+  if (pathname.startsWith('/oauth')) return '登录并管理 OpenAI Codex OAuth 账号。';
   if (pathname.startsWith('/notifications')) return '配置定时报表、阈值告警与投递通道。';
   if (pathname.startsWith('/settings')) return '维护连接信息与高级设置。';
   return '';
@@ -796,6 +809,20 @@ function UpstreamsPage(props: {
       <ProvidersPage settings={props.data.settings} items={props.data.providers} groups={props.data.providerGroups} onRefresh={props.data.loadProviders} onMessage={props.data.onMessage} />
     </Box>;
 }
+function OAuthRoutePage(props: {
+  data: AppDataContext;
+}) {
+  useEffect(() => {
+    void props.data.loadProviders();
+  }, [props.data.loadProviders]);
+  return <OAuthPage
+    settings={props.data.settings}
+    items={props.data.providers}
+    loading={props.data.status === 'loading'}
+    onRefresh={props.data.loadProviders}
+    onMessage={props.data.onMessage}
+  />;
+}
 function KeysRoutePage(props: {
   data: AppDataContext;
 }) {
@@ -1098,6 +1125,7 @@ function Root() {
           <Route path="/keys" element={<KeysRoutePage data={data} />} />
           <Route path="/logs" element={<LogsRoutePage data={data} />} />
           <Route path="/upstreams" element={<UpstreamsPage data={data} />} />
+          <Route path="/oauth" element={<OAuthRoutePage data={data} />} />
           <Route path="/models" element={<ModelsRoutePage data={data} />} />
           <Route path="/notifications" element={<NotificationsRoutePage data={data} />} />
           <Route path="/settings" element={<SettingsRoutePage data={data} />} />

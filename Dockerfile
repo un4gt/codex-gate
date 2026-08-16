@@ -33,12 +33,13 @@ RUN mkdir -p /app/data \
     && chown -R littlegate:littlegate /app
 USER littlegate
 ENV LISTEN_ADDR=0.0.0.0:8080 \
+    CODEX_OAUTH_CALLBACK_LISTEN_ADDR=0.0.0.0:1455 \
     STATIC_DIR=/app/static \
     DB_DSN=sqlite:///app/data/little_gate.sqlite \
     RUST_LOG=info \
     TZ=Asia/Shanghai
 VOLUME ["/app/data"]
-EXPOSE 8080
+EXPOSE 8080 1455
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
 CMD ["/app/backend"]
