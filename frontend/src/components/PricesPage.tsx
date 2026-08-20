@@ -102,7 +102,7 @@ function SummaryTile(props: {
 }) {
   return <Box className="surface-tile">
       <Box className="surface-label">{t(props.label)}</Box>
-      <Box className="mt-2 text-2xl font-semibold tracking-tight text-foreground">{props.value}</Box>
+      <Box className="mt-1.5 text-lg font-semibold tracking-tight text-foreground">{props.value}</Box>
       {props.hint ? <Box className="mt-2 text-sm leading-6 text-muted-foreground" component="p">{t(props.hint!)}</Box> : null}
     </Box>;
 }
@@ -218,20 +218,20 @@ export function PricesPage(props: PricesPageProps) {
       setBusy(false);
     }
   };
-  return <Box className="grid gap-6">
+  return <Box className="grid gap-4">
       <Card>
-        <Box className="flex flex-col gap-3 p-6 pb-5">
-          <Box className="flex items-center justify-between gap-3">
+        <Box className="flex flex-col gap-2 p-4 pb-3">
+          <Box className="flex items-center justify-between gap-2.5">
             <Box>
               <Box className="panel__eyebrow" component="p">{t('价格')}</Box>
-              <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t('模型价格与成本换算')}</Typography>
+              <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('模型价格与成本换算')}</Typography>
             </Box>
             <Chip color={"success"} variant="outlined" label={t('已生效')} />
           </Box>
-          <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t('按上游维护模型单价。')}</Typography>
+          <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t('按上游维护模型单价。')}</Typography>
         </Box>
-        <CardContent className="flex flex-col gap-4">
-          <Box className="grid gap-3 sm:grid-cols-2">
+        <CardContent className="flex flex-col gap-3">
+          <Box className="grid gap-2.5 sm:grid-cols-2">
             <SummaryTile label="价格项" value={String(props.items.length)} />
             <SummaryTile label="上游专属" value={String(props.items.filter(item => item.provider_id !== null).length)} />
             <SummaryTile label="全局默认" value={String(props.items.filter(item => item.provider_id === null).length)} />
@@ -240,8 +240,8 @@ export function PricesPage(props: PricesPageProps) {
 
           <Divider />
 
-          <Box className="flex flex-col gap-5" onSubmit={event => void submitCreate(event)} component="form">
-            <Box className="flex flex-col gap-6">
+          <Box className="flex flex-col gap-4" onSubmit={event => void submitCreate(event)} component="form">
+            <Box className="flex flex-col gap-4">
               <FormControl>
                 <FormLabel>{t('作用范围')}</FormLabel>
                 <Select displayEmpty name="provider_id" defaultValue="">
@@ -302,11 +302,11 @@ export function PricesPage(props: PricesPageProps) {
       </Card>
 
       <Card>
-        <Box className="flex flex-col gap-3 p-6 pb-5">
+        <Box className="flex flex-col gap-2 p-4 pb-3">
           <Box className="flex items-center justify-between gap-3">
             <Box>
               <Box className="panel__eyebrow" component="p">{t('价格结果')}</Box>
-              <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t('当前可用价格项')}</Typography>
+              <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('当前可用价格项')}</Typography>
             </Box>
             <Chip color={"default"} variant="outlined" label={t('价格列表')} />
           </Box>

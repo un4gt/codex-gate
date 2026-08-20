@@ -1109,7 +1109,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }
   };
   return <Box className="section-stack">
-      <PageHeader title="上游" description="查看连接目标、流量去向与健康状态。" actions={<Button type="button" disabled={!isLive()} className="rounded-none text-xs tracking-wider" onClick={() => {
+      <PageHeader title="上游" description="查看连接目标、流量去向与健康状态。" actions={<Button type="button" disabled={!isLive()} className="text-xs tracking-wider" onClick={() => {
       resetCreateForm();
       setCreateOpen(true);
     }}>
@@ -1119,27 +1119,27 @@ export function ProvidersPage(props: ProvidersPageProps) {
 
       <StatsGrid ariaLabel="上游摘要" items={stats()} variant="compact" />
 
-      {!isLive() ? <Alert className="rounded-none border-border/40 bg-muted/20">
+      {!isLive() ? <Alert className="border-border/40 bg-muted/20">
           <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t("未连接后台")}</AlertTitle>
           <Typography className="mt-2 text-sm leading-5 text-muted-foreground opacity-80" component="div">{t("当前不能创建或修改上游，请先连接后台。")}</Typography>
         </Alert> : null}
 
       <Card>
-        <Box className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 p-4">
-          <Typography className="text-base font-medium text-foreground" component="div">{t("上游列表")}</Typography>
-          <Typography className="font-mono text-xs uppercase tracking-wider text-muted-foreground" component="div">{t('查看目标与健康状态。')}</Typography>
+        <Box className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 p-4">
+          <Typography className="text-sm font-semibold text-foreground" component="div">{t("上游列表")}</Typography>
+          <Typography className="font-mono text-[0.6875rem] uppercase tracking-wider text-muted-foreground" component="div">{t('查看目标与健康状态。')}</Typography>
         </Box>
         <CardContent className="p-0 border-t border-border/40">
           {props.items.length > 0 ? <>{showProviderTable ? <TableContainer><Table>
               <TableHead>
                 <TableRow className="border-b border-border hover:bg-transparent">
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("上游")}</TableCell>
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("运行状态")}</TableCell>
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("目标")}</TableCell>
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("密钥")}</TableCell>
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("优先级 / 权重")}</TableCell>
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10">{t("最近错误")}</TableCell>
-                  <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest h-10 text-right">{t("操作")}</TableCell>
+                  <TableCell className="font-mono uppercase tracking-widest">{t("上游")}</TableCell>
+                  <TableCell className="font-mono uppercase tracking-widest">{t("运行状态")}</TableCell>
+                  <TableCell className="font-mono uppercase tracking-widest">{t("目标")}</TableCell>
+                  <TableCell className="font-mono uppercase tracking-widest">{t("密钥")}</TableCell>
+                  <TableCell className="font-mono uppercase tracking-widest">{t("优先级 / 权重")}</TableCell>
+                  <TableCell className="font-mono uppercase tracking-widest">{t("最近错误")}</TableCell>
+                  <TableCell className="font-mono uppercase tracking-widest text-right">{t("操作")}</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -1152,7 +1152,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <TableCell>
                           <Box className="flex flex-col gap-1">
                             <Box className="text-sm font-medium text-foreground truncate max-w-[150px]" component="strong">{item.provider.name}</Box>
-                            <Box className="font-mono text-[0.65rem] leading-[1.428571] text-muted-foreground opacity-70 truncate max-w-[220px]" component="span">
+                            <Box className="font-mono text-[0.6875rem] leading-[1.428571] text-muted-foreground opacity-70 truncate max-w-[220px]" component="span">
                               {item.provider.provider_type} · {item.provider.groups.map(group => group.group_name).join(', ') || '—'}
                             </Box>
                           </Box>
@@ -1160,7 +1160,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <TableCell>
                           <Box className="flex min-w-[9rem] items-center gap-2">
                             <StatusBadge tone={health.tone}>{t(health.label)}</StatusBadge>
-                            <Box className="font-mono text-[0.65rem] text-muted-foreground" component="span">
+                            <Box className="font-mono text-[0.6875rem] text-muted-foreground" component="span">
                               {item.provider.runtime?.in_flight ?? 0}/{item.provider.max_concurrency ?? '∞'} · {item.provider.runtime?.latency_ewma_ms == null ? '—' : formatMs(item.provider.runtime.latency_ewma_ms)}
                             </Box>
                           </Box>
@@ -1170,7 +1170,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <TableCell className="font-mono text-xs">
                           P{item.provider.priority} / W{item.provider.weight}
                         </TableCell>
-                        <TableCell className="font-mono text-[0.65rem] uppercase tracking-widest opacity-80">{item.provider.runtime?.last_error_type ?? item.provider.health?.last_error_type ?? '—'}</TableCell>
+                        <TableCell className="font-mono text-[0.6875rem] uppercase tracking-widest opacity-80">{item.provider.runtime?.last_error_type ?? item.provider.health?.last_error_type ?? '—'}</TableCell>
                         <TableCell className="text-right">
                           <Box className="flex items-center justify-end gap-1">
                             <Tooltip title={t('同步模型')}>
@@ -1310,8 +1310,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
       <DetailDrawer open={createOpen} title="NEW PROVIDER" description="填写连接信息并同步模型。" onClose={() => {
         if (!createIsBusy) void finishProviderCreate();
       }}>
-        <Box key={createFormVersion} className="flex flex-col gap-6" onSubmit={event => void submitProviderCreate(event)} component="form">
-          <Box className="grid gap-6 md:grid-cols-2">
+        <Box key={createFormVersion} className="flex flex-col gap-4" onSubmit={event => void submitProviderCreate(event)} component="form">
+          <Box className="grid gap-4 md:grid-cols-2">
             <FormControl>
               <FormLabel>{t("名称")}</FormLabel>
               <InputBase name="name" value={createName} disabled={createFieldsDisabled} onChange={event => {
@@ -1330,7 +1330,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
               >
                 {PROVIDER_TYPE_OPTIONS.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
               </Select>
-              <FormHelperText className="mt-2">{t(providerTypeDescription(createProviderType))}</FormHelperText>
+              <FormHelperText className="mt-1">{t(providerTypeDescription(createProviderType))}</FormHelperText>
             </FormControl>
             <FormControl error={createPriorityValue === null}>
               <FormLabel htmlFor="create-provider-priority">{t('优先级')}</FormLabel>
@@ -1407,9 +1407,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
               </Select>
             </FormControl>
           </Box>
-          <Box className="grid gap-6">
+          <Box className="grid gap-4">
             <FormControl>
-              <Box className="flex items-center justify-between gap-3">
+              <Box className="flex items-center justify-between gap-2.5">
                 <FormLabel>{t("API Base URL")}</FormLabel>
                 <Button type="button" size="icon" variant="ghost" aria-label={t('添加服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateBaseUrl}>
                   <Plus className="size-4" />
@@ -1510,22 +1510,22 @@ export function ProvidersPage(props: ProvidersPageProps) {
           <Box className="border border-border/40 bg-transparent p-4 text-sm text-muted-foreground font-mono" aria-live="polite">
             {createFormHint()}
           </Box>
-          {createStage === 'complete' ? <Alert className="rounded-none border-border/40 bg-muted/20" severity="success" variant="outlined">
+          {createStage === 'complete' ? <Alert className="border-border/40 bg-muted/20" severity="success" variant="outlined">
               <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t('模型同步完成')}</AlertTitle>
               <Typography className="mt-2 text-[0.8rem] leading-relaxed text-muted-foreground opacity-80" component="div">
                 {t('已同步 {{count}} 个模型。', { count: createSyncedCount ?? 0 })}
               </Typography>
             </Alert> : null}
-          {createSubmitError ? <Alert className="rounded-none border-border/40 bg-muted/20" severity="error" variant="outlined">
+          {createSubmitError ? <Alert className="border-border/40 bg-muted/20" severity="error" variant="outlined">
               <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t(createStage === 'sync_failed' ? '同步失败' : createStage === 'partial' ? '部分创建' : '创建失败')}</AlertTitle>
-              <Typography className="text-[0.8rem] leading-relaxed text-muted-foreground mt-2 opacity-80" component="div">{createSubmitError}</Typography>
+              <Typography className="text-[0.8rem] leading-relaxed text-muted-foreground mt-1.5 opacity-80" component="div">{createSubmitError}</Typography>
             </Alert> : null}
-          <Box className="flex flex-wrap justify-end gap-2 border-t border-border/40 pt-6 mt-2">
+          <Box className="flex flex-wrap justify-end gap-2 border-t border-border/40 pt-4 mt-1">
             {createIsPersisted ? <Button type="button" variant="outline" disabled={createIsBusy} onClick={() => void finishProviderCreate()}>
               {t('完成')}
             </Button> : null}
-            {createStage !== 'complete' && createStage !== 'partial' ? <Button type="submit" disabled={createIsBusy || createMissingFields().length > 0} className="rounded-none font-mono text-xs tracking-widest px-8">
-              <RefreshCw className={`mr-2 size-3.5 ${createIsBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
+            {createStage !== 'complete' && createStage !== 'partial' ? <Button type="submit" disabled={createIsBusy || createMissingFields().length > 0} className="font-mono text-xs tracking-widest px-5">
+              <RefreshCw className={`mr-1.5 size-3.5 ${createIsBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
               {t(createStage === 'sync_failed'
                 ? '保存并重试同步'
                 : createIsBusy
@@ -1548,36 +1548,36 @@ export function ProvidersPage(props: ProvidersPageProps) {
           item.provider.runtime?.state ?? item.provider.health?.state,
           item.provider.runtime?.available ?? item.provider.health?.available,
         );
-        return <Box className="flex flex-col gap-8">
-                <Box className="grid gap-6 md:grid-cols-4 border-b border-border/40 pb-8">
-                  <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary">
-                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('状态')}</Box>
-                      <Box className="mt-2">
+        return <Box className="flex flex-col gap-5">
+                <Box className="grid gap-4 md:grid-cols-4 border-b border-border/40 pb-5">
+                  <Box className="flex flex-col gap-1.5 border-l border-border/40 pl-3 border-l-2 border-l-primary">
+                      <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('状态')}</Box>
+                      <Box className="mt-1.5">
                         <StatusBadge tone={health.tone}>{health.label}</StatusBadge>
                       </Box>
                   </Box>
-                  <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('并发')}</Box>
-                      <Box className="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.provider.runtime?.in_flight ?? 0}/{item.provider.max_concurrency ?? '∞'}</Box>
+                  <Box className="flex flex-col gap-1.5 border-l border-border/40 pl-3 border-l-2 border-l-primary/20">
+                      <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('并发')}</Box>
+                      <Box className="mt-1.5 text-lg font-medium tracking-tight text-foreground">{item.provider.runtime?.in_flight ?? 0}/{item.provider.max_concurrency ?? '∞'}</Box>
                   </Box>
-                  <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('EWMA')}</Box>
-                      <Box className="mt-2 text-2xl font-medium tracking-tight text-foreground">{item.provider.runtime?.latency_ewma_ms == null ? '—' : formatMs(item.provider.runtime.latency_ewma_ms)}</Box>
+                  <Box className="flex flex-col gap-1.5 border-l border-border/40 pl-3 border-l-2 border-l-primary/20">
+                      <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('EWMA')}</Box>
+                      <Box className="mt-1.5 text-lg font-medium tracking-tight text-foreground">{item.provider.runtime?.latency_ewma_ms == null ? '—' : formatMs(item.provider.runtime.latency_ewma_ms)}</Box>
                   </Box>
-                  <Box className="flex flex-col gap-2 border-l border-border/40 pl-4 border-l-2 border-l-primary/20">
-                      <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('亲和会话')}</Box>
-                      <Box className="mt-2 font-mono text-sm tracking-tight pt-1 text-muted-foreground">
+                  <Box className="flex flex-col gap-1.5 border-l border-border/40 pl-3 border-l-2 border-l-primary/20">
+                      <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('亲和会话')}</Box>
+                      <Box className="mt-1.5 font-mono text-[0.8125rem] tracking-tight pt-0.5 text-muted-foreground">
                         {item.provider.affinity_sessions ?? 0}
                       </Box>
                   </Box>
                 </Box>
 
-                <Box className="flex flex-col gap-6" onSubmit={event => void submitProviderUpdate(event, item)} component="form">
-                  <Box className="flex items-center gap-3 border-b border-border/40 pb-4">
+                <Box className="flex flex-col gap-4" onSubmit={event => void submitProviderUpdate(event, item)} component="form">
+                  <Box className="flex items-center gap-2.5 border-b border-border/40 pb-3">
                     <ShieldCheck className="size-4 opacity-70" />
-                    <Box className="text-base font-medium tracking-tight text-foreground uppercase" component="h3">{t('上游信息')}</Box>
+                    <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('上游信息')}</Box>
                   </Box>
-                  <Box className="grid gap-6 pt-4 md:grid-cols-2">
+                  <Box className="grid gap-4 pt-3 md:grid-cols-2">
                     <FormControl>
                       <FormLabel>{t("名称")}</FormLabel>
                       <InputBase name="provider_name" defaultValue={item.provider.name} className="bg-background" />
@@ -1739,7 +1739,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       </Box>
                     </Box>
                   </Box>
-                  {providerSubmitError ? <Alert className="rounded-none border-border/40 bg-muted/20" severity="error" variant="outlined">
+                  {providerSubmitError ? <Alert className="border-border/40 bg-muted/20" severity="error" variant="outlined">
                       <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t('保存失败')}</AlertTitle>
                       <Typography className="mt-2 text-[0.8rem] leading-relaxed text-muted-foreground opacity-80" component="div">{providerSubmitError}</Typography>
                     </Alert> : null}
@@ -1751,23 +1751,23 @@ export function ProvidersPage(props: ProvidersPageProps) {
                 </Box>
 
                 <Box className="grid gap-4 mt-8" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-4">
+                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
                     <Box className="flex items-center gap-3">
                       <Stethoscope className="size-4 opacity-70" />
-                      <Box className="text-base font-medium tracking-tight text-foreground uppercase" component="h3">{t('服务地址')}</Box>
+                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('服务地址')}</Box>
                     </Box>
                     <StatusBadge tone="normal">{String(item.endpoints.length)}</StatusBadge>
                   </Box>
                   <Box className="grid gap-3">
                     {item.endpoints.map((endpoint, index) => {
                 const endpointHealth = healthStatus(endpoint.health?.state, endpoint.health?.available);
-                return <Box key={endpoint.id} className="grid gap-3 border border-border/40 bg-muted/5 p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_12rem]" onSubmit={event => void submitEndpointUpdate(event, endpoint.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderEndpoints(item, endpoint.id)} component="form">
-                            <Button type="button" size="icon" className="flex size-10 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing" aria-label={t('调整服务地址顺序')} title={t('调整服务地址顺序')} draggable onDragStart={() => setDraggingEndpointId(endpoint.id)} onDragEnd={() => setDraggingEndpointId(null)} variant="ghost">
+                return <Box key={endpoint.id} className="grid gap-2 border border-border/40 bg-muted/5 p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_12rem]" onSubmit={event => void submitEndpointUpdate(event, endpoint.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderEndpoints(item, endpoint.id)} component="form">
+                            <Button type="button" size="icon" className="flex size-8 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing" aria-label={t('调整服务地址顺序')} title={t('调整服务地址顺序')} draggable onDragStart={() => setDraggingEndpointId(endpoint.id)} onDragEnd={() => setDraggingEndpointId(null)} variant="ghost">
                               <GripVertical className="size-4" />
                             </Button>
                             <InputBase name={`endpoint_name_${endpoint.id}`} defaultValue={endpoint.name || `地址 ${index + 1}`} autoComplete="off" className="bg-background" />
                             <InputBase name={`endpoint_base_url_${endpoint.id}`} defaultValue={endpoint.base_url} autoComplete="off" autoCapitalize="none" spellCheck={false} className="bg-background font-mono text-xs" />
-                            <Box className="check-row h-10 px-3 py-0" component="label">
+                            <Box className="check-row h-8 px-2.5 py-0" component="label">
                               <Checkbox name={`endpoint_enabled_${endpoint.id}`} defaultChecked={endpoint.enabled} />
                               <Box component="span">{t('启用')}</Box>
                             </Box>
@@ -1785,11 +1785,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             </Box>
                           </Box>;
               })}
-                    <Box className="grid gap-3 border border-dashed border-border/60 bg-transparent p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]" onSubmit={event => void submitEndpointCreate(event, item)} component="form">
-                      <Box className="flex size-10 items-center justify-center font-mono text-xs text-muted-foreground">{item.endpoints.length + 1}</Box>
+                    <Box className="grid gap-2 border border-dashed border-border/60 bg-transparent p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]" onSubmit={event => void submitEndpointCreate(event, item)} component="form">
+                      <Box className="flex size-8 items-center justify-center font-mono text-xs text-muted-foreground">{item.endpoints.length + 1}</Box>
                       <InputBase name="endpoint_name" placeholder={`地址 ${item.endpoints.length + 1}`} autoComplete="off" />
                       <InputBase name="endpoint_base_url" placeholder={t("https://api.example.com/v1")} autoComplete="off" autoCapitalize="none" spellCheck={false} className="font-mono text-xs" />
-                      <Box className="check-row h-10 px-3 py-0" component="label">
+                      <Box className="check-row h-8 px-2.5 py-0" component="label">
                         <Checkbox name="endpoint_enabled" defaultChecked />
                         <Box component="span">{t('启用')}</Box>
                       </Box>
@@ -1801,7 +1801,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </Box>
                 </Box>
 
-                {item.provider.provider_type === CODEX_PROVIDER_TYPE ? <Box className="mt-8">
+                {item.provider.provider_type === CODEX_PROVIDER_TYPE ? <Box className="mt-5">
                     <CodexOAuthPanel
                       settings={props.settings}
                       item={item}
@@ -1809,11 +1809,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       onMessage={props.onMessage}
                     />
                   </Box> : <>
-                <Box className="grid gap-4 mt-8" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-4">
+                <Box className="grid gap-3 mt-5" component="section">
+                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
                     <Box className="flex items-center gap-3">
                       <AlertCircle className="size-4 opacity-70" />
-                      <Box className="text-base font-medium tracking-tight text-foreground uppercase" component="h3">{t('API 密钥')}</Box>
+                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('API 密钥')}</Box>
                     </Box>
                     <StatusBadge tone="normal">{String(item.keys.length)}</StatusBadge>
                   </Box>
@@ -1823,13 +1823,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
                 const keyHealth = quotaCooling
                   ? { label: '限流冷却', tone: 'warning' as const }
                   : healthStatus(key.health?.state, key.health?.available);
-                return <Box key={key.id} className="grid gap-3 border border-border/40 bg-muted/5 p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_10rem]" onSubmit={event => void submitKeyUpdate(event, key.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderKeys(item, key.id)} component="form">
-                            <Button type="button" className="flex size-10 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing" aria-label={t('调整 API 密钥顺序')} title={t('调整 API 密钥顺序')} draggable onDragStart={() => setDraggingKeyId(key.id)} onDragEnd={() => setDraggingKeyId(null)} variant="ghost">
+                return <Box key={key.id} className="grid gap-2 border border-border/40 bg-muted/5 p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_10rem]" onSubmit={event => void submitKeyUpdate(event, key.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderKeys(item, key.id)} component="form">
+                            <Button type="button" className="flex size-8 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing" aria-label={t('调整 API 密钥顺序')} title={t('调整 API 密钥顺序')} draggable onDragStart={() => setDraggingKeyId(key.id)} onDragEnd={() => setDraggingKeyId(null)} variant="ghost">
                               <GripVertical className="size-4" />
                             </Button>
                             <InputBase name={`upstream_key_name_${key.id}`} defaultValue={key.name || `密钥 ${index + 1}`} autoComplete="off" className="bg-background" />
                             <InputBase name={`upstream_key_secret_${key.id}`} type="password" autoComplete="new-password" placeholder={t("留空表示不修改")} className="bg-background font-mono text-xs" />
-                            <Box className="check-row h-10 px-3 py-0" component="label">
+                            <Box className="check-row h-8 px-2.5 py-0" component="label">
                               <Checkbox name={`upstream_key_enabled_${key.id}`} defaultChecked={key.enabled} />
                               <Box component="span">{t('启用')}</Box>
                             </Box>
@@ -1844,11 +1844,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             </Box>
                           </Box>;
               })}
-                    <Box className="grid gap-3 border border-dashed border-border/60 bg-transparent p-3 xl:grid-cols-[2.5rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]" onSubmit={event => void submitKeyCreate(event, item)} component="form">
-                      <Box className="flex size-10 items-center justify-center font-mono text-xs text-muted-foreground">{item.keys.length + 1}</Box>
+                    <Box className="grid gap-2 border border-dashed border-border/60 bg-transparent p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]" onSubmit={event => void submitKeyCreate(event, item)} component="form">
+                      <Box className="flex size-8 items-center justify-center font-mono text-xs text-muted-foreground">{item.keys.length + 1}</Box>
                       <InputBase name="upstream_key_name" placeholder={`密钥 ${item.keys.length + 1}`} autoComplete="off" />
                       <InputBase name="upstream_key_secret" type="password" placeholder={t("sk-...")} autoComplete="new-password" className="font-mono text-xs" />
-                      <Box className="check-row h-10 px-3 py-0" component="label">
+                      <Box className="check-row h-8 px-2.5 py-0" component="label">
                         <Checkbox name="upstream_key_enabled" defaultChecked />
                         <Box component="span">{t('启用')}</Box>
                       </Box>
@@ -1860,21 +1860,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </Box>
                 </Box>
 
-                <Box className="grid gap-6 mt-8" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-4">
-                    <Box className="flex items-center gap-3">
+                <Box className="grid gap-4 mt-5" component="section">
+                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
+                    <Box className="flex items-center gap-2.5">
                       <ShieldCheck className="size-4 opacity-70" />
-                      <Box className="text-base font-medium tracking-tight text-foreground uppercase" component="h3">{t('密钥模型限制')}</Box>
+                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('密钥模型限制')}</Box>
                     </Box>
                   </Box>
 
-                  {isLive() ? <Card className="rounded-none border border-border bg-background shadow-none">
-                      <Box className="flex flex-row items-start justify-between gap-6 p-6 pb-6">
-                        <Box className="grid gap-2">
-                          <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("按密钥限制模型")}</Typography>
-                          <Typography className="mt-1 font-mono text-[0.65rem] uppercase leading-5 tracking-wider text-muted-foreground" component="div">{t('未设置时允许所有模型；设置后只允许列表中的模型。')}</Typography>
+                  {isLive() ? <Card className="border border-border bg-background shadow-none">
+                      <Box className="flex flex-row items-start justify-between gap-4 p-4 pb-4">
+                        <Box className="grid gap-1.5">
+                          <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("按密钥限制模型")}</Typography>
+                          <Typography className="mt-0.5 font-mono text-[0.6875rem] uppercase leading-4 tracking-wider text-muted-foreground" component="div">{t('未设置时允许所有模型；设置后只允许列表中的模型。')}</Typography>
                         </Box>
-                        <Box className="flex flex-wrap items-center gap-3">
+                        <Box className="flex flex-wrap items-center gap-2">
                           <Select displayEmpty value={selectedUpstreamKeyId === null ? '' : String(selectedUpstreamKeyId)} onChange={event => {
                     const raw = event.target.value.trim();
                     const parsed = Number.parseInt(raw, 10);
@@ -1883,7 +1883,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             <MenuItem value="">{t('选择密钥…')}</MenuItem>
                             {item.keys.map(key => <MenuItem key={key.id} value={String(key.id)}>{key.name} (#{key.id})</MenuItem>)}
                           </Select>
-                          <Button type="button" size="sm" className="rounded-none text-xs tracking-wider" onClick={() => {
+                          <Button type="button" size="sm" className="text-xs tracking-wider" onClick={() => {
                     const keyId = selectedUpstreamKeyId;
                     if (keyId === null) {
                       props.onMessage('请先选择一个密钥。');
@@ -1896,15 +1896,15 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           </Button>
                         </Box>
                       </Box>
-                      <CardContent className="grid gap-6 border-t border-border/40 pt-6">
-                        {upstreamKeyModelsError ? (message => <Box className="border border-border/40 bg-background px-4 py-4 font-mono text-xs text-muted-foreground opacity-80">{message}</Box>)(upstreamKeyModelsError) : null}
+                      <CardContent className="grid gap-4 border-t border-border/40 pt-4">
+                        {upstreamKeyModelsError ? (message => <Box className="border border-border/40 bg-background px-3 py-2.5 font-mono text-xs text-muted-foreground opacity-80">{message}</Box>)(upstreamKeyModelsError) : null}
 
-                        {item.keys.length > 0 ? <><Box className="flex flex-col gap-4 border border-dashed border-border/60 bg-transparent p-6">
+                        {item.keys.length > 0 ? <><Box className="flex flex-col gap-3 rounded border border-dashed border-border/60 bg-transparent p-4">
                             <FormControl>
                               <FormLabel>{t("添加模型（逗号或空格分隔）")}</FormLabel>
                               <Box className="flex items-center gap-2">
-                                <InputBase value={upstreamKeyModelsDraft} placeholder={t("gpt-4.1, o4-mini …")} disabled={selectedUpstreamKeyId === null || busy === `key-models-add-${selectedUpstreamKeyId ?? 0}`} onChange={event => setUpstreamKeyModelsDraft(event.target.value)} className="font-mono text-sm" />
-                                <Button type="button" size="sm" className="rounded-none font-mono text-[0.65rem] uppercase tracking-widest px-6 whitespace-nowrap" onClick={() => {
+                                <InputBase value={upstreamKeyModelsDraft} placeholder={t("gpt-4.1, o4-mini …")} disabled={selectedUpstreamKeyId === null || busy === `key-models-add-${selectedUpstreamKeyId ?? 0}`} onChange={event => setUpstreamKeyModelsDraft(event.target.value)} className="font-mono text-[0.8125rem]" />
+                                <Button type="button" size="sm" className="font-mono text-[0.6875rem] uppercase tracking-widest px-3.5 whitespace-nowrap" onClick={() => {
                           const keyId = selectedUpstreamKeyId;
                           if (keyId === null) {
                             props.onMessage('请先选择一个密钥。');
@@ -1920,37 +1920,37 @@ export function ProvidersPage(props: ProvidersPageProps) {
                             {(() => {
                       const keyId = selectedUpstreamKeyId;
                       if (keyId === null) {
-                        return <Box className="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
+                        return <Box className="px-4 py-5 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
                                     {t('请选择一个密钥。')}
                                   </Box>;
                       }
                       const models = upstreamKeyModels;
                       if (models === null) {
-                        return <Box className="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
+                        return <Box className="px-4 py-5 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
                                     {t('读取中…')}
                                   </Box>;
                       }
                       if (models.length === 0) {
-                        return <Box className="px-6 py-8 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
+                        return <Box className="px-4 py-5 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
                                     {t('当前未限制模型；同步或添加后将按列表限制。')}
                                   </Box>;
                       }
                       return <Table>
                                   <TableHead>
                                     <TableRow className="border-b border-border/40 hover:bg-transparent bg-background">
-                                      <TableCell className="h-10">{t("模型")}</TableCell>
-                                      <TableCell className="h-10">{t("启用")}</TableCell>
-                                      <TableCell className="h-10 text-right">{t("操作")}</TableCell>
+                                      <TableCell>{t("模型")}</TableCell>
+                                      <TableCell>{t("启用")}</TableCell>
+                                      <TableCell className="text-right">{t("操作")}</TableCell>
                                     </TableRow>
                                   </TableHead>
                                   <TableBody>
                                     {models.map(model => <TableRow key={model.id} className={`border-b border-border/40 hover:bg-muted/30 transition-colors ${model.enabled ? '' : 'opacity-50'}`}>
-                                          <TableCell className="font-mono text-sm max-w-[200px] truncate" title={model.model_name}>{model.model_name}</TableCell>
+                                          <TableCell className="font-mono text-[0.8125rem] max-w-[200px] truncate" title={model.model_name}>{model.model_name}</TableCell>
                                           <TableCell>
                                             <Checkbox checked={model.enabled} disabled={busy === `key-model-${model.id}`} onChange={event => void toggleKeyModelEnabled(model, event.currentTarget.checked)} />
                                           </TableCell>
                                           <TableCell className="text-right">
-                                            <Button type="button" size="sm" variant="ghost" className="font-mono text-[0.65rem] uppercase tracking-widest hover:bg-transparent hover:text-destructive px-0 shrink-0" onClick={() => void removeKeyModel(model)} disabled={busy === `key-model-${model.id}`}>
+                                            <Button type="button" size="sm" variant="ghost" className="font-mono text-[0.6875rem] uppercase tracking-widest hover:bg-transparent hover:text-destructive px-0 shrink-0" onClick={() => void removeKeyModel(model)} disabled={busy === `key-model-${model.id}`}>
                                               {t('移除')}
                                             </Button>
                                           </TableCell>
@@ -1958,31 +1958,31 @@ export function ProvidersPage(props: ProvidersPageProps) {
                                   </TableBody>
                                 </Table>;
                     })()}
-                          </TableContainer></> : <Box className="border border-dashed border-border/60 bg-transparent px-4 py-6 text-sm text-muted-foreground opacity-70">
+                          </TableContainer></> : <Box className="rounded border border-dashed border-border/60 bg-transparent px-3 py-4 text-[0.8125rem] text-muted-foreground opacity-70">
                               {t('还没有上游密钥，请先创建。')}
                             </Box>}
                       </CardContent>
-                    </Card> : <Card className="rounded-none border border-border bg-background shadow-none">
-                        <CardContent className="p-6 font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">
+                    </Card> : <Card className="border border-border bg-background shadow-none">
+                        <CardContent className="p-4 font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">
                           连接后台后可为每个上游密钥设置可用模型。
                         </CardContent>
                       </Card>}
                 </Box>
                 </>}
 
-                <Box className="grid gap-6 mt-8 pb-8" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-4">
-                    <Box className="flex items-center gap-3">
+                <Box className="grid gap-4 mt-5 pb-5" component="section">
+                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
+                    <Box className="flex items-center gap-2.5">
                       <RefreshCw className="size-4 opacity-70" />
-                      <Box className="text-base font-medium tracking-tight text-foreground uppercase" component="h3">{t('模型')}</Box>
+                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('模型')}</Box>
                     </Box>
                   </Box>
 
-                  <Card className="rounded-none border border-border bg-background shadow-none">
-                    <CardContent className="flex flex-col items-start justify-between gap-4 p-6 sm:flex-row sm:items-center">
-                      <Box className="grid gap-2">
-                        <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t('可用模型')}</Typography>
-                        <Typography className="text-sm leading-6 text-muted-foreground" component="p">{t('模型库存、显示名称、别名目标和协议能力已集中到模型页。')}</Typography>
+                  <Card className="border border-border bg-background shadow-none">
+                    <CardContent className="flex flex-col items-start justify-between gap-3 p-4 sm:flex-row sm:items-center">
+                      <Box className="grid gap-1.5">
+                        <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('可用模型')}</Typography>
+                        <Typography className="text-[0.8125rem] leading-5 text-muted-foreground" component="p">{t('模型库存、显示名称、别名目标和协议能力已集中到模型页。')}</Typography>
                       </Box>
                       <Box className="flex shrink-0 flex-wrap gap-2">
                         <Button
@@ -1992,7 +1992,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           disabled={busy !== null || item.endpoints.length === 0 || item.keys.length === 0}
                           onClick={() => void syncModelsForProvider(item.provider.id, item.provider.name)}
                         >
-                          <RefreshCw className={`mr-2 size-3 ${busy === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
+                          <RefreshCw className={`mr-1.5 size-3 ${busy === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
                           {t('同步模型')}
                         </Button>
                         <Button
@@ -2000,21 +2000,21 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           href={`/models?provider_id=${item.provider.id}`}
                           size="sm"
                           disabled={!isLive()}
-                          className="rounded-none text-xs tracking-wider"
+                          className="text-xs tracking-wider"
                         >
                           {t('在模型页管理')}
-                          <ChevronRight className="ml-2 size-3" aria-hidden="true" />
+                          <ChevronRight className="ml-1.5 size-3" aria-hidden="true" />
                         </Button>
                       </Box>
                     </CardContent>
                   </Card>
                 </Box>
 
-                {testResult ? (result => <Card className="rounded-none border border-border bg-background shadow-none mb-8">
-                      <Box className="flex flex-col gap-3 p-6 pb-4">
-                        <Typography className="text-lg font-medium tracking-tight text-foreground" component="div">{t("最近测试结果")}</Typography>
+                {testResult ? (result => <Card className="border border-border bg-background shadow-none mb-5">
+                      <Box className="flex flex-col gap-2 p-4 pb-3">
+                        <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("最近测试结果")}</Typography>
                       </Box>
-                      <CardContent className="grid gap-2 font-mono text-sm border-t border-border/40 pt-4">
+                      <CardContent className="grid gap-1.5 font-mono text-[0.8125rem] border-t border-border/40 pt-3">
                         <Box>{t('地址：{{url}}', {
                   url: result.url
                 })}</Box>
@@ -2027,11 +2027,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       </CardContent>
                     </Card>)(testResult) : null}
 
-                <Box className="mt-8 border border-destructive/40 bg-destructive/5 p-6" component="section">
-                  <Box className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+                <Box className="mt-5 rounded border border-destructive/40 bg-destructive/5 p-4" component="section">
+                  <Box className="flex flex-col gap-3.5 sm:flex-row sm:items-center sm:justify-between">
                     <Box className="min-w-0">
-                      <Typography className="text-base font-semibold tracking-tight text-destructive" component="h3">{t('危险操作')}</Typography>
-                      <Typography className="mt-2 text-sm leading-6 text-muted-foreground" component="p">{t('永久删除此上游及其运行配置。历史数据会保留。')}</Typography>
+                      <Typography className="text-sm font-semibold tracking-normal text-destructive" component="h3">{t('危险操作')}</Typography>
+                      <Typography className="mt-1.5 text-[0.8125rem] leading-5 text-muted-foreground" component="p">{t('永久删除此上游及其运行配置。历史数据会保留。')}</Typography>
                     </Box>
                     <Button type="button" variant="destructive" className="shrink-0" disabled={busy === `provider-delete-${item.provider.id}`} onClick={() => {
                       setDeleteProviderError(null);
@@ -2077,16 +2077,16 @@ export function ProvidersPage(props: ProvidersPageProps) {
           }
         }}
       >
-        <DialogTitle id="delete-provider-title" className="border-b border-border/40 px-6 py-5 text-xl font-semibold tracking-tight text-foreground">
+        <DialogTitle id="delete-provider-title" className="border-b border-border/40 px-4 py-3.5 text-base font-semibold tracking-normal text-foreground">
           {t('删除上游“{{name}}”？', {
             name: selected?.provider.name ?? ''
           })}
         </DialogTitle>
-        <DialogContent className="px-6 py-5">
-          <Typography id="delete-provider-description" className="text-sm leading-6 text-muted-foreground" component="p">
+        <DialogContent className="px-4 py-3.5">
+          <Typography id="delete-provider-description" className="text-[0.8125rem] leading-5 text-muted-foreground" component="p">
             {t('此操作不可撤销。以下运行配置将被永久删除：')}
           </Typography>
-          <Box className="mt-4 grid list-disc gap-2 border border-border/50 bg-muted/10 py-3 pl-8 pr-4 text-sm text-foreground" component="ul">
+          <Box className="mt-3 grid list-disc gap-1.5 rounded border border-border/50 bg-muted/10 py-2.5 pl-7 pr-3 text-[0.8125rem] text-foreground" component="ul">
             <Box component="li">{t('{{count}} 个服务地址', {
               count: selected?.endpoints.length ?? 0
             })}</Box>
@@ -2095,13 +2095,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
             })}</Box>
             <Box component="li">{t('Provider 模型、模型路由关联与别名目标')}</Box>
           </Box>
-          <Typography className="mt-4 text-sm leading-6 text-muted-foreground" component="p">{t('请求日志、统计与价格历史将保留。')}</Typography>
-          {deleteProviderError ? <Alert className="mt-4 rounded-none border-border/40 bg-muted/20" severity="error" variant="outlined">
+          <Typography className="mt-3 text-[0.8125rem] leading-5 text-muted-foreground" component="p">{t('请求日志、统计与价格历史将保留。')}</Typography>
+          {deleteProviderError ? <Alert className="mt-3 border-border/40 bg-muted/20" severity="error" variant="outlined">
               <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t('删除失败')}</AlertTitle>
-              <Typography className="mt-2 text-[0.8rem] leading-relaxed text-muted-foreground opacity-80" component="div">{deleteProviderError}</Typography>
+              <Typography className="mt-1.5 text-[0.8rem] leading-relaxed text-muted-foreground opacity-80" component="div">{deleteProviderError}</Typography>
             </Alert> : null}
         </DialogContent>
-        <DialogActions className="gap-3 border-t border-border/40 px-6 py-4">
+        <DialogActions className="gap-2 border-t border-border/40 px-4 py-3">
           <Button ref={deleteCancelButtonRef} autoFocus type="button" variant="outline" disabled={selected ? busy === `provider-delete-${selected.provider.id}` : false} onClick={closeDeleteProviderDialog}>{t('取消')}</Button>
           <Button type="button" variant="destructive" disabled={!selected || busy === `provider-delete-${selected?.provider.id ?? 0}`} onClick={() => selected ? void removeProvider(selected) : undefined}>
             <Trash2 className="size-4" />

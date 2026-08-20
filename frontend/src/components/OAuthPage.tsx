@@ -149,13 +149,13 @@ export function OAuthPage(props: OAuthPageProps) {
           />
         </Box>
       ) : selected ? (
-        <Box className="grid gap-6">
-          <Box className="flex flex-col gap-4 border-b border-border/40 pb-5 lg:flex-row lg:items-end lg:justify-between">
+        <Box className="grid gap-4">
+          <Box className="flex flex-col gap-3 border-b border-border/40 pb-4 lg:flex-row lg:items-end lg:justify-between">
             <Box className="min-w-0">
               <Typography className="text-sm font-medium text-foreground" component="h2">
                 {selected.provider.name}
               </Typography>
-              <Box className="mt-2 flex flex-wrap items-center gap-2">
+              <Box className="mt-1.5 flex flex-wrap items-center gap-2">
                 <StatusBadge tone={selected.provider.enabled ? 'normal' : 'disabled'}>
                   {t(selected.provider.enabled ? '已启用' : '已禁用')}
                 </StatusBadge>

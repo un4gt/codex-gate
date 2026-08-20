@@ -46,28 +46,28 @@ export function TrendChart(props: TrendChartProps) {
   const latest = props.points[props.points.length - 1]?.value ?? 0;
   const guideLines = [0.2, 0.4, 0.6, 0.8].map(ratio => 18 + (220 - 18 - 28) * ratio);
   return <Card className="overflow-hidden">
-      <Box className="flex flex-col gap-4 p-6 pb-5">
-        <Box className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+      <Box className="flex flex-col gap-3 p-4 pb-3">
+        <Box className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <Box>
             <Box className="panel__eyebrow" component="p">{t('趋势')}</Box>
-            <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t("最近 14 天请求波形")}</Typography>
-            <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t('查看最近请求变化。')}</Typography>
+            <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("最近 14 天请求波形")}</Typography>
+            <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t('查看最近请求变化。')}</Typography>
           </Box>
-          <Box className="grid gap-3 sm:grid-cols-2">
-            <Box className="surface-tile px-4 py-3">
-              <Box className="panel__eyebrow mb-1">{t('峰值')}</Box>
-              <Box className="text-2xl font-semibold tracking-[-0.04em] text-foreground">{peak}</Box>
+          <Box className="grid gap-2 sm:grid-cols-2">
+            <Box className="surface-tile px-3 py-2">
+              <Box className="panel__eyebrow mb-0.5">{t('峰值')}</Box>
+              <Box className="text-lg font-semibold tracking-tight text-foreground">{peak}</Box>
             </Box>
-            <Box className="surface-tile px-4 py-3">
-              <Box className="panel__eyebrow mb-1">{t('最新')}</Box>
-              <Box className="text-2xl font-semibold tracking-[-0.04em] text-foreground">{latest}</Box>
+            <Box className="surface-tile px-3 py-2">
+              <Box className="panel__eyebrow mb-0.5">{t('最新')}</Box>
+              <Box className="text-lg font-semibold tracking-tight text-foreground">{latest}</Box>
             </Box>
           </Box>
         </Box>
       </Box>
-      <CardContent className="flex flex-col gap-4">
-        <Box className="border border-border bg-background/75 p-4">
-          <svg className="h-60 w-full overflow-visible" viewBox={`0 0 ${chart.width} ${chart.height}`} preserveAspectRatio="none">
+      <CardContent className="flex flex-col gap-3">
+        <Box className="rounded border border-border bg-background/75 p-3">
+          <svg className="h-44 w-full overflow-visible" viewBox={`0 0 ${chart.width} ${chart.height}`} preserveAspectRatio="none">
             {guideLines.map(guideY => <line key={guideY} x1="18" x2={chart.width - 18} y1={guideY} y2={guideY} stroke="rgba(41, 37, 30, 0.1)" strokeDasharray="4 8" />)}
             <line x1="18" x2="18" y1="18" y2={chart.height - 28} stroke="rgba(41, 37, 30, 0.08)" />
             <line x1="18" x2={chart.width - 18} y1={chart.height - 28} y2={chart.height - 28} stroke="rgba(41, 37, 30, 0.08)" />
@@ -78,11 +78,11 @@ export function TrendChart(props: TrendChartProps) {
             </linearGradient>
           </defs>
           <path d={chart.area} fill="url(#trendFill)" />
-          <path d={chart.line} fill="none" stroke="var(--primary)" strokeWidth="3" strokeLinecap="round" />
-          {chart.points.map(point => <circle key={`${point.label}:${point.x}`} cx={point.x} cy={point.y} r="4.5" fill="var(--card)" stroke="var(--primary)" strokeWidth="2" />)}
+          <path d={chart.line} fill="none" stroke="var(--primary)" strokeWidth="2" strokeLinecap="round" />
+          {chart.points.map(point => <circle key={`${point.label}:${point.x}`} cx={point.x} cy={point.y} r="3" fill="var(--card)" stroke="var(--primary)" strokeWidth="1.5" />)}
           </svg>
         </Box>
-        <Box className="grid grid-cols-7 gap-2 text-[0.72rem] uppercase tracking-[0.16em] text-muted-foreground sm:grid-cols-14">
+        <Box className="grid grid-cols-7 gap-2 text-[0.625rem] uppercase tracking-[0.16em] text-muted-foreground sm:grid-cols-14">
           {props.points.map((point, index) => <Box key={`${point.label}:${index}`} className="truncate" component="span">{point.label}</Box>)}
         </Box>
       </CardContent>

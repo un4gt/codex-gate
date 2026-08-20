@@ -31,23 +31,23 @@ export function DetailDrawer(props: DetailDrawerProps) {
         },
       }}
     >
-      <Box className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border/40 bg-card/95 px-8 py-6 backdrop-blur-md">
-        <Box className="flex min-w-0 flex-col gap-2">
-          <Typography id={titleId} className="truncate text-3xl font-semibold tracking-normal text-foreground" component="h2" title={t(props.title)}>
+      <Box className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-border/40 bg-card/95 px-5 py-4 backdrop-blur-md">
+        <Box className="flex min-w-0 flex-col gap-1">
+          <Typography id={titleId} className="truncate text-lg font-semibold tracking-normal text-foreground" component="h2" title={t(props.title)}>
             {t(props.title)}
           </Typography>
           {props.description ? (
-            <Typography className="truncate text-sm leading-5 text-muted-foreground opacity-80" component="p">
+            <Typography className="truncate text-[0.8125rem] leading-5 text-muted-foreground opacity-80" component="p">
               {t(props.description)}
             </Typography>
           ) : null}
         </Box>
-        <Button autoFocus type="button" variant="ghost" size="icon" aria-label={t('关闭')} className="-mr-2" onClick={props.onClose}>
-          <X className="size-5" />
+        <Button autoFocus type="button" variant="ghost" size="icon" aria-label={t('关闭')} className="-mr-1" onClick={props.onClose}>
+          <X className="size-4" />
         </Button>
       </Box>
-      <Box className="min-h-0 flex-1 overflow-y-auto p-8">{props.children}</Box>
-      {props.footer ? <Box className="border-t border-border/40 bg-muted/5 px-8 py-6">{props.footer}</Box> : null}
+      <Box className="min-h-0 flex-1 overflow-y-auto p-5">{props.children}</Box>
+      {props.footer ? <Box className="border-t border-border/40 bg-muted/5 px-5 py-4">{props.footer}</Box> : null}
     </Drawer>
   );
 }

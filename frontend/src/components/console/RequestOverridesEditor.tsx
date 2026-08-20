@@ -380,8 +380,8 @@ export function RequestOverridesEditor({ value, onChange, disabled = false }: Re
         <Box className="flex shrink-0 flex-wrap gap-2">
           <Button
             type="button"
-            size="small"
-            variant="outlined"
+            size="sm"
+            variant="outline"
             disabled={disabled}
             onClick={() => onChange(mergeCodexPreset(value))}
           >
@@ -390,9 +390,8 @@ export function RequestOverridesEditor({ value, onChange, disabled = false }: Re
           </Button>
           <Button
             type="button"
-            size="small"
-            variant="text"
-            color="inherit"
+            size="sm"
+            variant="ghost"
             disabled={disabled || ruleCount === 0}
             onClick={() => onChange(createRequestOverridesDraft())}
           >
@@ -402,12 +401,12 @@ export function RequestOverridesEditor({ value, onChange, disabled = false }: Re
         </Box>
       </Box>
 
-      <Alert className="m-4 rounded-none border-border/40 bg-background/60" severity="info" variant="outlined">
-        {t('Codex 预设会补充官方 CLI 身份、x-codex 指纹和 Responses client_metadata；已有同名规则会被替换，其他规则会保留。预设不会改写 instructions。鉴权、代理来源、WebSocket 握手、连接控制以及 model、stream、type 等路由字段禁止覆写。')}
+      <Alert className="m-3 border-border/40 bg-background/60" severity="info" variant="outlined">
+        {t('一键补齐 Codex 客户端所需的身份标识与元数据；同名规则会被覆盖，其余保留。')}
       </Alert>
 
-      <Box className="grid gap-6 p-4">
-        <Box className="grid gap-3">
+      <Box className="grid gap-4 p-3">
+        <Box className="grid gap-2.5">
           <Box className="flex flex-wrap items-center justify-between gap-2">
             <Box>
               <Typography className="text-sm font-medium" component="h5">{t('Header 规则')}</Typography>
@@ -417,8 +416,8 @@ export function RequestOverridesEditor({ value, onChange, disabled = false }: Re
             </Box>
             <Button
               type="button"
-              size="small"
-              variant="outlined"
+              size="sm"
+              variant="outline"
               disabled={disabled || value.headers.length >= 64}
               onClick={() => onChange({ ...value, headers: [...value.headers, emptyHeaderRule()] })}
             >
@@ -428,7 +427,7 @@ export function RequestOverridesEditor({ value, onChange, disabled = false }: Re
           </Box>
 
           {value.headers.length === 0 ? (
-            <Box className="border border-dashed border-border/60 px-4 py-6 text-center text-xs text-muted-foreground">
+            <Box className="rounded border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
               {t('尚未配置 Header 覆写。')}
             </Box>
           ) : value.headers.map((rule, index) => (
@@ -517,8 +516,8 @@ export function RequestOverridesEditor({ value, onChange, disabled = false }: Re
             </Box>
             <Button
               type="button"
-              size="small"
-              variant="outlined"
+              size="sm"
+              variant="outline"
               disabled={disabled || value.body.length >= 128}
               onClick={() => onChange({ ...value, body: [...value.body, emptyBodyRule()] })}
             >
@@ -528,7 +527,7 @@ export function RequestOverridesEditor({ value, onChange, disabled = false }: Re
           </Box>
 
           {value.body.length === 0 ? (
-            <Box className="border border-dashed border-border/60 px-4 py-6 text-center text-xs text-muted-foreground">
+            <Box className="rounded border border-dashed border-border/60 px-3 py-4 text-center text-xs text-muted-foreground">
               {t('尚未配置 Body 覆写。')}
             </Box>
           ) : value.body.map((rule, index) => {

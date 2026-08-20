@@ -46,7 +46,7 @@
 }
 
 :root {
-  --radius: 0;
+  --radius: 4px;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
   --font-data: "SFMono-Regular", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, "Liberation Mono", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", monospace;
   --background: oklch(0.97 0.005 95); /* light grey background */
@@ -99,7 +99,7 @@
     @apply bg-background text-foreground subpixel-antialiased;
     margin: 0;
     font-family: var(--font-ui);
-    font-size: 15px;
+    font-size: 14px;
     line-height: 1.5;
     letter-spacing: 0;
     text-rendering: optimizeLegibility;
@@ -142,80 +142,84 @@
   }
 
   .app-sidebar {
-    @apply flex w-full shrink-0 flex-col border-r border-border bg-sidebar px-4 py-7 lg:sticky lg:top-0 lg:h-dvh lg:max-h-dvh lg:w-[264px] lg:overflow-hidden xl:w-[272px];
+    @apply flex w-full shrink-0 flex-col border-r border-border bg-sidebar px-3 py-4 lg:sticky lg:top-0 lg:h-dvh lg:max-h-dvh lg:w-[232px] lg:overflow-hidden xl:w-[240px];
   }
 
   .app-main {
-    @apply min-w-0 flex-1 bg-background px-5 py-7 sm:px-6 lg:px-8 lg:py-9 xl:px-10 2xl:px-12;
+    @apply min-w-0 flex-1 bg-background px-4 py-5 sm:px-5 lg:px-6 lg:py-6 xl:px-8 2xl:px-10;
   }
 
   .app-content {
-    @apply flex w-full max-w-[1600px] flex-col gap-8;
+    @apply flex w-full max-w-[1600px] flex-col gap-5;
   }
 
   .app-pagebar {
-    @apply flex flex-col gap-5 border-b border-border pb-7 md:flex-row md:items-end md:justify-between;
+    @apply flex flex-col gap-4 border-b border-border pb-5 md:flex-row md:items-end md:justify-between;
   }
 
   .app-kicker {
-    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
+    @apply text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .app-title {
-    @apply text-3xl font-semibold tracking-normal text-foreground md:text-4xl;
+    @apply text-xl font-semibold tracking-normal text-foreground md:text-2xl;
   }
 
   .app-description {
-    @apply mt-3 max-w-3xl text-sm leading-6 text-muted-foreground;
+    @apply mt-2 max-w-3xl text-[0.8125rem] leading-5 text-muted-foreground;
   }
 
   .app-toolbar {
-    @apply flex flex-wrap items-center gap-3 pb-1;
+    @apply flex flex-wrap items-center gap-2 pb-1;
   }
 
   .section-stack {
-    @apply flex flex-col gap-6;
+    @apply flex flex-col gap-4;
   }
 
   .surface-tile {
-    @apply border border-border/70 bg-muted/20 p-4;
+    @apply border border-border/70 bg-muted/20 p-3;
+    border-radius: var(--radius);
   }
 
   .surface-label {
-    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
+    @apply text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .surface-value {
-    @apply mt-2 break-all text-sm text-foreground;
+    @apply mt-1.5 break-all text-[0.8125rem] text-foreground;
   }
 
   .check-row {
-    @apply flex min-h-11 items-center gap-3 border border-border/60 bg-muted/20 px-3 py-3 text-sm text-muted-foreground;
+    @apply flex min-h-9 items-center gap-2.5 border border-border/60 bg-muted/20 px-3 py-2 text-[0.8125rem] text-muted-foreground;
+    border-radius: var(--radius);
   }
 
   .panel {
-    @apply border border-border bg-background p-6;
+    @apply border border-border bg-background p-4;
+    border-radius: var(--radius);
   }
 
   .panel__header {
-    @apply mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between;
+    @apply mb-4 flex flex-col gap-2.5 md:flex-row md:items-end md:justify-between;
   }
 
   .panel__header h2,
   .panel__header h3 {
-    @apply m-0 text-xl font-semibold tracking-normal text-foreground;
+    @apply m-0 text-sm font-semibold tracking-normal text-foreground;
   }
 
   .panel__eyebrow {
-    @apply mb-2 text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
+    @apply mb-1.5 text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .panel__muted {
-    @apply text-sm leading-6 text-muted-foreground;
+    @apply text-[0.8125rem] leading-5 text-muted-foreground;
   }
 
   .button {
-    @apply inline-flex h-10 items-center justify-center gap-2 bg-foreground px-6 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-background transition-colors hover:bg-foreground/92 disabled:pointer-events-none disabled:opacity-50;
+    @apply inline-flex h-8 items-center justify-center gap-2 bg-foreground px-3.5 text-[0.8125rem] font-medium tracking-[0.01em] text-background transition-colors hover:bg-foreground/92 disabled:pointer-events-none disabled:opacity-50;
+    border-radius: var(--radius);
   }
 
   .button--ghost {
@@ -223,11 +227,13 @@
   }
 
   .empty-state {
-    @apply border border-dashed border-border bg-transparent p-6 text-center text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground opacity-70;
+    @apply border border-dashed border-border bg-transparent p-5 text-center text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground opacity-70;
+    border-radius: var(--radius);
   }
 
   .status-banner {
-    @apply border border-border bg-transparent px-4 py-3 text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground;
+    @apply border border-border bg-transparent px-3 py-2 text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground;
+    border-radius: var(--radius);
   }
 
   .status-banner--page {
@@ -235,7 +241,8 @@
   }
 
   .status-chip {
-    @apply inline-flex items-center border border-border bg-transparent px-3 py-1 text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground;
+    @apply inline-flex items-center border border-border bg-transparent px-2 py-0.5 text-[0.6875rem] font-medium uppercase tracking-[0.08em] text-muted-foreground;
+    border-radius: var(--radius);
   }
 
   .status-chip--enabled {
@@ -251,7 +258,7 @@
   }
 
   .log-row__status {
-    @apply inline-flex items-center rounded-full border px-2.5 py-1 text-[0.7rem] font-medium uppercase tracking-[0.08em];
+    @apply inline-flex items-center rounded-full border px-2 py-0.5 text-[0.6875rem] font-medium uppercase tracking-[0.08em];
   }
 
   .log-row__status.is-ok {
@@ -263,7 +270,7 @@
   }
 
   .logs-layout {
-    @apply grid gap-6 xl:grid-cols-[minmax(340px,0.88fr)_minmax(0,1.12fr)];
+    @apply grid gap-4 xl:grid-cols-[minmax(340px,0.88fr)_minmax(0,1.12fr)];
   }
 
   .logs-toolbar {
@@ -271,34 +278,35 @@
   }
 
   .logs-filters {
-    @apply grid gap-3 md:grid-cols-2 xl:grid-cols-4;
+    @apply grid gap-2.5 md:grid-cols-2 xl:grid-cols-4;
   }
 
   .logs-filters label {
-    @apply flex flex-col gap-2;
+    @apply flex flex-col gap-1.5;
   }
 
   .logs-filters label span,
   .logs-pagination span,
   .logs-table__head {
-    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
+    @apply text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .logs-filters input,
   .logs-filters select {
-    @apply h-10 rounded-none border border-border bg-transparent px-3 py-2 text-sm font-mono text-foreground outline-none ring-0 transition-colors focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary;
+    @apply h-8 border border-border bg-transparent px-2.5 text-[0.8125rem] font-mono text-foreground outline-none ring-0 transition-colors focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary;
+    border-radius: var(--radius);
   }
 
   .logs-filters__actions {
-    @apply col-span-full flex flex-wrap gap-3 pt-1;
+    @apply col-span-full flex flex-wrap gap-2 pt-1;
   }
 
   .logs-results__header {
-    @apply mb-5 flex flex-col gap-4 md:flex-row md:items-end md:justify-between;
+    @apply mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between;
   }
 
   .logs-results__hint {
-    @apply mt-2 text-sm leading-6 text-muted-foreground;
+    @apply mt-1.5 text-[0.8125rem] leading-5 text-muted-foreground;
   }
 
   .logs-pagination {
@@ -306,93 +314,95 @@
   }
 
   .logs-table {
-    @apply flex flex-col gap-3;
+    @apply flex flex-col gap-2;
   }
 
   .logs-table__head,
   .logs-table__row {
-    @apply grid gap-4;
+    @apply grid gap-3;
     grid-template-columns: minmax(160px, 1.15fr) minmax(180px, 1.1fr) minmax(120px, 0.8fr) minmax(160px, 1fr) minmax(140px, 0.85fr) minmax(130px, 0.82fr);
   }
 
   .logs-table__head {
-    @apply px-4;
+    @apply px-3;
   }
 
   .logs-table__row {
-    @apply cursor-pointer border-b border-border bg-transparent px-4 py-5 transition-colors duration-200 ease-out hover:bg-muted/50;
+    @apply cursor-pointer border-b border-border bg-transparent px-3 py-3 transition-colors duration-200 ease-out hover:bg-muted/50;
   }
 
   .logs-table__row > div {
-    @apply flex min-w-0 flex-col gap-2;
+    @apply flex min-w-0 flex-col gap-1.5;
   }
 
   .logs-table__row strong {
-    @apply truncate text-sm font-semibold text-foreground;
+    @apply truncate text-[0.8125rem] font-semibold text-foreground;
   }
 
   .logs-table__row small {
-    @apply text-xs leading-5 text-muted-foreground;
+    @apply text-[0.6875rem] leading-4 text-muted-foreground;
   }
 
   .log-drawer-backdrop {
-    @apply fixed inset-0 z-40 flex justify-end bg-black/20 p-4;
+    @apply fixed inset-0 z-40 flex justify-end bg-black/20 p-3;
   }
 
   .log-drawer {
-    @apply h-full w-full max-w-3xl overflow-y-auto border-l border-border bg-background p-8 shadow-2xl;
+    @apply h-full w-full max-w-3xl overflow-y-auto border-l border-border bg-background p-5 shadow-2xl;
   }
 
   .log-drawer__header {
-    @apply mb-5 flex flex-col gap-4 md:flex-row md:items-start md:justify-between;
+    @apply mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between;
   }
 
   .log-drawer__header h3 {
-    @apply m-0 text-2xl font-semibold tracking-tight;
+    @apply m-0 text-lg font-semibold tracking-tight;
   }
 
   .log-drawer__subtitle {
-    @apply mt-2 text-sm leading-6 text-muted-foreground;
+    @apply mt-1.5 text-[0.8125rem] leading-5 text-muted-foreground;
   }
 
   .log-drawer__grid {
-    @apply grid gap-4 md:grid-cols-2;
+    @apply grid gap-3 md:grid-cols-2;
   }
 
   .log-drawer__section {
-    @apply border border-border bg-transparent p-6;
+    @apply border border-border bg-transparent p-4;
+    border-radius: var(--radius);
   }
 
   .log-drawer__section h4 {
-    @apply mb-4 text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply mb-3 text-[0.6875rem] uppercase tracking-widest font-mono text-muted-foreground;
   }
 
   .log-drawer__meta {
-    @apply flex flex-col gap-1 border-t border-border py-3 first:border-t-0 first:pt-0;
+    @apply flex flex-col gap-1 border-t border-border py-2 first:border-t-0 first:pt-0;
   }
 
   .log-drawer__meta span {
-    @apply text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground;
+    @apply text-[0.6875rem] uppercase tracking-widest font-mono text-muted-foreground;
   }
 
   .log-drawer__meta strong {
-    @apply break-words text-sm leading-6 text-foreground;
+    @apply break-words text-[0.8125rem] leading-5 text-foreground;
   }
 
   .mini-list {
-    @apply flex flex-col gap-3;
+    @apply flex flex-col gap-2;
   }
 
   .mini-list__item {
-    @apply grid gap-4 border border-border bg-transparent p-5 md:grid-cols-[minmax(0,1fr)_auto];
+    @apply grid gap-3 border border-border bg-transparent p-3.5 md:grid-cols-[minmax(0,1fr)_auto];
+    border-radius: var(--radius);
   }
 
   .mini-list__item strong {
-    @apply block text-sm font-semibold text-foreground;
+    @apply block text-[0.8125rem] font-semibold text-foreground;
   }
 
   .mini-list__item span {
-    @apply mt-1 block text-sm leading-6 text-muted-foreground;
+    @apply mt-0.5 block text-[0.8125rem] leading-5 text-muted-foreground;
   }
 
   .mini-list__meta {
@@ -412,39 +422,41 @@
   }
 
   .overview-tile {
-    @apply flex flex-col gap-3 border border-border bg-background p-6 transition-colors duration-200;
+    @apply flex flex-col gap-2.5 border border-border bg-background p-4 transition-colors duration-200;
+    border-radius: var(--radius);
   }
 
   .overview-tile__head {
-    @apply flex items-center justify-between gap-3;
+    @apply flex items-center justify-between gap-2.5;
   }
 
   .overview-tile__icon {
-    @apply flex size-10 items-center justify-center bg-muted text-muted-foreground;
+    @apply flex size-8 items-center justify-center bg-muted text-muted-foreground;
+    border-radius: var(--radius);
   }
 
   .overview-tile__value {
-    @apply text-3xl font-semibold tracking-normal text-foreground mt-2;
+    @apply text-xl font-semibold tracking-normal text-foreground mt-1.5;
   }
 
   .overview-tile__hint {
-    @apply text-xs uppercase tracking-[0.06em] text-muted-foreground mt-1;
+    @apply text-[0.6875rem] uppercase tracking-[0.06em] text-muted-foreground mt-1;
   }
 
   .sidebar-shell {
-    @apply flex flex-col gap-4 bg-background p-4;
+    @apply flex flex-col gap-3 bg-background p-3;
   }
 
   .sidebar-shell__header {
-    @apply flex items-center gap-3;
+    @apply flex items-center gap-2.5;
   }
 
   .sidebar-shell__title {
-    @apply text-sm font-semibold uppercase tracking-[0.08em] text-foreground;
+    @apply text-[0.8125rem] font-semibold uppercase tracking-[0.08em] text-foreground;
   }
 
   .sidebar-shell__subtitle {
-    @apply text-xs text-muted-foreground;
+    @apply text-[0.6875rem] text-muted-foreground;
   }
 
   .sidebar-shell__nav {
@@ -452,7 +464,8 @@
   }
 
   .sidebar-nav-item {
-    @apply flex items-center gap-3 rounded-none border border-transparent px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground;
+    @apply flex items-center gap-2.5 border border-transparent px-2.5 py-1.5 text-[0.8125rem] text-muted-foreground transition-colors hover:border-border hover:bg-muted/60 hover:text-foreground;
+    border-radius: var(--radius);
   }
 
   .sidebar-nav-item svg {
@@ -464,11 +477,11 @@
   }
 
   .sidebar-nav-item strong {
-    @apply text-sm font-medium;
+    @apply text-[0.8125rem] font-medium;
   }
 
   .sidebar-nav-item small {
-    @apply text-xs uppercase tracking-[0.08em] text-muted-foreground;
+    @apply text-[0.625rem] uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .sidebar-nav-item.is-active {
@@ -480,27 +493,28 @@
   }
 
   .page-top {
-    @apply border border-border bg-background p-6;
+    @apply border border-border bg-background p-4;
+    border-radius: var(--radius);
   }
 
   .page-top__title {
-    @apply text-2xl font-semibold tracking-normal text-foreground;
+    @apply text-base font-semibold tracking-normal text-foreground;
   }
 
   .page-top__alert {
-    @apply mt-4;
+    @apply mt-3;
   }
 
   .page-header-row {
-    @apply flex flex-col gap-3 md:flex-row md:items-end md:justify-between;
+    @apply flex flex-col gap-2.5 md:flex-row md:items-end md:justify-between;
   }
 
   .page-section-title {
-    @apply text-2xl font-semibold tracking-normal text-foreground;
+    @apply text-base font-semibold tracking-normal text-foreground;
   }
 
   .page-section-desc {
-    @apply mt-1 text-sm leading-6 text-muted-foreground;
+    @apply mt-1 text-[0.8125rem] leading-5 text-muted-foreground;
   }
 
   .page-header-actions {
@@ -508,72 +522,77 @@
   }
 
   .overview-health-tile {
-    @apply border border-border bg-transparent p-5;
+    @apply border border-border bg-transparent p-3.5;
+    border-radius: var(--radius);
   }
 
   .overview-health-tile span {
-    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
+    @apply text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .overview-health-tile strong {
-    @apply mt-2 block text-lg font-semibold text-foreground;
+    @apply mt-1.5 block text-sm font-semibold text-foreground;
   }
 
   .quick-start-row {
-    @apply border border-border bg-transparent p-5;
+    @apply border border-border bg-transparent p-3.5;
+    border-radius: var(--radius);
   }
 
   .quick-start-row span {
-    @apply text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
+    @apply text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
   .quick-start-row code,
   .quick-start-row strong {
-    @apply mt-2 block text-sm font-medium text-foreground;
+    @apply mt-1.5 block text-[0.8125rem] font-medium text-foreground;
   }
 
   .provider-section {
-    @apply border border-border bg-background p-8;
+    @apply border border-border bg-background p-5;
+    border-radius: var(--radius);
   }
 
   .provider-section__header {
-    @apply mb-5 grid gap-3 xl:grid-cols-[220px_minmax(0,1fr)];
+    @apply mb-4 grid gap-2.5 xl:grid-cols-[220px_minmax(0,1fr)];
   }
 
   .provider-section__title {
-    @apply text-xl font-semibold tracking-normal text-foreground;
+    @apply text-base font-semibold tracking-normal text-foreground;
   }
 
   .provider-section__description {
-    @apply max-w-3xl text-sm leading-6 text-muted-foreground;
+    @apply max-w-3xl text-[0.8125rem] leading-5 text-muted-foreground;
   }
 
   .provider-form-surface {
-    @apply border border-border bg-background p-6;
+    @apply border border-border bg-background p-4;
+    border-radius: var(--radius);
   }
 
   .provider-stack {
-    @apply flex flex-col gap-3;
+    @apply flex flex-col gap-2;
   }
 
   .provider-card-head {
-    @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto];
+    @apply grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto];
   }
 
   .provider-card-metrics {
-    @apply flex flex-wrap items-start gap-2 xl:justify-end;
+    @apply flex flex-wrap items-start gap-1.5 xl:justify-end;
   }
 
   .provider-entity-card {
-    @apply border border-border bg-background p-6;
+    @apply border border-border bg-background p-4;
+    border-radius: var(--radius);
   }
 
   .provider-entity-card__head {
-    @apply flex flex-col gap-3 md:flex-row md:items-start md:justify-between;
+    @apply flex flex-col gap-2.5 md:flex-row md:items-start md:justify-between;
   }
 
   .provider-entity-card__title {
-    @apply text-lg font-semibold tracking-normal text-foreground;
+    @apply text-sm font-semibold tracking-normal text-foreground;
   }
 }
 

@@ -6,27 +6,27 @@ const interactiveTransition = 'color 150ms ease, background-color 150ms ease, bo
 
 const buttonBase: CSSProperties = {
   alignItems: 'center',
-  borderRadius: 0,
+  borderRadius: 'var(--radius)',
   boxShadow: 'none',
   display: 'inline-flex',
   fontFamily: 'var(--font-ui)',
-  fontSize: '0.75rem',
-  fontWeight: 600,
-  gap: '0.5rem',
-  height: '2.5rem',
+  fontSize: '0.8125rem',
+  fontWeight: 500,
+  gap: '0.375rem',
+  height: '2rem',
   justifyContent: 'center',
-  letterSpacing: '0.08em',
-  lineHeight: '1rem',
+  letterSpacing: '0.01em',
+  lineHeight: 1.25,
   minWidth: 0,
-  padding: '0.5rem 1.5rem',
-  textTransform: 'uppercase',
+  padding: '0 0.875rem',
+  textTransform: 'none',
   transition: interactiveTransition,
   whiteSpace: 'nowrap',
 };
 
 export const theme = createTheme({
   shape: {
-    borderRadius: 0,
+    borderRadius: 4,
   },
   typography: {
     fontFamily: 'var(--font-ui)',
@@ -53,9 +53,9 @@ export const theme = createTheme({
           ...buttonBase,
           '& svg': {
             flexShrink: 0,
-            height: '1rem',
+            height: '0.875rem',
             pointerEvents: 'none',
-            width: '1rem',
+            width: '0.875rem',
           },
           '&.Mui-focusVisible': {
             boxShadow: '0 0 0 1px var(--ring)',
@@ -63,14 +63,15 @@ export const theme = createTheme({
           },
         },
         sizeSmall: {
-          fontSize: '0.72rem',
-          height: '2rem',
-          lineHeight: 1.5,
-          padding: '0 1rem',
+          fontSize: '0.75rem',
+          height: '1.75rem',
+          lineHeight: 1.25,
+          padding: '0 0.625rem',
         },
         sizeLarge: {
-          height: '3rem',
-          padding: '0 2rem',
+          fontSize: '0.875rem',
+          height: '2.25rem',
+          padding: '0 1.25rem',
         },
       },
       variants: [
@@ -83,6 +84,11 @@ export const theme = createTheme({
               backgroundColor: 'color-mix(in oklab, var(--foreground) 92%, transparent)',
               boxShadow: 'none',
             },
+            '&.Mui-disabled': {
+              backgroundColor: 'var(--foreground)',
+              color: 'var(--background)',
+              opacity: 0.45,
+            },
           },
         },
         {
@@ -93,6 +99,11 @@ export const theme = createTheme({
             '&:hover': {
               backgroundColor: 'color-mix(in oklab, var(--secondary) 80%, transparent)',
               boxShadow: 'none',
+            },
+            '&.Mui-disabled': {
+              backgroundColor: 'var(--secondary)',
+              color: 'var(--secondary-foreground)',
+              opacity: 0.45,
             },
           },
         },
@@ -106,6 +117,12 @@ export const theme = createTheme({
               backgroundColor: 'var(--accent)',
               color: 'var(--accent-foreground)',
             },
+            '&.Mui-disabled': {
+              backgroundColor: 'var(--background)',
+              border: '1px solid var(--border)',
+              color: 'var(--foreground)',
+              opacity: 0.45,
+            },
           },
         },
         {
@@ -117,6 +134,11 @@ export const theme = createTheme({
               backgroundColor: 'var(--accent)',
               color: 'var(--accent-foreground)',
             },
+            '&.Mui-disabled': {
+              backgroundColor: 'transparent',
+              color: 'var(--foreground)',
+              opacity: 0.45,
+            },
           },
         },
         {
@@ -126,6 +148,11 @@ export const theme = createTheme({
             color: 'var(--destructive-foreground)',
             '&:hover': {
               backgroundColor: 'color-mix(in oklab, var(--destructive) 90%, transparent)',
+            },
+            '&.Mui-disabled': {
+              backgroundColor: 'var(--destructive)',
+              color: 'var(--destructive-foreground)',
+              opacity: 0.45,
             },
           },
         },
@@ -139,31 +166,38 @@ export const theme = createTheme({
               backgroundColor: 'color-mix(in oklab, var(--muted) 90%, transparent)',
               color: 'var(--foreground)',
             },
+            '&.Mui-disabled': {
+              backgroundColor: 'color-mix(in oklab, var(--muted) 70%, transparent)',
+              border: '1px solid var(--border)',
+              color: 'var(--muted-foreground)',
+              opacity: 0.45,
+            },
           },
         },
         {
           props: { size: 'icon' },
           style: {
-            height: '2.5rem',
-            minWidth: '2.5rem',
+            height: '2rem',
+            minWidth: '2rem',
             padding: 0,
-            width: '2.5rem',
+            width: '2rem',
           },
         },
         {
           props: { size: 'sm' },
           style: {
-            fontSize: '0.72rem',
-            height: '2rem',
-            lineHeight: 1.5,
-            padding: '0 1rem',
+            fontSize: '0.75rem',
+            height: '1.75rem',
+            lineHeight: 1.25,
+            padding: '0 0.625rem',
           },
         },
         {
           props: { size: 'lg' },
           style: {
-            height: '3rem',
-            padding: '0 2rem',
+            fontSize: '0.875rem',
+            height: '2.25rem',
+            padding: '0 1.25rem',
           },
         },
       ],
@@ -183,12 +217,13 @@ export const theme = createTheme({
     MuiCard: {
       defaultProps: {
         elevation: 0,
-        square: true,
+        square: false,
       },
       styleOverrides: {
         root: {
           backgroundColor: 'var(--card)',
           border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
           boxShadow: 'none',
         },
       },
@@ -196,10 +231,10 @@ export const theme = createTheme({
     MuiCardContent: {
       styleOverrides: {
         root: {
-          padding: '1.5rem',
+          padding: '1rem',
           paddingTop: 0,
           '&:last-child': {
-            paddingBottom: '1.5rem',
+            paddingBottom: '1rem',
           },
         },
       },
@@ -209,7 +244,7 @@ export const theme = createTheme({
         root: {
           display: 'flex',
           flexDirection: 'column',
-          gap: '0.75rem',
+          gap: '0.5rem',
         },
       },
     },
@@ -218,7 +253,7 @@ export const theme = createTheme({
         root: {
           color: 'var(--foreground)',
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.75rem',
+          fontSize: '0.6875rem',
           fontWeight: 600,
           letterSpacing: '0.08em',
           lineHeight: 1.5,
@@ -234,8 +269,8 @@ export const theme = createTheme({
         root: {
           color: 'var(--muted-foreground)',
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.75rem',
-          lineHeight: '1.25rem',
+          fontSize: '0.6875rem',
+          lineHeight: '1rem',
           margin: 0,
           opacity: 0.8,
         },
@@ -246,13 +281,13 @@ export const theme = createTheme({
         root: {
           backgroundColor: 'transparent',
           border: '1px solid var(--border)',
-          borderRadius: 0,
+          borderRadius: 'var(--radius)',
           boxSizing: 'border-box',
           color: 'var(--foreground)',
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.875rem',
-          height: '2.5rem',
-          padding: '0 0.75rem',
+          fontSize: '0.8125rem',
+          height: '2rem',
+          padding: '0 0.625rem',
           transition: interactiveTransition,
           width: '100%',
           '&.Mui-focused': {
@@ -269,8 +304,8 @@ export const theme = createTheme({
           },
           '&.MuiInputBase-multiline': {
             height: 'auto',
-            minHeight: '5rem',
-            paddingBlock: '0.5rem',
+            minHeight: '4rem',
+            paddingBlock: '0.4375rem',
           },
         },
         input: {
@@ -334,19 +369,19 @@ export const theme = createTheme({
           height: '100%',
           lineHeight: 1.5,
           minHeight: '0 !important',
-          padding: '0 2.5rem 0 0 !important',
+          padding: '0 1.75rem 0 0 !important',
           '&:focus': {
             backgroundColor: 'transparent',
           },
         },
         icon: {
           color: 'var(--muted-foreground)',
-          height: '1rem',
+          height: '0.875rem',
           pointerEvents: 'none',
-          right: '0.75rem',
+          right: '0.5rem',
           strokeWidth: 1.75,
           transition: 'color 150ms ease, transform 180ms ease-out',
-          width: '1rem',
+          width: '0.875rem',
           '@media (prefers-reduced-motion: reduce)': {
             transition: 'none',
           },
@@ -363,11 +398,11 @@ export const theme = createTheme({
           backgroundColor: 'var(--popover)',
           backgroundImage: 'none',
           border: '1px solid var(--border)',
-          borderRadius: 0,
-          boxShadow: '0 18px 38px -24px rgb(0 0 0 / 0.42), 0 8px 18px -14px rgb(0 0 0 / 0.28)',
+          borderRadius: 'var(--radius)',
+          boxShadow: '0 12px 28px -20px rgb(0 0 0 / 0.38), 0 6px 14px -12px rgb(0 0 0 / 0.24)',
           color: 'var(--popover-foreground)',
-          marginTop: '0.375rem',
-          maxHeight: 'min(22rem, calc(100dvh - 2rem))',
+          marginTop: '0.25rem',
+          maxHeight: 'min(20rem, calc(100dvh - 2rem))',
           maxWidth: 'calc(100vw - 1.5rem)',
           scrollbarColor: 'color-mix(in oklab, var(--muted-foreground) 35%, transparent) transparent',
           scrollbarWidth: 'thin',
@@ -377,8 +412,8 @@ export const theme = createTheme({
         },
         list: {
           display: 'grid',
-          gap: '0.125rem',
-          padding: '0.375rem',
+          gap: '0.0625rem',
+          padding: '0.25rem',
         },
       },
     },
@@ -389,16 +424,17 @@ export const theme = createTheme({
       styleOverrides: {
         root: {
           borderLeft: '2px solid transparent',
+          borderRadius: 'calc(var(--radius) * 0.6)',
           color: 'var(--popover-foreground)',
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.875rem',
+          fontSize: '0.8125rem',
           fontWeight: 500,
-          gap: '0.625rem',
+          gap: '0.5rem',
           letterSpacing: '0.01em',
-          lineHeight: 1.5,
-          minHeight: '2.75rem !important',
+          lineHeight: 1.4,
+          minHeight: '2rem !important',
           overflowWrap: 'anywhere',
-          padding: '0.625rem 0.875rem',
+          padding: '0.375rem 0.625rem',
           transition: interactiveTransition,
           whiteSpace: 'normal',
           '&:hover': {
@@ -464,21 +500,21 @@ export const theme = createTheme({
         root: {
           backgroundColor: 'transparent',
           borderColor: 'var(--border)',
-          borderRadius: 0,
+          borderRadius: 'calc(var(--radius) * 0.6)',
           color: 'var(--muted-foreground)',
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.72rem',
+          fontSize: '0.6875rem',
           fontWeight: 500,
           height: 'auto',
           letterSpacing: '0.08em',
-          minHeight: '1.625rem',
+          minHeight: '1.375rem',
           textTransform: 'uppercase',
         },
         label: {
           alignItems: 'center',
           display: 'inline-flex',
           gap: '0.25rem',
-          padding: '0.25rem 0.75rem',
+          padding: '0.125rem 0.5rem',
         },
       },
       variants: [
@@ -525,13 +561,13 @@ export const theme = createTheme({
         root: {
           backgroundColor: 'transparent',
           borderColor: 'var(--border)',
-          borderRadius: 0,
+          borderRadius: 'var(--radius)',
           boxShadow: 'none',
           color: 'var(--foreground)',
           display: 'block',
           fontSize: 'inherit',
           lineHeight: 'inherit',
-          padding: '1rem 1.25rem',
+          padding: '0.625rem 0.875rem',
         },
         message: {
           padding: 0,
@@ -543,10 +579,10 @@ export const theme = createTheme({
       styleOverrides: {
         root: {
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.875rem',
-          fontWeight: 500,
-          lineHeight: 1,
-          margin: '0 0 0.5rem',
+          fontSize: '0.8125rem',
+          fontWeight: 600,
+          lineHeight: 1.4,
+          margin: '0 0 0.25rem',
         },
       },
     },
@@ -562,6 +598,7 @@ export const theme = createTheme({
         root: {
           backgroundColor: 'var(--background)',
           border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
           overflowX: 'auto',
           width: '100%',
         },
@@ -572,8 +609,8 @@ export const theme = createTheme({
         root: {
           color: 'inherit',
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.875rem',
-          lineHeight: '1.25rem',
+          fontSize: '0.8125rem',
+          lineHeight: '1.125rem',
         },
       },
     },
@@ -612,19 +649,19 @@ export const theme = createTheme({
           borderBottom: 0,
           color: 'inherit',
           fontFamily: 'var(--font-ui)',
-          fontSize: '0.875rem',
-          lineHeight: '1.25rem',
-          padding: '1rem 1.25rem',
+          fontSize: '0.8125rem',
+          lineHeight: '1.125rem',
+          padding: '0.625rem 0.875rem',
           verticalAlign: 'middle',
         },
         head: {
           backgroundColor: 'color-mix(in oklab, var(--muted) 20%, transparent)',
           color: 'var(--muted-foreground)',
-          fontSize: '0.72rem',
+          fontSize: '0.6875rem',
           fontWeight: 600,
-          height: '3rem',
+          height: '2.125rem',
           letterSpacing: '0.08em',
-          padding: '0 1.25rem',
+          padding: '0 0.875rem',
           textTransform: 'uppercase',
         },
       },
@@ -637,6 +674,122 @@ export const theme = createTheme({
           borderRadius: 0,
           boxShadow: 'none',
           color: 'var(--foreground)',
+        },
+      },
+    },
+    MuiDialog: {
+      defaultProps: {
+        transitionDuration: {
+          enter: 160,
+          exit: 110,
+        },
+      },
+      styleOverrides: {
+        paper: {
+          backgroundColor: 'var(--card)',
+          backgroundImage: 'none',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+          boxShadow: '0 18px 44px -28px rgb(0 0 0 / 0.45), 0 8px 20px -16px rgb(0 0 0 / 0.3)',
+          color: 'var(--foreground)',
+        },
+      },
+    },
+    MuiDialogTitle: {
+      styleOverrides: {
+        root: {
+          borderBottom: '1px solid color-mix(in oklab, var(--border) 60%, transparent)',
+          fontFamily: 'var(--font-ui)',
+          fontSize: '1rem',
+          fontWeight: 600,
+          letterSpacing: 0,
+          lineHeight: 1.4,
+          padding: '0.875rem 1rem',
+        },
+      },
+    },
+    MuiDialogContent: {
+      styleOverrides: {
+        root: {
+          fontSize: '0.8125rem',
+          padding: '1rem',
+        },
+      },
+    },
+    MuiDialogActions: {
+      styleOverrides: {
+        root: {
+          borderTop: '1px solid color-mix(in oklab, var(--border) 60%, transparent)',
+          gap: '0.5rem',
+          padding: '0.75rem 1rem',
+          '& > :not(style) ~ :not(style)': {
+            marginLeft: 0,
+          },
+        },
+      },
+    },
+    MuiToggleButtonGroup: {
+      styleOverrides: {
+        root: {
+          gap: '0.25rem',
+        },
+        grouped: {
+          border: '1px solid var(--border) !important',
+          borderRadius: 'var(--radius) !important',
+        },
+      },
+    },
+    MuiToggleButton: {
+      defaultProps: {
+        disableRipple: true,
+      },
+      styleOverrides: {
+        root: {
+          backgroundColor: 'var(--background)',
+          color: 'var(--muted-foreground)',
+          fontFamily: 'var(--font-ui)',
+          fontSize: '0.8125rem',
+          fontWeight: 500,
+          letterSpacing: '0.01em',
+          lineHeight: 1.25,
+          minHeight: '2rem',
+          padding: '0 0.75rem',
+          textTransform: 'none',
+          transition: interactiveTransition,
+          '&:hover': {
+            backgroundColor: 'var(--accent)',
+            color: 'var(--accent-foreground)',
+          },
+          '&.Mui-selected': {
+            backgroundColor: 'var(--foreground)',
+            borderColor: 'var(--foreground) !important',
+            color: 'var(--background)',
+          },
+          '&.Mui-selected:hover': {
+            backgroundColor: 'color-mix(in oklab, var(--foreground) 92%, transparent)',
+            color: 'var(--background)',
+          },
+          '&.Mui-disabled': {
+            color: 'var(--muted-foreground)',
+            opacity: 0.45,
+          },
+          '&.Mui-selected.Mui-disabled': {
+            backgroundColor: 'var(--foreground)',
+            color: 'var(--background)',
+            opacity: 0.45,
+          },
+        },
+      },
+    },
+    MuiLinearProgress: {
+      styleOverrides: {
+        root: {
+          backgroundColor: 'color-mix(in oklab, var(--muted) 70%, transparent)',
+          borderRadius: 'var(--radius)',
+          height: '0.25rem',
+        },
+        bar: {
+          backgroundColor: 'var(--primary)',
         },
       },
     },

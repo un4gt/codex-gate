@@ -942,7 +942,7 @@ export const dict: Record<string, string> = {
   '在路由转换与鉴权完成后，按上游覆写请求 Header 和 JSON Body。具体协议规则会覆盖 all；模板 {{request_id}} 在同一次请求中保持一致。': '在路由转换与鉴权完成后，按上游覆写请求 Header 和 JSON Body。具体协议规则会覆盖 all；模板 {{request_id}} 在同一次请求中保持一致。',
   '应用 Codex 客户端兼容预设': '应用 Codex 客户端兼容预设',
   '清空规则': '清空规则',
-  'Codex 预设会补充官方 CLI 身份、x-codex 指纹和 Responses client_metadata；已有同名规则会被替换，其他规则会保留。预设不会改写 instructions。鉴权、代理来源、WebSocket 握手、连接控制以及 model、stream、type 等路由字段禁止覆写。': 'Codex 预设会补充官方 CLI 身份、x-codex 指纹和 Responses client_metadata；已有同名规则会被替换，其他规则会保留。预设不会改写 instructions。鉴权、代理来源、WebSocket 握手、连接控制以及 model、stream、type 等路由字段禁止覆写。',
+  '一键补齐 Codex 客户端所需的身份标识与元数据；同名规则会被覆盖，其余保留。': '一键补齐 Codex 客户端所需的身份标识与元数据；同名规则会被覆盖，其余保留。',
   'Header 规则': 'Header 规则',
   '设置或移除发送到该上游的请求头。Header 名称不区分大小写。': '设置或移除发送到该上游的请求头。Header 名称不区分大小写。',
   '添加 Header': '添加 Header',

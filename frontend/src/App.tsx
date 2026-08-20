@@ -314,7 +314,7 @@ function SortableNavigationItem(props: {
     transition: props.reducedMotion ? null : NAVIGATION_SORT_TRANSITION
   });
   const stateClass = isDragSource ? 'border-primary/45 bg-primary/10 text-primary opacity-[0.32]' : isDropTarget ? 'border-primary/45 bg-primary/10 text-primary' : props.active ? 'border-primary/20 bg-primary/[0.06] font-semibold text-primary' : 'border-transparent border-b-border/40 text-muted-foreground hover:border-border/70 hover:bg-muted/35 hover:text-foreground';
-  return <Box ref={ref} component={Link} to={props.item.to} aria-current={props.active ? 'page' : undefined} aria-describedby={NAVIGATION_SORT_INSTRUCTIONS_ID} aria-keyshortcuts="Space ArrowUp ArrowDown" className={`nav-sortable-item group relative flex min-h-[3.25rem] w-full cursor-grab select-none items-center gap-2 border px-2 py-2 text-sm font-medium outline-none transition-[background-color,border-color,color,box-shadow,opacity] duration-150 ease-out active:cursor-grabbing motion-reduce:transition-none ${stateClass} ${isDropping ? 'pointer-events-none' : ''}`} data-nav-key={props.item.key} data-nav-sortable="true" data-nav-dragging={isDragSource ? 'true' : undefined} data-nav-drop-target={isDropTarget ? 'true' : undefined} sx={{
+  return <Box ref={ref} component={Link} to={props.item.to} aria-current={props.active ? 'page' : undefined} aria-describedby={NAVIGATION_SORT_INSTRUCTIONS_ID} aria-keyshortcuts="Space ArrowUp ArrowDown" className={`nav-sortable-item group relative flex min-h-[2.5rem] w-full cursor-grab select-none items-center gap-2 rounded border px-2 py-1.5 text-[0.8125rem] font-medium outline-none transition-[background-color,border-color,color,box-shadow,opacity] duration-150 ease-out active:cursor-grabbing motion-reduce:transition-none ${stateClass} ${isDropping ? 'pointer-events-none' : ''}`} data-nav-key={props.item.key} data-nav-sortable="true" data-nav-dragging={isDragSource ? 'true' : undefined} data-nav-drop-target={isDropTarget ? 'true' : undefined} sx={{
     WebkitTapHighlightColor: 'transparent',
     '&:focus-visible': {
       outline: '2px solid var(--primary)',
@@ -329,8 +329,8 @@ function NavigationDragPreview(props: {
   index: number;
   active: boolean;
 }) {
-  return <Box className="flex min-h-[3.25rem] w-full items-center gap-2 border border-primary/50 bg-popover px-2 py-2 text-sm font-semibold text-primary" aria-hidden="true" sx={{
-    boxShadow: '0 18px 38px -24px rgb(0 0 0 / 0.42), 0 8px 18px -14px rgb(0 0 0 / 0.28)',
+  return <Box className="flex min-h-[2.5rem] w-full items-center gap-2 rounded border border-primary/50 bg-popover px-2 py-1.5 text-[0.8125rem] font-semibold text-primary" aria-hidden="true" sx={{
+    boxShadow: '0 12px 28px -20px rgb(0 0 0 / 0.38), 0 6px 14px -12px rgb(0 0 0 / 0.24)',
     transform: 'scale(1.015)'
   }}>
       <NavigationItemContent item={props.item} index={props.index} active={props.active} overlay />
@@ -502,34 +502,34 @@ function ConnectionGate(props: {
     if (props.issue === 'apiBase') apiBaseInputRef.current?.focus();
     if (props.issue === 'adminToken') adminTokenInputRef.current?.focus();
   }, [props.issue]);
-  return <Box className="min-h-screen bg-background px-4 py-10 sm:px-6 lg:px-8">
-      <Box className="mx-auto flex max-w-xl flex-col gap-10 mt-12">
+  return <Box className="min-h-screen bg-background px-4 py-8 sm:px-6 lg:px-8">
+      <Box className="mx-auto flex max-w-md flex-col gap-6 mt-8">
         <Box className="flex justify-end">
           <LocaleSwitch />
         </Box>
-        <Box className="flex flex-col gap-4 text-center items-center">
-          <Box className="flex size-12 items-center justify-center bg-foreground text-background">
-            <SquareTerminal className="size-6" />
+        <Box className="flex flex-col gap-3 text-center items-center">
+          <Box className="flex size-10 items-center justify-center rounded bg-foreground text-background">
+            <SquareTerminal className="size-5" />
           </Box>
           <Box>
-            <Box className="text-4xl font-medium tracking-tight text-foreground mt-6" component="h1">LITTLE GATE</Box>
-            <Box className="mt-2 text-sm font-medium text-muted-foreground tracking-[0.08em] uppercase" component="p">{t('ADMIN CONSOLE INITIALIZATION')}</Box>
+            <Box className="text-2xl font-semibold tracking-tight text-foreground mt-3" component="h1">LITTLE GATE</Box>
+            <Box className="mt-1.5 text-[0.6875rem] font-medium text-muted-foreground tracking-[0.08em] uppercase" component="p">{t('ADMIN CONSOLE INITIALIZATION')}</Box>
           </Box>
         </Box>
 
-        <Card className="rounded-none border border-border bg-background shadow-none">
-          <Box className="flex flex-col gap-3 p-6 pb-5">
-            <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("登录控制台")}</Typography>
-            <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t("输入管理员口令以验证身份。")}</Typography>
+        <Card className="rounded border border-border bg-background shadow-none">
+          <Box className="flex flex-col gap-2 p-4 pb-3">
+            <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("登录控制台")}</Typography>
+            <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t("输入管理员口令以验证身份。")}</Typography>
           </Box>
           <CardContent>
-            <Box className="flex flex-col gap-6" aria-busy={props.status === 'loading'} onSubmit={event => {
+            <Box className="flex flex-col gap-4" aria-busy={props.status === 'loading'} onSubmit={event => {
             event.preventDefault();
             void props.onRefresh();
           }} component="form">
-              <Box className="grid gap-6">
-                <Box className="flex flex-col gap-3" component="label">
-                  <Box className="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('服务地址')}</Box>
+              <Box className="grid gap-4">
+                <Box className="flex flex-col gap-2" component="label">
+                  <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('服务地址')}</Box>
                   <InputBase
                     value={props.settings.apiBase}
                     error={props.issue === 'apiBase'}
@@ -543,11 +543,11 @@ function ConnectionGate(props: {
                     spellCheck={false}
                     onChange={event => props.onApiBaseChange(event.target.value)}
                     placeholder={t("http://127.0.0.1:8080")}
-                    className="rounded-none font-mono text-sm"
+                    className="font-mono text-[0.8125rem]"
                   />
                 </Box>
-                <Box className="flex flex-col gap-3" component="label">
-                  <Box className="text-[0.75rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('管理员口令')}</Box>
+                <Box className="flex flex-col gap-2" component="label">
+                  <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('管理员口令')}</Box>
                   <InputBase
                     type="password"
                     value={props.settings.adminToken}
@@ -562,7 +562,7 @@ function ConnectionGate(props: {
                     spellCheck={false}
                     onChange={event => props.onAdminTokenChange(event.target.value)}
                     placeholder={t("输入管理员口令")}
-                    className="rounded-none font-mono text-sm"
+                    className="font-mono text-[0.8125rem]"
                   />
                 </Box>
               </Box>
@@ -570,7 +570,7 @@ function ConnectionGate(props: {
               <Alert
                 severity={props.issue ? 'error' : 'info'}
                 role={props.issue ? 'alert' : 'status'}
-                className="rounded-none border-border/40 bg-muted/20"
+                className="border-border/40 bg-muted/20"
                 sx={props.issue ? {
                   backgroundColor: 'color-mix(in oklab, var(--destructive) 5%, transparent)',
                   borderColor: 'color-mix(in oklab, var(--destructive) 45%, var(--border))',
@@ -716,72 +716,72 @@ function OverviewPage(props: {
       hint: '等待数据'
     }];
   };
-  return <Box className="flex flex-col gap-6">
-      <PageHeader title="总览" description="查看请求、用量与响应表现。" actions={<Box className="flex w-full flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <Box className="flex w-fit flex-wrap rounded-none border border-border bg-background p-1">
-              {OVERVIEW_PERIODS.map(item => <Button key={item.value} type="button" size="sm" variant={period === item.value ? 'default' : 'ghost'} className="h-8 rounded-none px-3 text-[0.72rem]" onClick={() => setPeriod(item.value)}>
+  return <Box className="flex flex-col gap-4">
+      <PageHeader title="总览" description="查看请求、用量与响应表现。" actions={<Box className="flex w-full flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+            <Box className="flex w-fit flex-wrap rounded border border-border bg-background p-0.5">
+              {OVERVIEW_PERIODS.map(item => <Button key={item.value} type="button" size="sm" variant={period === item.value ? 'default' : 'ghost'} className="h-7 rounded px-2.5 text-[0.6875rem]" onClick={() => setPeriod(item.value)}>
                     {t(item.label)}
                   </Button>)}
             </Box>
             <Box className="flex flex-wrap items-center gap-2">
-              <Button type="button" variant="outline" size="sm" className="rounded-none shrink-0" onClick={() => void copyText(props.data.settings.apiBase, '地址已复制。', props.data.onMessage)}>
-                <Copy className="mr-2 size-3" />
+              <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => void copyText(props.data.settings.apiBase, '地址已复制。', props.data.onMessage)}>
+                <Copy className="mr-1.5 size-3" />
                 {t('COPY URL')}
               </Button>
-              <Button component={Link} to="/keys" type="button" size="sm" className="rounded-none shrink-0">{t('CREATE KEY')}</Button>
+              <Button component={Link} to="/keys" type="button" size="sm" className="shrink-0">{t('CREATE KEY')}</Button>
             </Box>
           </Box>} />
 
       <StatsGrid items={metrics()} />
 
-      <Box className="grid gap-6">
-        <Card className="rounded-none border border-border bg-background shadow-none">
-          <Box className="flex flex-col gap-3 p-6 pb-5">
-            <Box className="flex items-center justify-between gap-3">
+      <Box className="grid gap-4">
+        <Card className="rounded border border-border bg-background shadow-none">
+          <Box className="flex flex-col gap-2 p-4 pb-3">
+            <Box className="flex items-center justify-between gap-2.5">
               <Box>
-                <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t("服务状态")}</Typography>
-                <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t('健康状态与可用资源。')}</Typography>
+                <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("服务状态")}</Typography>
+                <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t('健康状态与可用资源。')}</Typography>
               </Box>
               <StatusBadge tone={(overview?.service_health.error ?? 0) > 0 ? 'error' : (overview?.service_health.warning ?? 0) > 0 ? 'warning' : 'normal'}>
                 {(overview?.service_health.error ?? 0) > 0 ? '异常' : (overview?.service_health.warning ?? 0) > 0 ? '警告' : '正常'}
               </StatusBadge>
             </Box>
           </Box>
-          <CardContent className="grid gap-4 md:grid-cols-3">
-            <Box className="border-l-2 border-primary/20 pl-4 py-1">
-              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">上游健康</Box>
-              <Box className="mt-2 text-2xl font-medium text-foreground tracking-tight">
+          <CardContent className="grid gap-3 md:grid-cols-3">
+            <Box className="border-l-2 border-primary/20 pl-3 py-0.5">
+              <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">上游健康</Box>
+              <Box className="mt-1.5 text-lg font-medium text-foreground tracking-tight">
                 {overview ? t('{{count}} 正常', {
                 count: overview?.service_health.healthy ?? 0
               }) : t('等待数据')}
               </Box>
-              <Box className="mt-1 text-xs leading-5 text-muted-foreground opacity-80" component="p">
+              <Box className="mt-1 text-[0.6875rem] leading-4 text-muted-foreground opacity-80" component="p">
                 {overview ? t('{{warning}} 警告 · {{error}} 异常', {
                 warning: overview?.service_health.warning ?? 0,
                 error: overview?.service_health.error ?? 0
               }) : t('暂无实时数据')}
               </Box>
             </Box>
-            <Box className="border-l-2 border-primary/20 pl-4 py-1">
-              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('活跃密钥')}</Box>
-              <Box className="mt-2 text-2xl font-medium text-foreground tracking-tight">
+            <Box className="border-l-2 border-primary/20 pl-3 py-0.5">
+              <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('活跃密钥')}</Box>
+              <Box className="mt-1.5 text-lg font-medium text-foreground tracking-tight">
                 {overview ? formatCompactInteger(overview?.service_health.upstream_keys_enabled ?? 0) : '—'}
               </Box>
-              <Box className="mt-1 text-xs leading-5 text-muted-foreground opacity-80" component="p">{t('当前可用密钥。')}</Box>
+              <Box className="mt-1 text-[0.6875rem] leading-4 text-muted-foreground opacity-80" component="p">{t('当前可用密钥。')}</Box>
             </Box>
-            <Box className="border-l-2 border-primary/20 pl-4 py-1">
-              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('服务器状态')}</Box>
-              <Box className="mt-2 grid grid-cols-2 gap-3">
+            <Box className="border-l-2 border-primary/20 pl-3 py-0.5">
+              <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('服务器状态')}</Box>
+              <Box className="mt-1.5 grid grid-cols-2 gap-2.5">
                 <Box>
-                  <Box className="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">CPU</Box>
-                  <Box className="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.cpu_usage_percent)}</Box>
+                  <Box className="text-[0.625rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">CPU</Box>
+                  <Box className="mt-0.5 text-base font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.cpu_usage_percent)}</Box>
                 </Box>
                 <Box>
-                  <Box className="text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">{t('内存')}</Box>
-                  <Box className="mt-1 text-xl font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.memory_usage_percent)}</Box>
+                  <Box className="text-[0.625rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">{t('内存')}</Box>
+                  <Box className="mt-0.5 text-base font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.memory_usage_percent)}</Box>
                 </Box>
               </Box>
-              <Box className="mt-2 text-xs leading-5 text-muted-foreground opacity-80" component="p">
+              <Box className="mt-1.5 text-[0.6875rem] leading-4 text-muted-foreground opacity-80" component="p">
                 {`${formatServerMemory(serverStatus())} · ${formatServerScope(serverStatus()?.scope, serverStatus()?.memory_limited)}`}
               </Box>
               <Box className="mt-1 text-xs leading-5 text-muted-foreground opacity-70" component="p">{formatCpuCapacity(serverStatus()?.cpu_capacity_cores)}</Box>

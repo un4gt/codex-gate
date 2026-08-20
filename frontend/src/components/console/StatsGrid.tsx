@@ -37,28 +37,28 @@ export function StatsGrid(props: StatsGridProps) {
   if (props.variant === 'compact') {
     return <Box
       aria-label={props.ariaLabel ? t(props.ariaLabel) : undefined}
-      className="grid grid-cols-1 gap-px overflow-hidden border border-border/60 bg-border/60 sm:grid-cols-2 xl:grid-cols-4"
+      className="grid grid-cols-1 gap-px overflow-hidden rounded border border-border/60 bg-border/60 sm:grid-cols-2 xl:grid-cols-4"
       component="dl"
       data-variant="compact"
       role="list"
     >
       {props.items.map(item => <Box
         key={item.label}
-        className="flex min-h-16 min-w-0 items-center gap-3 bg-background px-4 py-3"
+        className="flex min-h-12 min-w-0 items-center gap-2.5 bg-background px-3 py-2"
         component="div"
         role="listitem"
       >
-        <Box className="flex min-w-0 shrink-0 items-center gap-2" component="dt">
+        <Box className="flex min-w-0 shrink-0 items-center gap-1.5" component="dt">
           {!item.trend ? <ToneDot tone={item.tone} /> : null}
-          <Box className="truncate text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span" title={t(item.label)}>
+          <Box className="truncate text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span" title={t(item.label)}>
             {t(item.label)}
           </Box>
         </Box>
-        <Box className="flex min-w-0 flex-1 items-baseline gap-3" component="dd">
-          <Box className="shrink-0 text-2xl font-medium leading-none tracking-normal text-foreground tabular-nums" component="span">
+        <Box className="flex min-w-0 flex-1 items-baseline gap-2.5" component="dd">
+          <Box className="shrink-0 text-lg font-medium leading-none tracking-normal text-foreground tabular-nums" component="span">
             {item.value}
           </Box>
-          {item.hint ? <Box className="ml-auto min-w-0 truncate text-right text-xs leading-5 text-muted-foreground opacity-80" component="span" title={t(item.hint)}>
+          {item.hint ? <Box className="ml-auto min-w-0 truncate text-right text-[0.6875rem] leading-4 text-muted-foreground opacity-80" component="span" title={t(item.hint)}>
             {t(item.hint)}
           </Box> : null}
           {item.trend ? <Chip className="ml-auto shrink-0" color={trendColor(item.tone)} variant="outlined" label={item.trend} /> : null}
@@ -67,15 +67,15 @@ export function StatsGrid(props: StatsGridProps) {
     </Box>;
   }
 
-  return <Box className="grid gap-5 border-t border-border/40 pt-8 mt-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-      {props.items.map(item => <Box key={item.label} className="flex min-h-[132px] flex-col gap-1 border border-border/60 bg-background p-5">
+  return <Box className="grid gap-3 border-t border-border/40 pt-5 mt-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+      {props.items.map(item => <Box key={item.label} className="flex flex-col gap-1 rounded border border-border/60 bg-background p-3.5">
             <Box className="flex items-center justify-between">
-              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t(item.label)}</Box>
+              <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t(item.label)}</Box>
               {item.trend ? <Chip color={trendColor(item.tone)} variant="outlined" label={item.trend} /> : null}
               {!item.trend ? <ToneDot tone={item.tone} /> : null}
             </Box>
-            <Box className="mt-2 text-3xl font-medium tracking-normal text-foreground">{item.value}</Box>
-            {item.hint ? <Box className="mt-auto pt-2 text-xs leading-5 text-muted-foreground opacity-80">{t(item.hint!)}</Box> : null}
+            <Box className="mt-1.5 text-xl font-medium tracking-normal text-foreground">{item.value}</Box>
+            {item.hint ? <Box className="mt-auto pt-1.5 text-[0.6875rem] leading-4 text-muted-foreground opacity-80">{t(item.hint!)}</Box> : null}
           </Box>)}
     </Box>;
 }

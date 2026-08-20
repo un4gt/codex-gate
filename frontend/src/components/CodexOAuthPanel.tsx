@@ -218,8 +218,8 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
       onClose={() => void cancelAndClose()}
     >
       <DialogTitle id="codex-oauth-login-title">{t('OpenAI Codex OAuth 登录')}</DialogTitle>
-      <DialogContent className="grid gap-5 pt-4">
-        <Typography id="codex-oauth-login-description" className="text-sm leading-6 text-muted-foreground">
+      <DialogContent className="grid gap-3.5">
+        <Typography id="codex-oauth-login-description" className="text-[0.8125rem] leading-5 text-muted-foreground">
           {t('授权码和 OAuth Token 不会写入日志。')}
         </Typography>
 
@@ -233,12 +233,12 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
             if (value) void switchFlow(value);
           }}
         >
-          <ToggleButton value="browser" className="min-h-11 gap-2">
-            <Globe2 className="size-4" aria-hidden="true" />
+          <ToggleButton value="browser" className="gap-1.5">
+            <Globe2 className="size-3.5" aria-hidden="true" />
             {t('浏览器登录')}
           </ToggleButton>
-          <ToggleButton value="device" className="min-h-11 gap-2">
-            <KeyRound className="size-4" aria-hidden="true" />
+          <ToggleButton value="device" className="gap-1.5">
+            <KeyRound className="size-3.5" aria-hidden="true" />
             {t('设备码登录')}
           </ToggleButton>
         </ToggleButtonGroup>
@@ -246,9 +246,9 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
         {starting || switching ? <LinearProgress aria-label={t('正在启动 OAuth 登录')} /> : null}
 
         {session && activeFlow === 'browser' ? (
-          <Box className="grid gap-4 border border-border bg-muted/10 p-4 sm:p-5">
-            <Box className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <Typography className="font-mono text-xs text-muted-foreground" component="div">
+          <Box className="grid gap-3 rounded border border-border bg-muted/10 p-3.5">
+            <Box className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
+              <Typography className="font-mono text-[0.6875rem] text-muted-foreground" component="div">
                 {t('剩余 {{seconds}} 秒', { seconds: remainingSeconds })}
               </Typography>
               <Button
@@ -256,13 +256,14 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
                 href={session.verification_uri}
                 target="_blank"
                 rel="noopener noreferrer"
+                size="sm"
                 disabled={session.status !== 'pending' || session.stage !== 'waiting_for_user'}
               >
-                <ExternalLink className="mr-2 size-4" aria-hidden="true" />
+                <ExternalLink className="mr-1.5 size-3.5" aria-hidden="true" />
                 {t('打开 OpenAI 登录页')}
               </Button>
             </Box>
-            <Box className="grid gap-3" component="form" onSubmit={event => void submitCallback(event)}>
+            <Box className="grid gap-2.5" component="form" onSubmit={event => void submitCallback(event)}>
               <FormControl>
                 <FormLabel htmlFor="codex-oauth-callback-url">{t('回调地址')}</FormLabel>
                 <InputBase
@@ -281,9 +282,10 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
                 <Button
                   type="submit"
                   variant="outline"
+                  size="sm"
                   disabled={!callbackUrl.trim() || submittingCallback || session.status !== 'pending' || session.stage !== 'waiting_for_user'}
                 >
-                  <Send className="mr-2 size-4" aria-hidden="true" />
+                  <Send className="mr-1.5 size-3.5" aria-hidden="true" />
                   {t(submittingCallback ? '提交中…' : '提交回调地址')}
                 </Button>
               </Box>
@@ -292,13 +294,13 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
         ) : null}
 
         {session?.user_code && activeFlow === 'device' ? (
-          <Box className="grid gap-3 border border-border bg-muted/10 p-6 text-center">
-            <Typography className="font-mono text-4xl font-semibold tracking-[0.16em] text-foreground" component="div">
+          <Box className="grid gap-2.5 rounded border border-border bg-muted/10 p-4 text-center">
+            <Typography className="font-mono text-2xl font-semibold tracking-[0.16em] text-foreground" component="div">
               {session.user_code}
             </Typography>
             <Box className="flex flex-wrap justify-center gap-2">
-              <Button type="button" variant="outline" onClick={() => void copyCode()}>
-                <Copy className="mr-2 size-4" aria-hidden="true" />
+              <Button type="button" variant="outline" size="sm" onClick={() => void copyCode()}>
+                <Copy className="mr-1.5 size-3.5" aria-hidden="true" />
                 {t('复制验证码')}
               </Button>
               <Button
@@ -306,12 +308,13 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
                 href={session.verification_uri}
                 target="_blank"
                 rel="noopener noreferrer"
+                size="sm"
               >
-                <ExternalLink className="mr-2 size-4" aria-hidden="true" />
+                <ExternalLink className="mr-1.5 size-3.5" aria-hidden="true" />
                 {t('打开 OpenAI 登录页')}
               </Button>
             </Box>
-            <Typography className="font-mono text-xs text-muted-foreground" component="div">
+            <Typography className="font-mono text-[0.6875rem] text-muted-foreground" component="div">
               {t('剩余 {{seconds}} 秒', { seconds: remainingSeconds })}
             </Typography>
           </Box>
@@ -322,7 +325,7 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
             <AlertTitle>
               {loginStatusTitle(session, error, starting || switching)}
             </AlertTitle>
-            <Typography className="text-sm leading-6" component="div">
+            <Typography className="text-[0.8125rem] leading-5" component="div">
               {loginStatusMessage(session, error, activeFlow)}
             </Typography>
           </Alert>
@@ -331,14 +334,14 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
         {session?.warnings?.length ? (
           <Alert severity="warning" variant="outlined">
             <AlertTitle>{t('登录后检查有警告')}</AlertTitle>
-            <Box className="grid gap-1 text-sm" component="ul">
+            <Box className="grid gap-1 text-[0.8125rem]" component="ul">
               {session.warnings.map(warning => <Box key={warning} component="li">{warning}</Box>)}
             </Box>
           </Alert>
         ) : null}
       </DialogContent>
       <DialogActions>
-        <Button type="button" variant="outline" onClick={() => void cancelAndClose()}>
+        <Button type="button" variant="outline" size="sm" onClick={() => void cancelAndClose()}>
           {t(terminal ? '关闭' : '取消')}
         </Button>
       </DialogActions>
@@ -519,14 +522,14 @@ function CodexAccountCard(props: {
   const quota = account?.quota;
 
   return (
-    <Card className="rounded-none border border-border bg-background shadow-none">
-      <CardContent className="grid gap-5 p-5">
-        <Box className="flex flex-wrap items-start justify-between gap-4">
+    <Card className="border border-border bg-background shadow-none">
+      <CardContent className="grid gap-4 p-4">
+        <Box className="flex flex-wrap items-start justify-between gap-3">
           <Box className="min-w-0">
-            <Typography className="truncate text-lg font-medium" component="h4">
+            <Typography className="truncate text-sm font-semibold" component="h4">
               {account?.email_masked ?? props.item.name}
             </Typography>
-            <Typography className="mt-1 font-mono text-xs text-muted-foreground" component="div">
+            <Typography className="mt-0.5 font-mono text-[0.6875rem] text-muted-foreground" component="div">
               {account?.account_id_suffix ?? t('旧凭据，需重新登录')}
             </Typography>
           </Box>
@@ -538,7 +541,7 @@ function CodexAccountCard(props: {
           </Box>
         </Box>
 
-        <Box className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <Box className="grid gap-2.5 text-[0.8125rem] sm:grid-cols-2 lg:grid-cols-4">
           <Meta label={t('订阅计划')} value={account?.plan_type ?? quota?.plan_type ?? '—'} />
           <Meta label={t('Token 到期')} value={formatOptionalDate(account?.token_expires_at_ms)} />
           <Meta label={t('最近刷新')} value={formatOptionalDate(account?.last_refresh_at_ms)} />
@@ -553,7 +556,7 @@ function CodexAccountCard(props: {
         ) : null}
 
         {quota ? (
-          <Box className="grid gap-4" aria-label={t('Codex 额度窗口')}>
+          <Box className="grid gap-3" aria-label={t('Codex 额度窗口')}>
             {quota.allowed === false ? <Alert severity="warning" variant="outlined">
                 <AlertTitle>{t('当前额度不可用')}</AlertTitle>
                 {t('该账号会暂时退出路由；额度恢复后将自动重新参与。')}
@@ -566,9 +569,9 @@ function CodexAccountCard(props: {
               || quota.credits.balance != null
               || quota.credits.reset_credits != null
               || quota.credits.subscription_end_at_ms != null ? (
-              <Box className="border border-border/50 bg-muted/10 p-4 text-sm">
+              <Box className="rounded border border-border/50 bg-muted/10 p-3 text-[0.8125rem]">
                 <Typography className="font-medium" component="div">{t('Credits 余额')}</Typography>
-                <Typography className="mt-1 font-mono text-lg" component="div">
+                <Typography className="mt-0.5 font-mono text-sm" component="div">
                   {quota.credits.unlimited
                     ? t('无限')
                     : quota.credits.balance == null

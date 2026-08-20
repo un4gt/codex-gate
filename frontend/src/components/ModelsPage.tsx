@@ -396,7 +396,7 @@ export function ModelsPage(props: ModelsPageProps) {
     }
   };
 
-  return <Box className="flex flex-col gap-6">
+  return <Box className="flex flex-col gap-4">
     <PageHeader
       title="模型"
       description="管理模型库存、别名目标与 Responses 兼容能力。"
@@ -445,11 +445,11 @@ export function ModelsPage(props: ModelsPageProps) {
       </Select>
     </>} />
 
-    <Card className="rounded-none border border-border bg-background shadow-none">
-      <Box className="flex flex-wrap items-center justify-between gap-3 p-6 pb-4">
+    <Card className="border border-border bg-background shadow-none">
+      <Box className="flex flex-wrap items-center justify-between gap-2.5 p-4 pb-3">
         <Box>
-          <Typography className="text-xl font-medium tracking-normal" component="h2">{t('模型库存')}</Typography>
-          <Typography className="mt-1 text-sm text-muted-foreground" component="p">
+          <Typography className="text-sm font-semibold tracking-normal" component="h2">{t('模型库存')}</Typography>
+          <Typography className="mt-0.5 text-[0.8125rem] text-muted-foreground" component="p">
             {t('{{visible}} / {{total}} 个模型', { visible: filtered.length, total: models.length })}
           </Typography>
         </Box>
@@ -669,14 +669,14 @@ export function ModelsPage(props: ModelsPageProps) {
       </CardContent>
     </Card>
 
-    <Card className="min-w-0 rounded-none border border-border bg-background shadow-none">
-      <Box className="p-6 pb-4">
-        <Typography className="text-xl font-medium tracking-normal" component="h2">{t('模型别名')}</Typography>
-        <Typography className="mt-1 text-sm text-muted-foreground" component="p">{t('按优先级汇总多个上游模型目标。')}</Typography>
+    <Card className="min-w-0 border border-border bg-background shadow-none">
+      <Box className="p-4 pb-3">
+        <Typography className="text-sm font-semibold tracking-normal" component="h2">{t('模型别名')}</Typography>
+        <Typography className="mt-0.5 text-[0.8125rem] text-muted-foreground" component="p">{t('按优先级汇总多个上游模型目标。')}</Typography>
       </Box>
-      <CardContent className="grid min-w-0 gap-6 border-t border-border/40 pt-6">
+      <CardContent className="grid min-w-0 gap-4 border-t border-border/40 pt-4">
         <Box
-          className="grid gap-4 lg:grid-cols-[minmax(180px,1fr)_160px_140px_140px] lg:items-end"
+          className="grid gap-3 lg:grid-cols-[minmax(180px,1fr)_160px_140px_140px] lg:items-end"
           component="form"
           onSubmit={event => void submitAliasCreate(event)}
         >

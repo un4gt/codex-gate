@@ -76,11 +76,11 @@ export function SettingsPage(props: SettingsPageProps) {
       <PageHeader title="设置" description="维护连接与系统设置。" />
 
       <Card>
-        <Box className="flex flex-col gap-3 p-6 pb-5">
-          <Box className="flex items-center justify-between gap-3">
+        <Box className="flex flex-col gap-2 p-4 pb-3">
+          <Box className="flex items-center justify-between gap-2.5">
             <Box>
-              <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t("基础连接")}</Typography>
-              <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t("更新当前控制台的连接信息。")}</Typography>
+              <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("基础连接")}</Typography>
+              <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t("更新当前控制台的连接信息。")}</Typography>
             </Box>
             <StatusBadge tone={props.settings.adminToken.trim() ? 'normal' : 'warning'}>
               {props.settings.adminToken.trim() ? '已连接' : '未连接'}
@@ -88,11 +88,11 @@ export function SettingsPage(props: SettingsPageProps) {
           </Box>
         </Box>
         <CardContent>
-          <Box className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_220px]" onSubmit={event => {
+          <Box className="flex flex-col gap-4" onSubmit={event => {
           event.preventDefault();
           void props.onRefresh('连接信息已刷新。');
         }} component="form">
-            <Box className="flex flex-col gap-6">
+            <Box className="grid gap-4 md:grid-cols-2">
               <FormControl>
                 <FormLabel>{t("服务地址")}</FormLabel>
                 <InputBase value={props.settings.apiBase} onChange={event => props.onApiBaseChange(event.target.value)} />
@@ -103,7 +103,7 @@ export function SettingsPage(props: SettingsPageProps) {
                 <FormHelperText>{t("只保存在当前标签页。")}</FormHelperText>
               </FormControl>
             </Box>
-            <Box className="flex flex-col gap-2">
+            <Box className="flex justify-end border-t border-border/40 pt-3">
               <Button type="submit">{t("刷新连接")}</Button>
             </Box>
           </Box>
@@ -120,13 +120,13 @@ export function SettingsPage(props: SettingsPageProps) {
       </SettingsSection>
 
       <SettingsSection title="运行设置" description="常用设置可直接生效，资源类设置按建议调整后重启。" open={openSection === 'runtime'} onToggle={() => toggleSection('runtime')}>
-        <Box className="grid gap-6">
-          <Box className="grid gap-4 md:grid-cols-2">
+        <Box className="grid gap-4">
+          <Box className="grid gap-3 md:grid-cols-2">
             {(props.runtimeSettings?.settings ?? []).map(setting => <Box key={`${setting.key}:${String(setting.value)}`} className="surface-tile" onSubmit={event => void submitRuntimeSetting(event, setting)} component="form">
-                  <Box className="mb-4 flex items-center justify-between gap-3">
+                  <Box className="mb-3 flex items-center justify-between gap-2.5">
                     <Box>
-                      <Box className="text-sm font-medium text-foreground">{setting.label}</Box>
-                      <Box className="mt-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
+                      <Box className="text-[0.8125rem] font-medium text-foreground">{setting.label}</Box>
+                      <Box className="mt-0.5 font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground">
                         {setting.requires_restart ? '重启生效' : '立即生效'}
                       </Box>
                     </Box>
@@ -135,8 +135,8 @@ export function SettingsPage(props: SettingsPageProps) {
 
                   <RuntimeSettingControl setting={setting} />
 
-                  <Box className="mt-4 flex items-center justify-between gap-3 border-t border-border/40 pt-4">
-                    <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground" component="span">
+                  <Box className="mt-3 flex items-center justify-between gap-2.5 border-t border-border/40 pt-3">
+                    <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground" component="span">
                       默认 {formatSettingValue(setting.default_value)}
                     </Box>
                     <Button type="submit" size="sm" disabled={!setting.editable || busy}>{t("保存")}</Button>
@@ -145,14 +145,14 @@ export function SettingsPage(props: SettingsPageProps) {
           </Box>
 
           {props.runtimeEnvPreview ? (preview => <Box className="surface-tile">
-                <Box className="mb-4 flex items-center justify-between gap-3">
+                <Box className="mb-3 flex items-center justify-between gap-2.5">
                   <Box>
-                    <Box className="text-sm font-medium text-foreground" component="h3">低内存建议</Box>
-                    <Box className="mt-1 text-xs text-muted-foreground" component="p">适合少量用户和低请求量部署。</Box>
+                    <Box className="text-[0.8125rem] font-medium text-foreground" component="h3">低内存建议</Box>
+                    <Box className="mt-0.5 text-[0.6875rem] text-muted-foreground" component="p">适合少量用户和低请求量部署。</Box>
                   </Box>
                   <StatusBadge tone="normal">建议值</StatusBadge>
                 </Box>
-                <Box className="grid gap-3 md:grid-cols-2">
+                <Box className="grid gap-2.5 md:grid-cols-2">
                   {preview.restart_settings.map(item => <InfoTile key={item.key} label={item.label} value={`${formatSettingValue(item.current)} → ${formatSettingValue(item.recommended)}`} />)}
                 </Box>
               </Box>)(props.runtimeEnvPreview) : null}
@@ -200,15 +200,15 @@ function SettingsSection(props: {
   warning?: boolean;
 }) {
   return <Card className={props.warning ? 'border-amber-500/40' : ''}>
-      <Box className="flex flex-col gap-3 p-6 pb-5">
-        <Button type="button" className="flex h-auto w-full cursor-pointer items-center justify-between gap-4 p-0 text-left normal-case tracking-normal hover:bg-transparent" onClick={props.onToggle} variant="ghost">
+      <Box className="flex flex-col gap-2 p-4 pb-3">
+        <Button type="button" className="flex h-auto w-full cursor-pointer items-center justify-between gap-3 p-0 text-left normal-case tracking-normal hover:bg-transparent" onClick={props.onToggle} variant="ghost">
           <Box>
-            <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t(props.title)}</Typography>
-            <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t(props.description)}</Typography>
+            <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t(props.title)}</Typography>
+            <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t(props.description)}</Typography>
           </Box>
           <Box className="flex items-center gap-2">
             {props.warning ? <StatusBadge tone="warning">谨慎修改</StatusBadge> : null}
-            <ChevronDown className={`size-6 ${props.open ? 'rotate-180 transition-transform' : 'transition-transform'}`} />
+            <ChevronDown className={`size-4 ${props.open ? 'rotate-180 transition-transform' : 'transition-transform'}`} />
           </Box>
         </Button>
       </Box>

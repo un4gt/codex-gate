@@ -475,10 +475,10 @@ function DeliveryDetailDrawer(props: {
       description={delivery?.id}
       onClose={props.onClose}
     >
-      {props.loading ? <Box className="flex min-h-40 items-center justify-center"><CircularProgress size={24} /></Box> : null}
+      {props.loading ? <Box className="flex min-h-28 items-center justify-center"><CircularProgress size={20} /></Box> : null}
       {props.error ? <Alert severity="error">{props.error}</Alert> : null}
-      {!props.loading && delivery ? <Box className="grid gap-6">
-          <Box className="grid gap-4 sm:grid-cols-2">
+      {!props.loading && delivery ? <Box className="grid gap-4">
+          <Box className="grid gap-3 sm:grid-cols-2">
             <DetailValue label="状态"><StatusBadge tone={deliveryTone(delivery.status)}>{t(statusLabel(delivery.status))}</StatusBadge></DetailValue>
             <DetailValue label="HTTP 状态">{props.detail?.last_http_status ?? '—'}</DetailValue>
             <DetailValue label="事件">{t(delivery.event_type)}</DetailValue>
@@ -528,18 +528,19 @@ function operatorLabel(operator: NotificationAlertOperator) {
 
 function SummaryCard(props: { label: string; value: number; warning?: boolean }) {
   return <Card className={props.warning ? 'border-amber-500/40' : ''}>
-      <CardContent>
+      {/* 主题里 CardContent 的 paddingTop 为 0（默认上方有卡片头），这里单独使用需补回上内距 */}
+      <CardContent className="flex h-full flex-col justify-center pt-4">
         <Box className="surface-label">{t(props.label)}</Box>
-        <Box className="mt-2 text-3xl font-semibold tracking-tight text-foreground">{props.value}</Box>
+        <Box className="mt-1.5 text-xl font-semibold tracking-tight text-foreground">{props.value}</Box>
       </CardContent>
     </Card>;
 }
 
 function SectionTitle(props: { title: string; description: string; action: ReactNode }) {
-  return <Box className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+  return <Box className="flex flex-col gap-2.5 sm:flex-row sm:items-end sm:justify-between">
       <Box>
-        <Typography className="text-xl font-semibold text-foreground" component="h2">{t(props.title)}</Typography>
-        <Typography className="mt-1 text-sm leading-6 text-muted-foreground" component="p">{t(props.description)}</Typography>
+        <Typography className="text-sm font-semibold text-foreground" component="h2">{t(props.title)}</Typography>
+        <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="p">{t(props.description)}</Typography>
       </Box>
       {props.action}
     </Box>;
@@ -759,7 +760,7 @@ export function NotificationsPage(props: NotificationsPageProps) {
   return <Box className="section-stack">
       <PageHeader title="通知" description="配置定时报表、阈值告警与投递通道。" actions={<Box className="flex w-full justify-end">
           <Button type="button" variant="outline" onClick={() => void refreshAll()} disabled={busy !== null}>
-            <RefreshCw className="mr-2 size-4" />{t('刷新')}
+            <RefreshCw className="mr-1.5 size-3.5" />{t('刷新')}
           </Button>
         </Box>} />
 
@@ -769,7 +770,7 @@ export function NotificationsPage(props: NotificationsPageProps) {
               <Button type="button" size="sm" variant="outline" onClick={() => {
                 void navigator.clipboard.writeText(generatedSecret);
                 props.onMessage(t('Webhook 签名密钥已复制。'));
-              }}><Copy className="mr-2 size-3" />{t('复制')}</Button>
+              }}><Copy className="mr-1.5 size-3" />{t('复制')}</Button>
               <Button type="button" size="sm" variant="ghost" onClick={() => setGeneratedSecret('')}>{t('我已保存')}</Button>
             </Box>}>
             <Typography className="font-semibold" component="div">{t('请立即保存 Webhook 签名密钥')}</Typography>
@@ -786,16 +787,16 @@ export function NotificationsPage(props: NotificationsPageProps) {
       </Box>
 
       <Card>
-        <CardContent className="flex flex-col gap-5">
+        <CardContent className="flex flex-col gap-4">
           <SectionTitle title="投递通道" description="SMTP 邮件由 Rust 后端投递；Webhook 支持通用 JSON 与常用消息平台格式。" action={<Box className="flex flex-wrap gap-2">
-              <Button type="button" size="sm" variant="outline" onClick={() => setChannelDraft(emptyChannelDraft('smtp'))}><Mail className="mr-2 size-4" />{t('添加 SMTP')}</Button>
-              <Button type="button" size="sm" onClick={() => setChannelDraft(emptyChannelDraft('webhook'))}><Webhook className="mr-2 size-4" />{t('添加 Webhook')}</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => setChannelDraft(emptyChannelDraft('smtp'))}><Mail className="mr-1.5 size-3.5" />{t('添加 SMTP')}</Button>
+              <Button type="button" size="sm" onClick={() => setChannelDraft(emptyChannelDraft('webhook'))}><Webhook className="mr-1.5 size-3.5" />{t('添加 Webhook')}</Button>
             </Box>} />
           {channels.length === 0 ? <Alert severity="info">{t('尚未配置通知通道。请先添加 SMTP 或 Webhook。')}</Alert> : <Box className="grid gap-4 xl:grid-cols-2">
               {channels.map((channel) => <Box key={channel.id} className="surface-tile flex flex-col gap-4">
                   <Box className="flex items-start justify-between gap-3">
                     <Box className="flex min-w-0 items-center gap-3">
-                      <Box className="flex size-10 shrink-0 items-center justify-center border border-border bg-background" aria-hidden="true">
+                      <Box className="flex size-8 shrink-0 items-center justify-center rounded border border-border bg-background" aria-hidden="true">
                         {channel.kind === 'smtp' ? <Mail className="size-4" /> : <Webhook className="size-4" />}
                       </Box>
                       <Box className="min-w-0">
@@ -817,13 +818,13 @@ export function NotificationsPage(props: NotificationsPageProps) {
                       `channel-test-${channel.id}`,
                       async () => { await testNotificationChannel(props.settings, channel.id, defaultLocale()); },
                       t('测试通知已进入发送队列。'),
-                    )}><Send className="mr-2 size-3" />{t('发送测试')}</Button>
-                    <Button type="button" size="sm" variant="ghost" onClick={() => setChannelDraft(channelDraftFrom(channel))}><Pencil className="mr-2 size-3" />{t('编辑')}</Button>
+                    )}><Send className="mr-1.5 size-3" />{t('发送测试')}</Button>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => setChannelDraft(channelDraftFrom(channel))}><Pencil className="mr-1.5 size-3" />{t('编辑')}</Button>
                     <Button type="button" size="sm" variant="ghost" disabled={busy !== null} onClick={() => toggleChannel(channel)}>{channel.enabled ? t('禁用') : t('启用')}</Button>
                     <Button type="button" size="sm" color="error" variant="ghost" disabled={busy !== null} onClick={() => {
                       if (!window.confirm(t('确认删除通知通道 {{name}}？', { name: channel.name }))) return;
                       void runAction(`channel-delete-${channel.id}`, async () => { await deleteNotificationChannel(props.settings, channel.id); }, t('通知通道已删除。'));
-                    }}><Trash2 className="mr-2 size-3" />{t('删除')}</Button>
+                    }}><Trash2 className="mr-1.5 size-3" />{t('删除')}</Button>
                   </Box>
                 </Box>)}
             </Box>}
@@ -831,8 +832,8 @@ export function NotificationsPage(props: NotificationsPageProps) {
       </Card>
 
       <Card>
-        <CardContent className="flex flex-col gap-5">
-          <SectionTitle title="定时报表" description="使用标准 5 段 Cron 与独立 IANA 时区；停机期间遗漏窗口会合并为一份报表。" action={<Button type="button" size="sm" onClick={() => setRuleDraft(emptyRuleDraft('scheduled_report'))}><Plus className="mr-2 size-4" />{t('添加定时报表')}</Button>} />
+        <CardContent className="flex flex-col gap-4">
+          <SectionTitle title="定时报表" description="使用标准 5 段 Cron 与独立 IANA 时区；停机期间遗漏窗口会合并为一份报表。" action={<Button type="button" size="sm" onClick={() => setRuleDraft(emptyRuleDraft('scheduled_report'))}><Plus className="mr-1.5 size-3.5" />{t('添加定时报表')}</Button>} />
           <RuleCards rules={scheduledRules} channels={channels} busy={busy} onEdit={(rule) => setRuleDraft(ruleDraftFrom(rule))} onToggle={toggleRule} onDelete={(rule) => {
             if (!window.confirm(t('确认删除通知规则 {{name}}？', { name: rule.name }))) return;
             void runAction(`rule-delete-${rule.id}`, async () => { await deleteNotificationRule(props.settings, rule.id); }, t('通知规则已删除。'));
@@ -841,8 +842,8 @@ export function NotificationsPage(props: NotificationsPageProps) {
       </Card>
 
       <Card>
-        <CardContent className="flex flex-col gap-5">
-          <SectionTitle title="阈值告警" description="支持首次触发、冷却提醒和恢复通知；每分钟评估一次。" action={<Button type="button" size="sm" onClick={() => setRuleDraft(emptyRuleDraft('threshold_alert'))}><BellRing className="mr-2 size-4" />{t('添加阈值告警')}</Button>} />
+        <CardContent className="flex flex-col gap-4">
+          <SectionTitle title="阈值告警" description="支持首次触发、冷却提醒和恢复通知；每分钟评估一次。" action={<Button type="button" size="sm" onClick={() => setRuleDraft(emptyRuleDraft('threshold_alert'))}><BellRing className="mr-1.5 size-3.5" />{t('添加阈值告警')}</Button>} />
           <RuleCards rules={alertRules} channels={channels} busy={busy} onEdit={(rule) => setRuleDraft(ruleDraftFrom(rule))} onToggle={toggleRule} onDelete={(rule) => {
             if (!window.confirm(t('确认删除通知规则 {{name}}？', { name: rule.name }))) return;
             void runAction(`rule-delete-${rule.id}`, async () => { await deleteNotificationRule(props.settings, rule.id); }, t('通知规则已删除。'));
@@ -851,15 +852,15 @@ export function NotificationsPage(props: NotificationsPageProps) {
       </Card>
 
       <Card>
-        <CardContent className="flex flex-col gap-5">
-          <SectionTitle title="发送历史" description="保留 90 天。失败投递可单独重试；待发送任务存在时每 5 秒自动刷新。" action={<Button type="button" size="sm" variant="outline" onClick={() => void refreshHistory()}><RefreshCw className="mr-2 size-3" />{t('刷新历史')}</Button>} />
+        <CardContent className="flex flex-col gap-4">
+          <SectionTitle title="发送历史" description="保留 90 天。失败投递可单独重试；待发送任务存在时每 5 秒自动刷新。" action={<Button type="button" size="sm" variant="outline" onClick={() => void refreshHistory()}><RefreshCw className="mr-1.5 size-3" />{t('刷新历史')}</Button>} />
           <TableContainer className="max-w-full overflow-x-auto border border-border/60">
             <Table size="small" aria-label={t('通知发送历史')}>
               <TableHead><TableRow>
                 <TableCell>{t('时间')}</TableCell><TableCell>{t('事件')}</TableCell><TableCell>{t('规则')}</TableCell><TableCell>{t('通道')}</TableCell><TableCell>{t('状态')}</TableCell><TableCell>{t('尝试')}</TableCell><TableCell>{t('错误')}</TableCell><TableCell align="right">{t('操作')}</TableCell>
               </TableRow></TableHead>
               <TableBody>
-                {deliveries.length === 0 ? <TableRow><TableCell colSpan={8}><Box className="py-8 text-center text-sm text-muted-foreground">{t('暂无发送历史。')}</Box></TableCell></TableRow> : deliveries.map((delivery) => <TableRow key={delivery.id} hover>
+                {deliveries.length === 0 ? <TableRow><TableCell colSpan={8}><Box className="py-5 text-center text-[0.8125rem] text-muted-foreground">{t('暂无发送历史。')}</Box></TableCell></TableRow> : deliveries.map((delivery) => <TableRow key={delivery.id} hover>
                     <TableCell className="whitespace-nowrap">{formatDateTime(delivery.created_at_ms)}</TableCell>
                     <TableCell className="whitespace-nowrap">{t(delivery.event_type)}</TableCell>
                     <TableCell>{delivery.rule_name}</TableCell>
@@ -936,10 +937,10 @@ function RuleCards(props: {
           </Box>
           <Divider />
           <Box className="flex flex-wrap gap-2">
-            {props.onRun ? <Button type="button" size="sm" variant="outline" disabled={props.busy !== null || !rule.enabled} onClick={() => props.onRun?.(rule)}><Play className="mr-2 size-3" />{t('立即运行')}</Button> : null}
-            <Button type="button" size="sm" variant="ghost" onClick={() => props.onEdit(rule)}><Pencil className="mr-2 size-3" />{t('编辑')}</Button>
+            {props.onRun ? <Button type="button" size="sm" variant="outline" disabled={props.busy !== null || !rule.enabled} onClick={() => props.onRun?.(rule)}><Play className="mr-1.5 size-3" />{t('立即运行')}</Button> : null}
+            <Button type="button" size="sm" variant="ghost" onClick={() => props.onEdit(rule)}><Pencil className="mr-1.5 size-3" />{t('编辑')}</Button>
             <Button type="button" size="sm" variant="ghost" disabled={props.busy !== null} onClick={() => props.onToggle(rule)}>{rule.enabled ? t('禁用') : t('启用')}</Button>
-            <Button type="button" size="sm" color="error" variant="ghost" disabled={props.busy !== null} onClick={() => props.onDelete(rule)}><Trash2 className="mr-2 size-3" />{t('删除')}</Button>
+            <Button type="button" size="sm" color="error" variant="ghost" disabled={props.busy !== null} onClick={() => props.onDelete(rule)}><Trash2 className="mr-1.5 size-3" />{t('删除')}</Button>
           </Box>
         </Box>)}
     </Box>;
@@ -1005,7 +1006,7 @@ function ChannelDialog(props: {
                 <FormControl><FormLabel>{t('自定义请求头')}</FormLabel><InputBase name={`notification_webhook_headers_${draft.id ?? 'new'}`} multiline minRows={3} value={draft.headers} autoComplete="off" onChange={(event) => update('headers', event.target.value)} inputProps={{ 'aria-label': t('自定义请求头') }} placeholder={'X-Team: platform\nX-Environment: production'} /><FormHelperText>{t('每行使用“名称: 值”格式；签名和内容相关请求头不可覆盖。')}</FormHelperText>{draft.id !== null && draft.headers.trim() ? <FormHelperText>{t('已有请求头值不会回显；保留名称并将值留空可保留原值。')}</FormHelperText> : null}</FormControl>
               </>}
           </DialogContent>
-          <DialogActions><Button type="button" variant="ghost" onClick={props.onClose} disabled={props.busy}>{t('取消')}</Button><Button type="submit" disabled={props.busy}>{props.busy ? <CircularProgress size={16} /> : <Check className="mr-2 size-4" />}{t('保存')}</Button></DialogActions>
+          <DialogActions><Button type="button" variant="ghost" onClick={props.onClose} disabled={props.busy}>{t('取消')}</Button><Button type="submit" disabled={props.busy}>{props.busy ? <CircularProgress size={16} /> : <Check className="mr-1.5 size-3.5" />}{t('保存')}</Button></DialogActions>
         </Box> : null}
     </Dialog>;
 }
@@ -1047,7 +1048,7 @@ function RuleDialog(props: {
                 </Box>
                 <Box className="grid gap-4 md:grid-cols-[180px_minmax(0,1fr)]">
                   <FormControl><FormLabel>{t('邮件 Top N')}</FormLabel><InputBase value={draft.topN} onChange={(event) => update('topN', event.target.value)} inputProps={{ 'aria-label': t('邮件 Top N') }} inputMode="numeric" /><FormHelperText>{t('范围 5–100')}</FormHelperText></FormControl>
-                  <Box className="flex flex-col justify-end gap-2"><Button type="button" variant="outline" onClick={() => void props.onPreview()}><CalendarClock className="mr-2 size-4" />{t('预览未来执行时间')}</Button>
+                  <Box className="flex flex-col justify-end gap-2"><Button type="button" variant="outline" onClick={() => void props.onPreview()}><CalendarClock className="mr-1.5 size-3.5" />{t('预览未来执行时间')}</Button>
                     {props.preview.length > 0 ? <Box className="grid gap-1 text-xs text-muted-foreground" aria-live="polite">{props.preview.map((value) => <Box key={value}>{formatDateTime(value)}</Box>)}</Box> : null}
                   </Box>
                 </Box>
@@ -1075,7 +1076,7 @@ function RuleDialog(props: {
                 </Box>
               </>}
           </DialogContent>
-          <DialogActions><Button type="button" variant="ghost" onClick={props.onClose} disabled={props.busy}>{t('取消')}</Button><Button type="submit" disabled={props.busy || props.channels.length === 0}>{props.busy ? <CircularProgress size={16} /> : <Check className="mr-2 size-4" />}{t('保存')}</Button></DialogActions>
+          <DialogActions><Button type="button" variant="ghost" onClick={props.onClose} disabled={props.busy}>{t('取消')}</Button><Button type="submit" disabled={props.busy || props.channels.length === 0}>{props.busy ? <CircularProgress size={16} /> : <Check className="mr-1.5 size-3.5" />}{t('保存')}</Button></DialogActions>
         </Box> : null}
     </Dialog>;
 }

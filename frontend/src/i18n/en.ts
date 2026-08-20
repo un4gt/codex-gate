@@ -1013,7 +1013,7 @@ export const dict: Record<string, string> = {
   '在路由转换与鉴权完成后，按上游覆写请求 Header 和 JSON Body。具体协议规则会覆盖 all；模板 {{request_id}} 在同一次请求中保持一致。': 'Override upstream request headers and JSON bodies after routing transforms and authentication. API-specific rules override all, and the {{request_id}} template stays consistent within one request.',
   '应用 Codex 客户端兼容预设': 'Apply Codex Client Compatibility Preset',
   '清空规则': 'Clear Rules',
-  'Codex 预设会补充官方 CLI 身份、x-codex 指纹和 Responses client_metadata；已有同名规则会被替换，其他规则会保留。预设不会改写 instructions。鉴权、代理来源、WebSocket 握手、连接控制以及 model、stream、type 等路由字段禁止覆写。': 'The Codex preset adds the official CLI identity, x-codex fingerprints, and Responses client_metadata. Existing matching rules are replaced and other rules are preserved. It does not rewrite instructions. Authentication, proxy provenance, WebSocket handshake, connection-control, and routing fields such as model, stream, and type cannot be overridden.',
+  '一键补齐 Codex 客户端所需的身份标识与元数据；同名规则会被覆盖，其余保留。': 'Adds the identity headers and metadata the Codex client expects. Rules with the same name are replaced; the rest are kept.',
   'Header 规则': 'Header Rules',
   '设置或移除发送到该上游的请求头。Header 名称不区分大小写。': 'Set or remove request headers sent to this provider. Header names are case-insensitive.',
   '添加 Header': 'Add Header',

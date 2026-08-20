@@ -360,7 +360,7 @@ export function LogsPage(props: LogsPageProps) {
     if (next.length === 0) return;
     void saveVisibleColumns(next, previous);
   };
-  return <Box className="flex flex-col gap-6">
+  return <Box className="flex flex-col gap-4">
       <PageHeader title="请求日志" description="筛选并排查最近请求。" />
 
       <FilterBar primary={<>
@@ -456,13 +456,13 @@ export function LogsPage(props: LogsPageProps) {
       }}>{t("重置")}</Button>
           </Box>} />
 
-      <Box className="grid gap-6">
-        <Card className="rounded-none border border-border bg-background shadow-none">
-          <Box className="flex flex-col gap-3 p-6 pb-6">
-            <Box className="flex items-center justify-between gap-3">
+      <Box className="grid gap-4">
+        <Card className="border border-border bg-background shadow-none">
+          <Box className="flex flex-col gap-2 p-4 pb-4">
+            <Box className="flex items-center justify-between gap-2.5">
               <Box>
-                <Typography className="text-xl font-medium tracking-tight text-foreground" component="div">{t("结果")}</Typography>
-                <Typography className="mt-1 font-mono text-xs uppercase tracking-wider text-muted-foreground" component="div">{t('默认按最近时间排序。')}</Typography>
+                <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("结果")}</Typography>
+                <Typography className="mt-0.5 font-mono text-[0.6875rem] uppercase tracking-wider text-muted-foreground" component="div">{t('默认按最近时间排序。')}</Typography>
               </Box>
               <Box className="flex flex-wrap items-center justify-end gap-2">
                 <Button
@@ -473,7 +473,7 @@ export function LogsPage(props: LogsPageProps) {
                   aria-expanded={columnMenuAnchor ? 'true' : undefined}
                   onClick={event => setColumnMenuAnchor(event.currentTarget)}
                 >
-                  <Columns3 className="mr-2 size-3" aria-hidden="true" />
+                  <Columns3 className="mr-1.5 size-3" aria-hidden="true" />
                   {t('列')}
                 </Button>
                 <StatusBadge tone={errorCount > 0 ? 'warning' : 'normal'}>{t('{{count}} 条异常', {
@@ -671,8 +671,8 @@ export function LogsPage(props: LogsPageProps) {
         const pricingReason = pricing.status === 'unpriced' ? t(describeUnpricedReason(pricing.reason)) : null;
         const routeCandidates = row.routing_trace?.candidates ?? [];
         const routeRejections = row.routing_trace?.rejections ?? [];
-        return <Box className="grid gap-6">
-                <Box className="flex flex-col gap-6 md:flex-row border-t border-border/40 pt-8 mt-2 pb-6">
+        return <Box className="grid gap-4">
+                <Box className="flex flex-col gap-4 md:flex-row border-t border-border/40 pt-5 mt-1 pb-4">
                   <MetricCard label="状态" value={status.label} badge={<StatusBadge tone={status.tone}>{status.label}</StatusBadge>} />
                   <MetricCard label="首字节" value={formatMaybeMs(row.t_first_byte_ms)} />
                   <MetricCard label="TTFT" value={formatMaybeMs(row.t_first_token_ms)} />
@@ -680,9 +680,9 @@ export function LogsPage(props: LogsPageProps) {
                   <MetricCard label="成本" value={pricingValue} badge={pricing.status === 'unpriced' ? <StatusBadge tone="warning">{t('未定价')}</StatusBadge> : undefined} />
                 </Box>
 
-                <Card className="rounded-none border border-border bg-background shadow-none">
-                  <Box className="flex flex-col gap-3 p-6 pb-4">
-                    <Typography className="text-lg font-medium tracking-tight text-foreground" component="div">{t("请求信息")}</Typography>
+                <Card className="border border-border bg-background shadow-none">
+                  <Box className="flex flex-col gap-2 p-4 pb-3">
+                    <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("请求信息")}</Typography>
                   </Box>
                   <CardContent className="grid gap-0 border-t border-border/40 pt-0">
                     <Box className="grid md:grid-cols-2">
@@ -704,15 +704,15 @@ export function LogsPage(props: LogsPageProps) {
                   </CardContent>
                 </Card>
 
-                {row.routing_trace ? <Card className="rounded-none border border-border bg-background shadow-none">
-                    <Box className="flex items-center justify-between gap-4 p-6 pb-4">
-                      <Typography className="text-lg font-medium tracking-tight text-foreground" component="div">{t('路由决策')}</Typography>
-                      <Box className="font-mono text-xs text-muted-foreground" component="span">
+                {row.routing_trace ? <Card className="border border-border bg-background shadow-none">
+                    <Box className="flex items-center justify-between gap-3 p-4 pb-3">
+                      <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('路由决策')}</Typography>
+                      <Box className="font-mono text-[0.6875rem] text-muted-foreground" component="span">
                         {t('{{count}} 次 Provider 切换', { count: row.routing_trace.provider_switches })}
                       </Box>
                     </Box>
                     <CardContent className="border-t border-border/40 p-0">
-                      <Box className="grid gap-2 border-b border-border/40 px-6 py-4 text-xs text-muted-foreground md:grid-cols-2">
+                      <Box className="grid gap-1.5 border-b border-border/40 px-4 py-3 text-[0.6875rem] text-muted-foreground md:grid-cols-2">
                         <Box>{t('授权组：{{groups}}', {
                           groups: row.routing_trace.authorized_groups.map(group => group.name).join(', ') || '—'
                         })}</Box>
@@ -740,7 +740,7 @@ export function LogsPage(props: LogsPageProps) {
                         </Box> : null}
                       </Box>
                       {routeCandidates.length > 0 ? <>
-                        <Box className="flex items-center justify-between gap-4 border-b border-border/40 px-6 py-3">
+                        <Box className="flex items-center justify-between gap-3 border-b border-border/40 px-4 py-2.5">
                           <Typography className="text-sm font-medium text-foreground" component="div">{t('候选 Provider')}</Typography>
                           <Typography className="font-mono text-xs text-muted-foreground" component="span">
                             {t('{{count}} 个候选', { count: routeCandidates.length })}
@@ -773,7 +773,7 @@ export function LogsPage(props: LogsPageProps) {
                       </> : null}
 
                       {routeRejections.length > 0 ? <>
-                        <Box className="flex items-center justify-between gap-4 border-y border-border/40 px-6 py-3">
+                        <Box className="flex items-center justify-between gap-3 border-y border-border/40 px-4 py-2.5">
                           <Typography className="text-sm font-medium text-foreground" component="div">{t('排除原因')}</Typography>
                           <Typography className="font-mono text-xs text-muted-foreground" component="span">
                             {t('{{count}} 个排除', { count: routeRejections.length })}
@@ -805,7 +805,7 @@ export function LogsPage(props: LogsPageProps) {
                         </TableContainer>
                       </> : null}
 
-                      <Box className="flex items-center justify-between gap-4 border-y border-border/40 px-6 py-3">
+                      <Box className="flex items-center justify-between gap-3 border-y border-border/40 px-4 py-2.5">
                         <Typography className="text-sm font-medium text-foreground" component="div">{t('尝试记录')}</Typography>
                         <Typography className="font-mono text-xs text-muted-foreground" component="span">
                           {t('{{count}} 次尝试', { count: row.routing_trace.attempts.length })}
@@ -834,7 +834,7 @@ export function LogsPage(props: LogsPageProps) {
                                   <TableCell className="text-right font-mono text-xs">{formatMaybeMs(attempt.duration_ms)}</TableCell>
                                 </TableRow>)
                               : <TableRow>
-                                  <TableCell className="py-6 text-center text-sm text-muted-foreground" colSpan={6}>{t('未发起上游尝试')}</TableCell>
+                                  <TableCell className="py-4 text-center text-[0.8125rem] text-muted-foreground" colSpan={6}>{t('未发起上游尝试')}</TableCell>
                                 </TableRow>}
                           </TableBody>
                         </Table>
@@ -842,9 +842,9 @@ export function LogsPage(props: LogsPageProps) {
                     </CardContent>
                   </Card> : null}
 
-                <Card className="rounded-none border border-border bg-background shadow-none">
-                  <Box className="flex flex-col gap-3 p-6 pb-4">
-                    <Typography className="text-lg font-medium tracking-tight text-foreground" component="div">{t("用量信息")}</Typography>
+                <Card className="border border-border bg-background shadow-none">
+                  <Box className="flex flex-col gap-2 p-4 pb-3">
+                    <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("用量信息")}</Typography>
                   </Box>
                   <CardContent className="grid gap-0 border-t border-border/40 pt-0">
                     <Box className="grid md:grid-cols-2">
@@ -944,7 +944,7 @@ function BadgeSummary(props: {
   label: string;
   value: number;
 }) {
-  return <Box className="border border-border bg-transparent px-3 py-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground">
+  return <Box className="rounded border border-border bg-transparent px-2.5 py-0.5 font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground">
       {t(props.label)} {formatCompactInteger(props.value)}
     </Box>;
 }
@@ -953,11 +953,11 @@ function MetricCard(props: {
   value: string;
   badge?: any;
 }) {
-  return <Box className="flex flex-col gap-1 pr-6 border-r border-border/40 last:border-r-0">
+  return <Box className="flex flex-col gap-1 pr-4 border-r border-border/40 last:border-r-0">
       <Box className="flex items-center justify-between">
-        <Box className="text-[0.65rem] uppercase tracking-widest font-mono text-muted-foreground" component="span">{t(props.label)}</Box>
+        <Box className="text-[0.6875rem] uppercase tracking-widest font-mono text-muted-foreground" component="span">{t(props.label)}</Box>
       </Box>
-      {props.badge ? <Box className="mt-2">{props.badge}</Box> : <Box className="mt-2 text-2xl font-medium tracking-tight text-foreground">{props.value}</Box>}
+      {props.badge ? <Box className="mt-1.5">{props.badge}</Box> : <Box className="mt-1.5 text-lg font-medium tracking-tight text-foreground">{props.value}</Box>}
     </Box>;
 }
 function DetailItem(props: {
@@ -965,12 +965,12 @@ function DetailItem(props: {
   value: string;
   onCopy?: () => void;
 }) {
-  return <Box className="flex flex-col gap-2 border-b border-r border-border/40 p-4 relative group hover:bg-muted/10 transition-colors">
+  return <Box className="flex flex-col gap-1.5 border-b border-r border-border/40 p-3 relative group hover:bg-muted/10 transition-colors">
       <Box className="flex items-center justify-between gap-2">
-        <Box className="font-mono text-[0.65rem] uppercase tracking-widest text-muted-foreground opacity-70" component="span">{t(props.label)}</Box>
+        <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70" component="span">{t(props.label)}</Box>
       </Box>
-      <Box className="break-all font-mono text-sm text-foreground pr-8 truncate" title={props.value}>{props.value}</Box>
-      {props.onCopy ? <Button type="button" size="icon" variant="ghost" className="absolute right-2 bottom-2 size-6 opacity-0 group-hover:opacity-100 transition-opacity h-auto" onClick={props.onCopy} aria-label={t('复制 {{label}}', {
+      <Box className="break-all font-mono text-[0.8125rem] text-foreground pr-7 truncate" title={props.value}>{props.value}</Box>
+      {props.onCopy ? <Button type="button" size="icon" variant="ghost" className="absolute right-1.5 bottom-1.5 size-6 opacity-0 group-hover:opacity-100 transition-opacity h-auto" onClick={props.onCopy} aria-label={t('复制 {{label}}', {
       label: props.label
     })}>
           <Copy className="size-3" aria-hidden="true" />

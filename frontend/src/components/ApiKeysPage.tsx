@@ -201,9 +201,9 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       <StatsGrid items={stats()} />
 
       <Card>
-        <Box className="flex flex-col gap-3 p-6 pb-5">
-          <Typography className="text-xl font-semibold tracking-normal text-foreground" component="div">{t("密钥列表")}</Typography>
-          <Typography className="mt-1 text-sm leading-5 text-muted-foreground" component="div">{t("优先展示正在使用的密钥。")}</Typography>
+        <Box className="flex flex-col gap-2 p-4 pb-3">
+          <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("密钥列表")}</Typography>
+          <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t("优先展示正在使用的密钥。")}</Typography>
         </Box>
         <CardContent>
           {props.items.length > 0 ? <TableContainer><Table>
@@ -257,8 +257,8 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       </Card>
 
       <DetailDrawer open={createOpen} title="创建密钥" description="填写必要信息后立即生成。" onClose={closeCreateDrawer}>
-        <Box className="flex flex-col gap-4" onSubmit={event => void submitCreate(event)} component="form">
-          <Box className="flex flex-col gap-6">
+        <Box className="flex flex-col gap-3" onSubmit={event => void submitCreate(event)} component="form">
+          <Box className="flex flex-col gap-4">
             <FormControl>
               <FormLabel>{t("名称")}</FormLabel>
               <InputBase name="name" placeholder={t("team-default")} />
@@ -324,26 +324,26 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         {selected ? (item => {
         const data = item;
         const status = keyStatus(data);
-        return <Box className="flex flex-col gap-6">
-                <Box className="grid gap-3 md:grid-cols-3">
+        return <Box className="flex flex-col gap-4">
+                <Box className="grid gap-2.5 md:grid-cols-3">
                   <Box className="surface-tile">
                       <Box className="surface-label">{t('状态')}</Box>
-                      <Box className="mt-2">
+                      <Box className="mt-1.5">
                         <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                       </Box>
                   </Box>
                   <Box className="surface-tile">
                       <Box className="surface-label">{t('请求元数据')}</Box>
-                      <Box className="mt-2 text-xl font-semibold text-foreground">{t(data.apiKey.log_enabled ? '开启' : '关闭')}</Box>
+                      <Box className="mt-1.5 text-sm font-semibold text-foreground">{t(data.apiKey.log_enabled ? '开启' : '关闭')}</Box>
                   </Box>
                   <Box className="surface-tile">
                       <Box className="surface-label">{t('到期')}</Box>
-                      <Box className="mt-2 text-xl font-semibold text-foreground">{data.apiKey.expires_at_ms ? formatDateTime(data.apiKey.expires_at_ms) : t('不过期')}</Box>
+                      <Box className="mt-1.5 text-sm font-semibold text-foreground">{data.apiKey.expires_at_ms ? formatDateTime(data.apiKey.expires_at_ms) : t('不过期')}</Box>
                   </Box>
                 </Box>
 
-                <Box className="flex flex-col gap-4" onSubmit={event => void submitUpdate(event)} component="form">
-                  <Box className="flex flex-col gap-6">
+                <Box className="flex flex-col gap-3" onSubmit={event => void submitUpdate(event)} component="form">
+                  <Box className="flex flex-col gap-4">
                     <FormControl>
                       <FormLabel>{t("名称")}</FormLabel>
                       <InputBase name="name" defaultValue={data.apiKey.name} />
