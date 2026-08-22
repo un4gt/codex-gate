@@ -195,7 +195,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     hint: '开启请求元数据'
   }];
   return <Box className="section-stack">
-      <PageHeader title="密钥" description="创建和管理访问密钥。" actions={<Button type="button" onClick={openCreateDrawer}>
+      <PageHeader actions={<Button type="button" onClick={openCreateDrawer}>
             <Plus />{t("创建密钥")}</Button>} />
 
       <StatsGrid items={stats()} />
@@ -307,7 +307,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
           <Button type="submit" disabled={busy === 'create'}>
             {t(busy === 'create' ? '创建中…' : '创建密钥')}
           </Button>
-          {created ? (createdKey => <Card className="border-emerald-500/40 bg-emerald-500/10">
+          {created ? (createdKey => <Card className="border-success-border bg-success-surface">
                 <CardContent className="flex flex-col gap-2 p-4">
                   <Box className="text-sm font-medium text-foreground">{t('明文密钥只展示一次')}</Box>
                   <Box className="break-all text-sm text-foreground" component="code">{createdKey.api_key}</Box>

@@ -150,19 +150,14 @@ export function OAuthPage(props: OAuthPageProps) {
         </Box>
       ) : selected ? (
         <Box className="grid gap-4">
-          <Box className="flex flex-col gap-3 border-b border-border/40 pb-4 lg:flex-row lg:items-end lg:justify-between">
-            <Box className="min-w-0">
-              <Typography className="text-sm font-medium text-foreground" component="h2">
+          <Box className="flex flex-col gap-3 border-b border-border/40 pb-3 lg:flex-row lg:items-end lg:justify-between">
+            <Box className="flex min-w-0 flex-wrap items-center gap-2">
+              <Typography className="truncate text-base font-semibold text-foreground" component="h2">
                 {selected.provider.name}
               </Typography>
-              <Box className="mt-1.5 flex flex-wrap items-center gap-2">
-                <StatusBadge tone={selected.provider.enabled ? 'normal' : 'disabled'}>
-                  {t(selected.provider.enabled ? '已启用' : '已禁用')}
-                </StatusBadge>
-                <Typography className="font-mono text-xs text-muted-foreground" component="span">
-                  {t('{{count}} 个 OAuth 账号', { count: selected.keys.length })}
-                </Typography>
-              </Box>
+              <StatusBadge tone={selected.provider.enabled ? 'normal' : 'disabled'}>
+                {t(selected.provider.enabled ? '已启用' : '已禁用')}
+              </StatusBadge>
             </Box>
             {codexProviders.length > 1 ? (
               <FormControl className="w-full lg:w-80">

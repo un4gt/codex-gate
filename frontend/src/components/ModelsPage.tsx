@@ -398,8 +398,6 @@ export function ModelsPage(props: ModelsPageProps) {
 
   return <Box className="flex flex-col gap-4">
     <PageHeader
-      title="模型"
-      description="管理模型库存、别名目标与 Responses 兼容能力。"
       actions={<Box className="flex w-full flex-wrap justify-end gap-2">
         <Button
           type="button"

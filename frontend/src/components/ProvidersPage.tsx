@@ -1109,7 +1109,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }
   };
   return <Box className="section-stack">
-      <PageHeader title="上游" description="查看连接目标、流量去向与健康状态。" actions={<Button type="button" disabled={!isLive()} className="text-xs tracking-wider" onClick={() => {
+      <PageHeader actions={<Button type="button" disabled={!isLive()} className="text-xs tracking-wider" onClick={() => {
       resetCreateForm();
       setCreateOpen(true);
     }}>

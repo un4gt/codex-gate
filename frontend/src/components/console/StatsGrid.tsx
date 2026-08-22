@@ -22,11 +22,11 @@ function trendColor(tone?: StatItem['tone']): NonNullable<ChipProps['color']> {
 }
 function ToneDot(props: { tone?: StatItem['tone'] }) {
   const colorClass = props.tone === 'success'
-    ? 'bg-emerald-500'
+    ? 'bg-success'
     : props.tone === 'warning'
-      ? 'bg-amber-500'
+      ? 'bg-warning'
       : props.tone === 'destructive'
-        ? 'bg-red-500'
+        ? 'bg-danger'
         : null;
 
   if (!colorClass) return null;

@@ -14,7 +14,7 @@ interface StatCardProps {
 }
 const accentClasses: Record<NonNullable<StatCardProps['accent']>, string> = {
   orange: 'border-primary/20 bg-primary/10 text-primary',
-  green: 'border-emerald-600/20 bg-emerald-50/90 text-emerald-700',
+  green: 'border-success-border bg-success-surface text-success',
   slate: 'border-border bg-muted/75 text-foreground'
 };
 export function StatCard(props: StatCardProps) {

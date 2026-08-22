@@ -1,22 +1,27 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Copy, ExternalLink, Globe2, KeyRound, LogIn, RefreshCw, Send, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { ChevronRight, Copy, ExternalLink, Globe2, KeyRound, LogIn, MoreHorizontal, Power, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Alert from '@mui/material/Alert';
 import AlertTitle from '@mui/material/AlertTitle';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Card from '@mui/material/Card';
-import CardContent from '@mui/material/CardContent';
+import Collapse from '@mui/material/Collapse';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
+import DialogContentText from '@mui/material/DialogContentText';
 import DialogTitle from '@mui/material/DialogTitle';
 import FormControl from '@mui/material/FormControl';
 import FormLabel from '@mui/material/FormLabel';
+import IconButton from '@mui/material/IconButton';
 import InputBase from '@mui/material/InputBase';
 import LinearProgress from '@mui/material/LinearProgress';
+import ListItemIcon from '@mui/material/ListItemIcon';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Typography from '@mui/material/Typography';
+import { QuotaBar, quotaTextClass } from '@/components/console/QuotaBar';
 import { StatusBadge, type StatusTone } from '@/components/console/StatusBadge';
 import {
   cancelCodexOAuthSession,
@@ -32,6 +37,7 @@ import { getIntlLocale, t } from '@/lib/i18n';
 import type {
   CodexOAuthSession,
   CodexOAuthFlow,
+  CodexQuotaCredits,
   CodexQuotaWindow,
   ConnectionSettings,
   ProviderWorkspace,
@@ -400,9 +406,25 @@ interface LoginTarget {
 export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [loginTarget, setLoginTarget] = useState<LoginTarget | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<UpstreamKeyMeta | null>(null);
+  const [expandOverrides, setExpandOverrides] = useState<Record<number, boolean>>({});
   const loginSequenceRef = useRef(0);
   const accounts = props.item.keys;
+  // 单账号时详情默认摊开；多账号默认收起，让整页保持可扫描的行密度。
+  const expandedByDefault = accounts.length === 1;
+  const summary = useMemo(() => {
+    const routable = accounts.filter(key => {
+      const oauth = key.codex_oauth;
+      return key.enabled && oauth?.auth_status === 'active' && oauth.quota?.allowed !== false;
+    }).length;
+    return { total: accounts.length, routable };
+  }, [accounts]);
 
+  const isExpanded = (keyId: number) => expandOverrides[keyId] ?? expandedByDefault;
+  const toggleExpanded = (keyId: number) => setExpandOverrides(prev => ({
+    ...prev,
+    [keyId]: !(prev[keyId] ?? expandedByDefault),
+  }));
   const openLogin = (keyId: number | null) => {
     loginSequenceRef.current += 1;
     setLoginTarget({ keyId, attemptId: loginSequenceRef.current });
@@ -438,7 +460,7 @@ export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
     }
   };
   const removeAccount = async (key: UpstreamKeyMeta) => {
-    if (!window.confirm(t('确认删除 OAuth 账号 {{name}}？', { name: key.name }))) return;
+    setPendingDelete(null);
     setBusy(`delete-${key.id}`);
     try {
       await deleteProviderKey(props.settings, key.id);
@@ -451,42 +473,76 @@ export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
   };
 
   return (
-    <Box className="grid gap-5" component="section" aria-labelledby="codex-oauth-accounts-title">
-      <Box className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 pb-4">
+    <Box className="grid gap-3" component="section" aria-labelledby="codex-oauth-accounts-title">
+      <Box className="flex flex-wrap items-end justify-between gap-3">
         <Box>
-          <Typography id="codex-oauth-accounts-title" className="text-base font-medium uppercase tracking-tight" component="h3">
+          <Typography id="codex-oauth-accounts-title" className="text-sm font-semibold text-foreground" component="h3">
             {t('OAuth 账号')}
           </Typography>
-          <Typography className="mt-1 text-sm text-muted-foreground" component="p">
-            {t('账号逐个参与现有密钥调度；认证状态不会改写手动 enabled 开关。')}
+          <Typography className="mt-1 text-[0.8125rem] leading-5 text-muted-foreground" component="p">
+            {accounts.length === 0
+              ? t('账号会与现有密钥一同参与调度。')
+              : t('{{total}} 个账号 · {{routable}} 个正在参与路由', summary)}
           </Typography>
         </Box>
-        <Button type="button" onClick={() => openLogin(null)}>
-          <LogIn className="mr-2 size-4" aria-hidden="true" />
+        <Button type="button" size="sm" onClick={() => openLogin(null)}>
+          <LogIn className="mr-1.5 size-3.5" aria-hidden="true" />
           {t('登录新账号')}
         </Button>
       </Box>
 
       {accounts.length === 0 ? (
-        <Alert severity="info" variant="outlined">
+        <Alert severity="info">
           <AlertTitle>{t('尚未登录 Codex 账号')}</AlertTitle>
           {t('登录一个账号后即可同步模型、查看余量并参与 Responses 路由。')}
         </Alert>
       ) : (
-        <Box className="grid gap-4">
+        <Box className="grid gap-1.5">
           {accounts.map(key => (
-            <CodexAccountCard
+            <CodexAccountRow
               key={key.id}
               item={key}
               busy={busy}
+              expanded={isExpanded(key.id)}
+              onToggleExpand={() => toggleExpanded(key.id)}
               onRefresh={() => void refreshQuota(key)}
               onRelogin={() => openLogin(key.id)}
               onToggle={() => void toggleAccount(key)}
-              onDelete={() => void removeAccount(key)}
+              onDelete={() => setPendingDelete(key)}
             />
           ))}
         </Box>
       )}
+
+      <Dialog
+        open={pendingDelete !== null}
+        maxWidth="xs"
+        fullWidth
+        aria-labelledby="codex-oauth-delete-title"
+        onClose={() => setPendingDelete(null)}
+      >
+        <DialogTitle id="codex-oauth-delete-title">{t('删除 OAuth 账号')}</DialogTitle>
+        <DialogContent>
+          <DialogContentText className="text-[0.8125rem] leading-5 text-muted-foreground">
+            {t('将移除 {{name}} 的凭据，该账号会立即退出路由。此操作不可撤销。', {
+              name: pendingDelete?.codex_oauth?.email_masked ?? pendingDelete?.name ?? '',
+            })}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button type="button" variant="outline" size="sm" onClick={() => setPendingDelete(null)}>
+            {t('取消')}
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            onClick={() => { if (pendingDelete) void removeAccount(pendingDelete); }}
+          >
+            {t('删除')}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {loginTarget ? (
         <CodexOAuthLoginDialog
@@ -508,9 +564,11 @@ export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
   );
 }
 
-function CodexAccountCard(props: {
+function CodexAccountRow(props: {
   item: UpstreamKeyMeta;
   busy: string | null;
+  expanded: boolean;
+  onToggleExpand: () => void;
   onRefresh: () => void;
   onRelogin: () => void;
   onToggle: () => void;
@@ -520,129 +578,280 @@ function CodexAccountCard(props: {
   const status = account?.auth_status ?? 'reauth_required';
   const statusView = authStatusView(status);
   const quota = account?.quota;
+  const quotaBlocked = quota?.allowed === false;
+  const detailId = `codex-account-detail-${props.item.id}`;
+  const planLabel = formatPlan(account?.plan_type ?? quota?.plan_type);
+  const windows = quota
+    ? [
+        { label: windowLabel(quota.primary_window, t('主要额度')), window: quota.primary_window },
+        { label: windowLabel(quota.secondary_window, t('次级额度')), window: quota.secondary_window },
+        { label: windowLabel(quota.code_review_window, t('代码审查额度')), window: quota.code_review_window },
+      ].filter((entry): entry is { label: string; window: CodexQuotaWindow } => entry.window !== null)
+    : [];
+  const health = accountHealth(props.item, status, quotaBlocked);
+  const flagged = health === 'attention' || health === 'error';
 
   return (
-    <Card className="border border-border bg-background shadow-none">
-      <CardContent className="grid gap-4 p-4">
-        <Box className="flex flex-wrap items-start justify-between gap-3">
-          <Box className="min-w-0">
-            <Typography className="truncate text-sm font-semibold" component="h4">
-              {account?.email_masked ?? props.item.name}
+    <Box
+      className={`border bg-background ${flagged ? 'border-warning-border' : 'border-border'}`}
+      style={{ borderRadius: 'var(--radius)' }}
+    >
+      <Box className="flex items-center gap-2 px-2.5 py-2">
+        <Box
+          component="button"
+          type="button"
+          aria-expanded={props.expanded}
+          aria-controls={detailId}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 border-0 bg-transparent p-0 text-left"
+          onClick={props.onToggleExpand}
+        >
+          <ChevronRight
+            className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${props.expanded ? 'rotate-90' : ''}`}
+            aria-hidden="true"
+          />
+          <Box className={`size-1.5 shrink-0 rounded-full ${statusDotClass(health)}`} component="span" aria-hidden="true" />
+          <Typography className="truncate text-[0.8125rem] font-semibold text-foreground" component="span">
+            {account?.email_masked ?? props.item.name}
+          </Typography>
+          {planLabel ? (
+            <Typography className="shrink-0 text-[0.6875rem] text-muted-foreground" component="span">
+              {planLabel}
             </Typography>
-            <Typography className="mt-0.5 font-mono text-[0.6875rem] text-muted-foreground" component="div">
-              {account?.account_id_suffix ?? t('旧凭据，需重新登录')}
-            </Typography>
-          </Box>
-          <Box className="flex flex-wrap items-center gap-2">
-            <StatusBadge tone={statusView.tone}>{statusView.label}</StatusBadge>
-            <StatusBadge tone={props.item.enabled ? 'normal' : 'disabled'}>
-              {t(props.item.enabled ? '已启用' : '已禁用')}
-            </StatusBadge>
-          </Box>
+          ) : null}
+          <Typography className="hidden shrink-0 font-mono text-[0.6875rem] text-muted-foreground xl:inline" component="span">
+            {account?.account_id_suffix ?? t('旧凭据')}
+          </Typography>
         </Box>
 
-        <Box className="grid gap-2.5 text-[0.8125rem] sm:grid-cols-2 lg:grid-cols-4">
-          <Meta label={t('订阅计划')} value={account?.plan_type ?? quota?.plan_type ?? '—'} />
-          <Meta label={t('Token 到期')} value={formatOptionalDate(account?.token_expires_at_ms)} />
-          <Meta label={t('最近刷新')} value={formatOptionalDate(account?.last_refresh_at_ms)} />
-          <Meta label={t('余量检查')} value={formatOptionalDate(account?.quota_checked_at_ms)} />
-        </Box>
-
-        {account?.last_error ? (
-          <Alert severity={status === 'active' ? 'warning' : 'error'} variant="outlined">
-            <AlertTitle>{t('最近错误')}</AlertTitle>
-            {account.last_error}
-          </Alert>
-        ) : null}
-
-        {quota ? (
-          <Box className="grid gap-3" aria-label={t('Codex 额度窗口')}>
-            {quota.allowed === false ? <Alert severity="warning" variant="outlined">
-                <AlertTitle>{t('当前额度不可用')}</AlertTitle>
-                {t('该账号会暂时退出路由；额度恢复后将自动重新参与。')}
-              </Alert> : null}
-            <QuotaWindow label={windowLabel(quota.primary_window, t('主要额度'))} window={quota.primary_window} />
-            <QuotaWindow label={windowLabel(quota.secondary_window, t('次级额度'))} window={quota.secondary_window} />
-            <QuotaWindow label={windowLabel(quota.code_review_window, t('代码审查额度'))} window={quota.code_review_window} />
-            {quota.credits.has_credits
-              || quota.credits.unlimited
-              || quota.credits.balance != null
-              || quota.credits.reset_credits != null
-              || quota.credits.subscription_end_at_ms != null ? (
-              <Box className="rounded border border-border/50 bg-muted/10 p-3 text-[0.8125rem]">
-                <Typography className="font-medium" component="div">{t('Credits 余额')}</Typography>
-                <Typography className="mt-0.5 font-mono text-sm" component="div">
-                  {quota.credits.unlimited
-                    ? t('无限')
-                    : quota.credits.balance == null
-                      ? '—'
-                      : new Intl.NumberFormat(getIntlLocale(), { maximumFractionDigits: 2 }).format(quota.credits.balance)}
-                </Typography>
-                {quota.credits.reset_credits != null ? <Typography className="mt-2 text-xs text-muted-foreground" component="div">
-                    {t('重置 Credits：{{credits}}', {
-                      credits: new Intl.NumberFormat(getIntlLocale(), { maximumFractionDigits: 2 }).format(quota.credits.reset_credits),
-                    })}
-                  </Typography> : null}
-                {quota.credits.subscription_end_at_ms ? <Typography className="mt-1 text-xs text-muted-foreground" component="div">
-                    {t('订阅截止：{{time}}', { time: formatDateTime(quota.credits.subscription_end_at_ms) })}
-                  </Typography> : null}
-              </Box>
-            ) : null}
+        {/* 展开后详情里有完整额度条，行内速览让位，避免同一标签出现两次 */}
+        {props.expanded ? null : (
+          <Box className="hidden shrink-0 items-center gap-3 md:flex">
+            {windows.slice(0, 2).map(entry => (
+              <QuotaGlance key={entry.label} label={entry.label} window={entry.window} />
+            ))}
           </Box>
-        ) : (
-          <Alert severity="info" variant="outlined">{t('尚无缓存余量，请手动刷新。')}</Alert>
         )}
 
-        <Box className="flex flex-wrap justify-end gap-2 border-t border-border/40 pt-4">
-          <Button type="button" variant="outline" disabled={props.busy === `quota-${props.item.id}`} onClick={props.onRefresh}>
-            <RefreshCw className={`mr-2 size-4 ${props.busy === `quota-${props.item.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
-            {t('刷新余量')}
-          </Button>
-          <Button type="button" variant="outline" onClick={props.onRelogin}>
-            <LogIn className="mr-2 size-4" aria-hidden="true" />
-            {t('重新登录')}
-          </Button>
-          <Button type="button" variant="outline" disabled={props.busy === `toggle-${props.item.id}`} onClick={props.onToggle}>
-            {t(props.item.enabled ? '禁用账号' : '启用账号')}
-          </Button>
-          <Button type="button" variant="destructive" disabled={props.busy === `delete-${props.item.id}`} onClick={props.onDelete}>
-            <Trash2 className="mr-2 size-4" aria-hidden="true" />
-            {t('删除')}
-          </Button>
+        <Box className="flex shrink-0 items-center gap-1.5">
+          {quotaBlocked ? <StatusBadge tone="warning">额度不可用</StatusBadge> : null}
+          {status === 'active' ? null : <StatusBadge tone={statusView.tone}>{statusView.label}</StatusBadge>}
+          {props.item.enabled ? null : <StatusBadge tone="disabled">已禁用</StatusBadge>}
+          <AccountActions
+            enabled={props.item.enabled}
+            busy={props.busy}
+            keyId={props.item.id}
+            onRefresh={props.onRefresh}
+            onRelogin={props.onRelogin}
+            onToggle={props.onToggle}
+            onDelete={props.onDelete}
+          />
         </Box>
-      </CardContent>
-    </Card>
+      </Box>
+
+      <Collapse in={props.expanded} unmountOnExit>
+        <Box id={detailId} className="grid gap-3 border-t border-border/60 px-3 py-3">
+          {quotaBlocked ? (
+            <Alert severity="warning">
+              <AlertTitle>{t('当前额度不可用')}</AlertTitle>
+              {t('该账号会暂时退出路由；额度恢复后将自动重新参与。')}
+            </Alert>
+          ) : null}
+
+          {account?.last_error ? (
+            <Alert severity={status === 'active' ? 'warning' : 'error'}>
+              <AlertTitle>{t('最近错误')}</AlertTitle>
+              {account.last_error}
+            </Alert>
+          ) : null}
+
+          {!quota ? (
+            <Alert severity="info">{t('尚无缓存余量，请手动刷新。')}</Alert>
+          ) : windows.length > 0 ? (
+            <Box className="grid gap-2.5" aria-label={t('Codex 额度窗口')}>
+              {windows.map(entry => (
+                <QuotaWindowRow key={entry.label} label={entry.label} window={entry.window} />
+              ))}
+            </Box>
+          ) : null}
+
+          <Box className="grid gap-x-4 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-4">
+            <Meta label={t('订阅计划')} value={planLabel ?? '—'} />
+            <Meta label={t('Token 到期')} value={formatOptionalDate(account?.token_expires_at_ms)} />
+            <Meta label={t('最近刷新')} value={formatOptionalDate(account?.last_refresh_at_ms)} />
+            <Meta label={t('余量检查')} value={formatOptionalDate(account?.quota_checked_at_ms)} />
+            {quota ? <CreditsMeta credits={quota.credits} /> : null}
+          </Box>
+        </Box>
+      </Collapse>
+    </Box>
+  );
+}
+
+function AccountActions(props: {
+  enabled: boolean;
+  busy: string | null;
+  keyId: number;
+  onRefresh: () => void;
+  onRelogin: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const close = () => setAnchor(null);
+  const run = (action: () => void) => () => {
+    close();
+    action();
+  };
+  const refreshing = props.busy === `quota-${props.keyId}`;
+
+  return (
+    <>
+      <IconButton
+        size="small"
+        aria-label={t('账号操作')}
+        aria-haspopup="menu"
+        onClick={event => setAnchor(event.currentTarget)}
+      >
+        <MoreHorizontal className="size-4" aria-hidden="true" />
+      </IconButton>
+      <Menu
+        anchorEl={anchor}
+        open={Boolean(anchor)}
+        onClose={close}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        <MenuItem disabled={refreshing} onClick={run(props.onRefresh)}>
+          <ListItemIcon>
+            <RefreshCw className={`size-3.5 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+          </ListItemIcon>
+          {t('刷新余量')}
+        </MenuItem>
+        <MenuItem onClick={run(props.onRelogin)}>
+          <ListItemIcon>
+            <LogIn className="size-3.5" aria-hidden="true" />
+          </ListItemIcon>
+          {t('重新登录')}
+        </MenuItem>
+        <MenuItem disabled={props.busy === `toggle-${props.keyId}`} onClick={run(props.onToggle)}>
+          <ListItemIcon>
+            <Power className="size-3.5" aria-hidden="true" />
+          </ListItemIcon>
+          {t(props.enabled ? '禁用账号' : '启用账号')}
+        </MenuItem>
+        <MenuItem
+          disabled={props.busy === `delete-${props.keyId}`}
+          className="text-danger"
+          onClick={run(props.onDelete)}
+        >
+          <ListItemIcon>
+            <Trash2 className="size-3.5 text-danger" aria-hidden="true" />
+          </ListItemIcon>
+          {t('删除')}
+        </MenuItem>
+      </Menu>
+    </>
   );
 }
 
 function Meta(props: { label: string; value: string }) {
   return (
-    <Box className="border-l-2 border-border pl-3">
-      <Typography className="text-xs uppercase tracking-wider text-muted-foreground" component="div">{props.label}</Typography>
-      <Typography className="mt-1 break-words font-mono text-sm" component="div">{props.value}</Typography>
+    <Box className="min-w-0">
+      <Typography className="text-[0.6875rem] leading-4 text-muted-foreground" component="div">{props.label}</Typography>
+      <Typography className="mt-0.5 truncate font-mono text-[0.8125rem] text-foreground" title={props.value} component="div">
+        {props.value}
+      </Typography>
     </Box>
   );
 }
 
-function QuotaWindow(props: { label: string; window: CodexQuotaWindow | null }) {
-  if (!props.window) return null;
+function CreditsMeta(props: { credits: CodexQuotaCredits }) {
+  const { credits } = props;
+  const balance = credits.unlimited
+    ? t('无限')
+    : credits.balance != null
+      ? formatQuantity(credits.balance)
+      : null;
+  return (
+    <>
+      {balance === null ? null : <Meta label={t('Credits 余额')} value={balance} />}
+      {credits.reset_credits == null ? null : (
+        <Meta label={t('重置 Credits')} value={formatQuantity(credits.reset_credits)} />
+      )}
+      {credits.subscription_end_at_ms == null ? null : (
+        <Meta label={t('订阅截止')} value={formatDateTime(credits.subscription_end_at_ms)} />
+      )}
+    </>
+  );
+}
+
+/** 折叠行里的额度速览：窄、无边框，只求一眼看出健康度。 */
+function QuotaGlance(props: { label: string; window: CodexQuotaWindow }) {
   const remaining = Math.max(0, Math.min(100, props.window.remaining_percent));
   return (
-    <Box className="grid gap-2">
-      <Box className="flex flex-wrap items-center justify-between gap-2 text-sm">
-        <Typography className="font-medium" component="div">{props.label}</Typography>
-        <Typography className="font-mono" component="div">
-          {t('剩余 {{percent}}%', { percent: Math.round(remaining) })}
-          {props.window.reset_at_ms ? ` · ${t('重置于 {{time}}', { time: formatDateTime(props.window.reset_at_ms) })}` : ''}
+    <Box className="w-24">
+      <Box className="flex items-baseline justify-between gap-1">
+        <Typography className="truncate text-[0.625rem] leading-4 text-muted-foreground" component="span">
+          {props.label}
+        </Typography>
+        <Typography
+          className={`shrink-0 font-mono text-[0.6875rem] font-medium leading-4 ${quotaTextClass(remaining)}`}
+          component="span"
+        >
+          {Math.round(remaining)}%
         </Typography>
       </Box>
-      <LinearProgress
-        variant="determinate"
-        value={remaining}
-        aria-label={t('{{label}}剩余 {{percent}}%', { label: props.label, percent: Math.round(remaining) })}
-      />
+      <Box className="mt-0.5">
+        <QuotaBar dense remainingPercent={remaining} label={props.label} />
+      </Box>
     </Box>
   );
+}
+
+function QuotaWindowRow(props: { label: string; window: CodexQuotaWindow }) {
+  const remaining = Math.max(0, Math.min(100, props.window.remaining_percent));
+  return (
+    <Box className="grid gap-1.5">
+      <Box className="flex flex-wrap items-baseline justify-between gap-2">
+        <Typography className="text-[0.8125rem] font-medium text-foreground" component="div">{props.label}</Typography>
+        <Typography className="font-mono text-[0.6875rem] text-muted-foreground" component="div">
+          <Box className={`font-medium ${quotaTextClass(remaining)}`} component="span">
+            {t('剩余 {{percent}}%', { percent: Math.round(remaining) })}
+          </Box>
+          {props.window.reset_at_ms
+            ? ` · ${t('重置于 {{time}}', { time: formatDateTime(props.window.reset_at_ms) })}`
+            : ''}
+        </Typography>
+      </Box>
+      <QuotaBar remainingPercent={remaining} label={props.label} />
+    </Box>
+  );
+}
+
+type AccountHealth = 'ok' | 'attention' | 'error' | 'off';
+
+function accountHealth(item: UpstreamKeyMeta, status: string, quotaBlocked: boolean): AccountHealth {
+  if (!item.enabled) return 'off';
+  if (status === 'forbidden') return 'error';
+  if (status !== 'active') return 'attention';
+  return quotaBlocked ? 'attention' : 'ok';
+}
+
+function statusDotClass(health: AccountHealth) {
+  if (health === 'ok') return 'bg-success';
+  if (health === 'attention') return 'bg-warning';
+  if (health === 'error') return 'bg-danger';
+  return 'bg-muted-foreground/40';
+}
+
+/** 订阅计划来自接口原样小写（如 plus），作为产品名展示时首字母大写。 */
+function formatPlan(plan: string | null | undefined) {
+  if (!plan) return null;
+  return plan.charAt(0).toUpperCase() + plan.slice(1);
+}
+
+function formatQuantity(value: number) {
+  return new Intl.NumberFormat(getIntlLocale(), { maximumFractionDigits: 2 }).format(value);
 }
 
 function windowLabel(window: CodexQuotaWindow | null, fallback: string) {

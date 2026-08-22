@@ -705,7 +705,6 @@ describe('admin console smoke test', () => {
 
   it('renders Codex accounts without batch controls and calls per-account APIs', async () => {
     const requests: string[] = [];
-    const confirmDelete = rs.spyOn(window, 'confirm').mockReturnValue(true);
     fetchRequest.mockImplementation(async (input, init) => {
       const path = new URL(String(input)).pathname;
       const method = init?.method ?? 'GET';
@@ -730,24 +729,40 @@ describe('admin console smoke test', () => {
     expect(screen.queryByRole('heading', { name: 'API Keys' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Key Model Restrictions' })).toBeNull();
     expect(screen.queryByText(/select all/i)).toBeNull();
-    expect(screen.getByText('5-Hour Quota')).toBeTruthy();
-    expect(screen.getByText('30-Day Quota')).toBeTruthy();
-    expect(screen.getByText('Credits Balance')).toBeTruthy();
+
+    // 多账号默认折叠：异常状态留在行内，明细要展开才出现
     expect(screen.getByText('Forbidden')).toBeTruthy();
     expect(screen.getByText('Disabled')).toBeTruthy();
+    expect(screen.queryByText('Credits Balance')).toBeNull();
 
-    const primaryCard = screen.getByRole('heading', { name: 'o***@example.com' }).closest('.MuiCard-root');
-    const secondaryCard = screen.getByRole('heading', { name: 's***@example.com' }).closest('.MuiCard-root');
-    expect(primaryCard).toBeTruthy();
-    expect(secondaryCard).toBeTruthy();
-    fireEvent.click(within(primaryCard as HTMLElement).getByRole('button', { name: 'Refresh Quota' }));
+    const primaryToggle = screen.getByText('o***@example.com').closest('button') as HTMLElement;
+    const secondaryToggle = screen.getByText('s***@example.com').closest('button') as HTMLElement;
+    expect(primaryToggle).toBeTruthy();
+    expect(secondaryToggle).toBeTruthy();
+
+    fireEvent.click(primaryToggle);
+    expect(await screen.findByText('Credits Balance')).toBeTruthy();
+    expect(screen.getByText('5-Hour Quota')).toBeTruthy();
+    expect(screen.getByText('30-Day Quota')).toBeTruthy();
+
+    // 每行操作收在溢出菜单里，没有批量控件
+    const primaryRow = primaryToggle.parentElement as HTMLElement;
+    fireEvent.click(within(primaryRow).getByRole('button', { name: 'Account actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Refresh Quota' }));
     await waitFor(() => expect(requests).toContain('POST /api/v1/keys/172/codex-oauth/quota/refresh'));
-    fireEvent.click(within(secondaryCard as HTMLElement).getByRole('button', { name: 'Enable' }));
+
+    const secondaryRow = secondaryToggle.parentElement as HTMLElement;
+    fireEvent.click(within(secondaryRow).getByRole('button', { name: 'Account actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Enable' }));
     await waitFor(() => expect(requests).toContain('PATCH /api/v1/keys/173'));
-    fireEvent.click(within(primaryCard as HTMLElement).getByRole('button', { name: 'Delete' }));
+
+    // 删除走应用内确认框，不再是原生 window.confirm
+    fireEvent.click(within(primaryRow).getByRole('button', { name: 'Account actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete OAuth Account' });
+    expect(within(dialog).getByText(/cannot be undone/i)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(requests).toContain('DELETE /api/v1/keys/172'));
-    expect(confirmDelete).toHaveBeenCalledWith('Delete OAuth account Primary account?');
-    confirmDelete.mockRestore();
     expect(consoleError).not.toHaveBeenCalled();
   });
 

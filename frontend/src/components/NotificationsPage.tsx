@@ -527,7 +527,7 @@ function operatorLabel(operator: NotificationAlertOperator) {
 }
 
 function SummaryCard(props: { label: string; value: number; warning?: boolean }) {
-  return <Card className={props.warning ? 'border-amber-500/40' : ''}>
+  return <Card className={props.warning ? 'border-warning-border' : ''}>
       {/* 主题里 CardContent 的 paddingTop 为 0（默认上方有卡片头），这里单独使用需补回上内距 */}
       <CardContent className="flex h-full flex-col justify-center pt-4">
         <Box className="surface-label">{t(props.label)}</Box>
@@ -758,7 +758,7 @@ export function NotificationsPage(props: NotificationsPageProps) {
   }
 
   return <Box className="section-stack">
-      <PageHeader title="通知" description="配置定时报表、阈值告警与投递通道。" actions={<Box className="flex w-full justify-end">
+      <PageHeader actions={<Box className="flex w-full justify-end">
           <Button type="button" variant="outline" onClick={() => void refreshAll()} disabled={busy !== null}>
             <RefreshCw className="mr-1.5 size-3.5" />{t('刷新')}
           </Button>

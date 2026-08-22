@@ -529,25 +529,25 @@ export const theme = createTheme({
         {
           props: { color: 'success', variant: 'outlined' },
           style: {
-            backgroundColor: 'rgb(16 185 129 / 0.1)',
-            borderColor: 'rgb(16 185 129 / 0.5)',
-            color: 'rgb(5 150 105)',
+            backgroundColor: 'var(--success-surface)',
+            borderColor: 'var(--success-border)',
+            color: 'var(--success)',
           },
         },
         {
           props: { color: 'warning', variant: 'outlined' },
           style: {
-            backgroundColor: 'rgb(245 158 11 / 0.1)',
-            borderColor: 'rgb(245 158 11 / 0.5)',
-            color: 'rgb(217 119 6)',
+            backgroundColor: 'var(--warning-surface)',
+            borderColor: 'var(--warning-border)',
+            color: 'var(--warning)',
           },
         },
         {
           props: { color: 'error', variant: 'outlined' },
           style: {
-            backgroundColor: 'rgb(239 68 68 / 0.1)',
-            borderColor: 'rgb(239 68 68 / 0.5)',
-            color: 'rgb(220 38 38)',
+            backgroundColor: 'var(--danger-surface)',
+            borderColor: 'var(--danger-border)',
+            color: 'var(--danger)',
           },
         },
       ],
@@ -574,6 +574,45 @@ export const theme = createTheme({
           width: '100%',
         },
       },
+      // severity 必须看得见：默认样式把所有等级抹平成同一个灰框，
+      // 会让「额度不可用」这类关键提示比旁边的装饰元素还弱。
+      variants: [
+        {
+          props: { severity: 'success' },
+          style: {
+            backgroundColor: 'var(--success-surface)',
+            borderColor: 'var(--success-border)',
+            borderLeft: '3px solid var(--success)',
+            '& .MuiAlertTitle-root': { color: 'var(--success)' },
+          },
+        },
+        {
+          props: { severity: 'warning' },
+          style: {
+            backgroundColor: 'var(--warning-surface)',
+            borderColor: 'var(--warning-border)',
+            borderLeft: '3px solid var(--warning)',
+            '& .MuiAlertTitle-root': { color: 'var(--warning)' },
+          },
+        },
+        {
+          props: { severity: 'error' },
+          style: {
+            backgroundColor: 'var(--danger-surface)',
+            borderColor: 'var(--danger-border)',
+            borderLeft: '3px solid var(--danger)',
+            '& .MuiAlertTitle-root': { color: 'var(--danger)' },
+          },
+        },
+        {
+          props: { severity: 'info' },
+          style: {
+            backgroundColor: 'color-mix(in oklab, var(--primary) 7%, var(--background))',
+            borderColor: 'color-mix(in oklab, var(--primary) 28%, var(--border))',
+            borderLeft: '3px solid var(--primary)',
+          },
+        },
+      ],
     },
     MuiAlertTitle: {
       styleOverrides: {
@@ -784,7 +823,7 @@ export const theme = createTheme({
     MuiLinearProgress: {
       styleOverrides: {
         root: {
-          backgroundColor: 'color-mix(in oklab, var(--muted) 70%, transparent)',
+          backgroundColor: 'var(--muted)',
           borderRadius: 'var(--radius)',
           height: '0.25rem',
         },

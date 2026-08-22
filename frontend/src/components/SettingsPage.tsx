@@ -1,6 +1,5 @@
 import { useState, type FormEvent } from 'react';
 import { ChevronDown } from "lucide-react";
-import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { PricesPage } from '@/components/PricesPage';
 import { t } from '@/lib/i18n';
@@ -73,8 +72,6 @@ export function SettingsPage(props: SettingsPageProps) {
     }
   };
   return <Box className="section-stack">
-      <PageHeader title="设置" description="维护连接与系统设置。" />
-
       <Card>
         <Box className="flex flex-col gap-2 p-4 pb-3">
           <Box className="flex items-center justify-between gap-2.5">
@@ -199,7 +196,7 @@ function SettingsSection(props: {
   children: any;
   warning?: boolean;
 }) {
-  return <Card className={props.warning ? 'border-amber-500/40' : ''}>
+  return <Card className={props.warning ? 'border-warning-border' : ''}>
       <Box className="flex flex-col gap-2 p-4 pb-3">
         <Button type="button" className="flex h-auto w-full cursor-pointer items-center justify-between gap-3 p-0 text-left normal-case tracking-normal hover:bg-transparent" onClick={props.onToggle} variant="ghost">
           <Box>

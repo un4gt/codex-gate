@@ -3,7 +3,6 @@ import { ChevronDown, ChevronRight, Columns3, Copy, Search } from "lucide-react"
 import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { EmptyState } from '@/components/console/EmptyState';
 import { FilterBar } from '@/components/console/FilterBar';
-import { PageHeader } from '@/components/console/PageHeader';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import {
   ColumnResizeHandle,
@@ -361,8 +360,6 @@ export function LogsPage(props: LogsPageProps) {
     void saveVisibleColumns(next, previous);
   };
   return <Box className="flex flex-col gap-4">
-      <PageHeader title="请求日志" description="筛选并排查最近请求。" />
-
       <FilterBar primary={<>
             <InputBase value={filters.query} placeholder={t("搜索请求 ID、模型或错误")} onChange={event => setFilters(current => ({
         ...current,

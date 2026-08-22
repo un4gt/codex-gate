@@ -48,6 +48,8 @@ interface AppDataContext {
   runtimeSettings: RuntimeSettingsResponse | null;
   runtimeEnvPreview: RuntimeEnvPreviewResponse | null;
   status: LoadState;
+  /** 最近一次后台请求是否成功——顶栏连接指示器据此渲染，不能靠硬编码。 */
+  linkOk: boolean;
   message: string;
   refreshKey: number;
   loadProviders: (successMessage?: string) => Promise<void>;
@@ -440,7 +442,10 @@ function TopShell(props: {
           <Box className="mt-auto flex flex-col gap-3 border-t border-border/40 px-3 pt-7">
             <Box className="flex items-center justify-between">
               <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('SYSTEM STATUS')}</Box>
-              <Box className="size-2 rounded-full bg-primary" component="span" />
+              <Box
+                className={`size-2 rounded-full ${props.data.status === 'loading' ? 'bg-warning' : props.data.linkOk ? 'bg-success' : 'bg-danger'}`}
+                component="span"
+              />
             </Box>
             <Box className="truncate text-xs leading-5 text-muted-foreground" component="p">{props.data.message}</Box>
             <Box className="flex items-center justify-between gap-3 border border-border/50 px-3 py-2">
@@ -450,7 +455,7 @@ function TopShell(props: {
                 {serviceCommit !== '—' ? <Box className="ml-2 text-muted-foreground" component="span">{serviceCommit}</Box> : null}
               </Box>
             </Box>
-            <Button type="button" variant="ghost" className="mt-2 h-10 justify-start border border-border/60 px-3 text-muted-foreground hover:text-foreground" onClick={props.data.onLogout}>
+            <Button type="button" variant="ghost" className="mt-2 justify-start border border-border/60 px-3 text-muted-foreground hover:text-foreground" onClick={props.data.onLogout}>
               <LogOut className="size-4" />
               {t('退出')}
             </Button>
@@ -461,22 +466,14 @@ function TopShell(props: {
           <Box className="app-content">
             <Box className="app-pagebar">
               <Box className="min-w-0">
-                <Box className="mb-3 flex items-center gap-3">
-                  <Box className="size-1.5 rounded-full bg-primary" component="span" />
-                  <Box className="app-kicker" component="p">{`${t(currentItem.label)} ${t('MODULE')}`}</Box>
-                </Box>
                 <Box className="app-title" component="h1">{t(currentItem.label)}</Box>
                 <Box className="app-description" component="p">{t(pageDescription(location.pathname))}</Box>
               </Box>
               <Box className="app-toolbar">
                 <LocaleSwitch />
-                <StatusBadge tone="normal">实时</StatusBadge>
-                <Box className="flex items-center gap-2">
-                  <Box className="size-1.5 rounded-full bg-primary" component="span" />
-                  <Box className="text-xs font-medium text-muted-foreground opacity-80" component="span">{t('已连接')}</Box>
-                </Box>
+                <ConnectionIndicator status={props.data.status} linkOk={props.data.linkOk} />
                 <Button type="button" variant="ghost" size="sm" className="border-border text-foreground hover:bg-muted" onClick={() => void props.data.onRefresh()} disabled={props.data.status === 'loading'}>
-                  <RefreshCw className="mr-2 size-3" />
+                  <RefreshCw className={`mr-2 size-3 ${props.data.status === 'loading' ? 'animate-spin' : ''}`} />
                   {t('SYNC')}
                 </Button>
               </Box>
@@ -486,6 +483,15 @@ function TopShell(props: {
         </Box>
       </Box>
     </Box>;
+}
+/** 连接指示器必须反映真实状态：绿=后台可达，琥珀=请求进行中，红=最近一次请求失败。 */
+function ConnectionIndicator(props: {
+  status: LoadState;
+  linkOk: boolean;
+}) {
+  if (props.status === 'loading') return <StatusBadge tone="warning">同步中</StatusBadge>;
+  if (!props.linkOk) return <StatusBadge tone="error">连接异常</StatusBadge>;
+  return <StatusBadge tone="normal">已连接</StatusBadge>;
 }
 function ConnectionGate(props: {
   settings: ConnectionSettings;
@@ -717,7 +723,7 @@ function OverviewPage(props: {
     }];
   };
   return <Box className="flex flex-col gap-4">
-      <PageHeader title="总览" description="查看请求、用量与响应表现。" actions={<Box className="flex w-full flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+      <PageHeader actions={<Box className="flex w-full flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
             <Box className="flex w-fit flex-wrap rounded border border-border bg-background p-0.5">
               {OVERVIEW_PERIODS.map(item => <Button key={item.value} type="button" size="sm" variant={period === item.value ? 'default' : 'ghost'} className="h-7 rounded px-2.5 text-[0.6875rem]" onClick={() => setPeriod(item.value)}>
                     {t(item.label)}
@@ -805,7 +811,6 @@ function UpstreamsPage(props: {
     }
   }, [props.data.loadProviders, props.data.providers.length]);
   return <Box className="section-stack">
-      <PageHeader title="上游" description="查看连接目标与健康状态。" />
       <ProvidersPage settings={props.data.settings} items={props.data.providers} groups={props.data.providerGroups} onRefresh={props.data.loadProviders} onMessage={props.data.onMessage} />
     </Box>;
 }
@@ -897,6 +902,7 @@ function Root() {
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettingsResponse | null>(null);
   const [runtimeEnvPreview, setRuntimeEnvPreview] = useState<RuntimeEnvPreviewResponse | null>(null);
   const [status, setStatus] = useState<LoadState>('idle');
+  const [linkOk, setLinkOk] = useState(true);
   const [message, setMessage] = useState(t('未连接后台。'));
   const [refreshKey, setRefreshKey] = useState(0);
   const [consoleMode, setConsoleMode] = useState<ConsoleMode>('connect');
@@ -925,10 +931,12 @@ function Root() {
       ]);
       setProviders(providerWorkspace);
       setProviderGroups(groups);
+      setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
       setProviders([]);
       setProviderGroups([]);
+      setLinkOk(false);
       setMessage(error instanceof Error ? error.message : '读取上游失败。');
     } finally {
       setStatus('ready');
@@ -944,9 +952,11 @@ function Root() {
     try {
       const aliases = await loadModelAliases(current);
       setModelAliases(aliases);
+      setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
       setModelAliases([]);
+      setLinkOk(false);
       setMessage(error instanceof Error ? error.message : '读取模型别名失败。');
     } finally {
       setStatus('ready');
@@ -966,10 +976,12 @@ function Root() {
       ]);
       setApiKeys(apiKeyWorkspace);
       setProviderGroups(groups);
+      setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
       setApiKeys([]);
       setProviderGroups([]);
+      setLinkOk(false);
       setMessage(error instanceof Error ? error.message : '读取密钥失败。');
     } finally {
       setStatus('ready');
@@ -991,12 +1003,14 @@ function Root() {
       setSystemConfig(config);
       setRuntimeSettings(runtime);
       setRuntimeEnvPreview(envPreview);
+      setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
       setPrices([]);
       setSystemConfig(null);
       setRuntimeSettings(null);
       setRuntimeEnvPreview(null);
+      setLinkOk(false);
       setMessage(error instanceof Error ? error.message : '读取设置失败。');
     } finally {
       setStatus('ready');
@@ -1023,6 +1037,7 @@ function Root() {
       setRefreshKey(value => value + 1);
       setMessage(successMessage ? t(successMessage) : t('已连接。'));
       setConnectionIssue(null);
+      setLinkOk(true);
       setConsoleMode('console');
     } catch (error) {
       console.error('Failed to load admin console data', error);
@@ -1030,6 +1045,7 @@ function Root() {
       const failure = describeConnectionFailure(error);
       setMessage(failure.message);
       setConnectionIssue(failure.issue);
+      setLinkOk(false);
       setConsoleMode('connect');
     } finally {
       setStatus('ready');
@@ -1082,6 +1098,7 @@ function Root() {
     runtimeSettings,
     runtimeEnvPreview,
     status,
+    linkOk,
     message,
     refreshKey,
     loadProviders,
@@ -1095,6 +1112,7 @@ function Root() {
     onMessage
   }), [
     apiKeys,
+    linkOk,
     loadApiKeys,
     loadModelAliasesForState,
     loadPricesAndConfig,
