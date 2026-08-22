@@ -43,6 +43,7 @@ data/tmp/
 Thumbs.db
 
 # Local agent/reference files
+.claude/
 .codex/
 refrence/
 
