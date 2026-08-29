@@ -221,6 +221,14 @@ impl PriceCard {
             output_usd,
         })
     }
+
+    pub fn validate_complete(&self) -> Result<(), String> {
+        validate_complete_rates(self.base, "base")?;
+        for (index, tier) in self.tiers.iter().enumerate() {
+            validate_complete_rates(tier.rates, &format!("tiers[{index}].rates"))?;
+        }
+        Ok(())
+    }
 }
 
 pub fn evaluate_price(
@@ -265,6 +273,22 @@ fn component_cost(tokens: i64, rate: Option<Decimal>) -> Option<Decimal> {
         return Some(Decimal::ZERO);
     }
     rate.map(|value| Decimal::from(tokens) * value / Decimal::from(TOKENS_PER_MILLION))
+}
+
+fn validate_complete_rates(rates: PriceRates, path: &str) -> Result<(), String> {
+    for (name, value) in [
+        ("input", rates.input),
+        ("output", rates.output),
+        ("cache_read", rates.cache_read),
+        ("cache_write", rates.cache_write),
+    ] {
+        if value.is_none() {
+            return Err(format!(
+                "{path}.{name} must have a price; use 0 when that token category is free"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_complete_rates(value: &Value, path: &str) -> Result<PriceRates, String> {
@@ -452,6 +476,53 @@ mod tests {
         let evaluation = evaluate_price(&usage(10, 2, 1, 1), true, Some(&price));
 
         assert_eq!(evaluation.status, PricingStatus::Priced);
+    }
+
+    #[test]
+    fn complete_price_validation_should_reject_missing_cache_rate() {
+        let card = PriceCard::from_json(&json!({
+            "schema_version": 2,
+            "unit": "usd_per_million_tokens",
+            "base": {
+                "input": "1",
+                "output": "2",
+                "cache_read": null,
+                "cache_write": "0"
+            },
+            "tiers": []
+        }))
+        .expect("partial card");
+
+        assert_eq!(
+            card.validate_complete().unwrap_err(),
+            "base.cache_read must have a price; use 0 when that token category is free"
+        );
+    }
+
+    #[test]
+    fn complete_price_validation_should_accept_explicit_zero_rates() {
+        let card = PriceCard::from_json(&json!({
+            "schema_version": 2,
+            "unit": "usd_per_million_tokens",
+            "base": {
+                "input": "1",
+                "output": "2",
+                "cache_read": "0",
+                "cache_write": "0"
+            },
+            "tiers": [{
+                "over_total_input_tokens": 100,
+                "rates": {
+                    "input": "1",
+                    "output": "2",
+                    "cache_read": "0",
+                    "cache_write": "0"
+                }
+            }]
+        }))
+        .expect("complete card");
+
+        assert_eq!(card.validate_complete(), Ok(()));
     }
 
     #[test]

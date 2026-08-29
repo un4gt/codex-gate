@@ -13,11 +13,12 @@ use crate::health::{
     EndpointHealthView, ProviderHealthView, UpstreamKeyHealthView, summarize_provider_health,
 };
 use crate::http::{self, HttpResponse};
-use crate::pricing::{PriceCard, PriceVersion};
+use crate::pricing::PriceCard;
 use crate::request_overrides::{RequestOverrideContext, RequestOverrideTarget, RequestOverrides};
 use crate::state::SharedState;
 use crate::types::{
     ApiKeyAuth, ModelAlias, ModelAliasTarget, UpstreamEndpoint, UpstreamKeyMeta, UpstreamProvider,
+    Usage,
 };
 use crate::upstream_url;
 use crate::util;
@@ -308,8 +309,16 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
     if path.starts_with("/api/v1/routes/") && req.method() == Method::PUT {
         return upsert_route(req, state).await;
     }
-    if path.starts_with("/api/v1/prices/") && req.method() == Method::GET {
-        return get_price(req, state).await;
+    if path.starts_with("/api/v1/prices/") {
+        if req.method() == Method::GET {
+            return get_price(req, state).await;
+        }
+        if req.method() == Method::PATCH {
+            return update_price(req, state).await;
+        }
+        if req.method() == Method::DELETE {
+            return delete_price(req, state).await;
+        }
     }
 
     http::json_error(StatusCode::NOT_FOUND, "not found")
@@ -3110,57 +3119,102 @@ struct CreatePriceReq {
     price_data: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdatePriceReq {
+    #[serde(alias = "priceData")]
+    price_data: Value,
+}
+
+fn validate_complete_price_data(price_data: &Value) -> Result<String, String> {
+    if !price_data.is_object() {
+        return Err("price_data must be an object".to_string());
+    }
+    let card = PriceCard::from_json(price_data)?;
+    card.validate_complete()?;
+    serde_json::to_string(price_data).map_err(|error| format!("invalid price_data: {error}"))
+}
+
+async fn reconcile_after_price_change(state: &SharedState, price_id: i64) -> (u64, bool) {
+    match reconcile_unpriced_usage(state, i64::MIN, i64::MAX).await {
+        Ok(backfilled_requests) => (backfilled_requests, false),
+        Err(error) => {
+            log::warn!(
+                "price version {} changed but historical usage reconciliation failed: {}",
+                price_id,
+                error
+            );
+            (0, true)
+        }
+    }
+}
+
 async fn reconcile_unpriced_usage(
     state: &SharedState,
     time_from_ms: i64,
     time_to_ms: i64,
 ) -> Result<u64, crate::db::DbError> {
-    let (keys, prices) = tokio::join!(
-        state.db.list_unpriced_usage_keys(time_from_ms, time_to_ms),
-        state.db.list_latest_model_prices()
-    );
-    let keys = keys?;
+    let keys = state
+        .db
+        .list_pricing_reconciliation_keys(time_from_ms, time_to_ms)
+        .await?;
     if keys.is_empty() {
         return Ok(0);
     }
 
-    let mut provider_prices: HashMap<i64, HashMap<String, PriceVersion>> = HashMap::new();
-    let mut global_prices = HashMap::new();
-    for price in prices? {
-        let version = PriceVersion {
-            id: price.id,
-            card: price.price,
-        };
-        if let Some(provider_id) = price.provider_id {
-            provider_prices
-                .entry(provider_id)
-                .or_default()
-                .insert(price.model_name, version);
-        } else {
-            global_prices.insert(price.model_name, version);
-        }
-    }
+    let mut existing_version_ids = keys
+        .iter()
+        .filter_map(|key| key.price_version_id)
+        .collect::<Vec<_>>();
+    existing_version_ids.sort_unstable();
+    existing_version_ids.dedup();
+    let existing_versions = state.db.list_price_versions(&existing_version_ids).await?;
+    let existing_versions = existing_versions
+        .into_iter()
+        .map(|version| (version.id, version))
+        .collect::<HashMap<_, _>>();
+    let snapshot = state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+        .map_err(crate::db::DbError::new)?;
 
     let mut backfilled_requests = 0_u64;
     for key in keys {
-        let price = key
-            .provider_id
-            .and_then(|provider_id| provider_prices.get(&provider_id))
-            .and_then(|prices| prices.get(&key.model))
-            .or_else(|| global_prices.get(&key.model));
+        let usage = Usage {
+            input_tokens: i64::from(key.has_input_tokens),
+            output_tokens: i64::from(key.has_output_tokens),
+            cache_read_input_tokens: i64::from(key.has_cache_read_input_tokens),
+            cache_creation_input_tokens: i64::from(key.has_cache_creation_input_tokens),
+            reasoning_output_tokens: 0,
+        };
+        let already_priceable = key
+            .price_version_id
+            .and_then(|version_id| existing_versions.get(&version_id))
+            .zip(key.price_tier_index)
+            .is_some_and(|(version, tier_index)| {
+                version.card.cost_for_usage(&usage, tier_index).is_some()
+            });
+        if already_priceable {
+            continue;
+        }
+
+        let price = match key.provider_id {
+            Some(provider_id) => {
+                snapshot.find_price_for_historical_request(provider_id, &key.model)
+            }
+            None => snapshot.global_prices_by_model.get(&key.model).cloned(),
+        };
         let Some(price) = price else {
             continue;
         };
+        if price.card.validate_complete().is_err() {
+            continue;
+        }
         backfilled_requests = backfilled_requests.saturating_add(
             state
                 .db
-                .backfill_unpriced_usage(
-                    key.provider_id,
-                    &key.model,
-                    price,
-                    time_from_ms,
-                    time_to_ms,
-                )
+                .rebind_pricing_usage_group(&key, &price, time_from_ms, time_to_ms)
                 .await?,
         );
     }
@@ -3180,12 +3234,10 @@ async fn create_price(req: Request<Incoming>, state: SharedState) -> HttpRespons
     if body.model_name.trim().is_empty() {
         return http::json_error(StatusCode::BAD_REQUEST, "model_name is empty");
     }
-    if !body.price_data.is_object() {
-        return http::json_error(StatusCode::BAD_REQUEST, "price_data must be an object");
-    }
-    if let Err(error) = PriceCard::from_json(&body.price_data) {
-        return http::json_error(StatusCode::BAD_REQUEST, error);
-    }
+    let json_str = match validate_complete_price_data(&body.price_data) {
+        Ok(value) => value,
+        Err(error) => return http::json_error(StatusCode::BAD_REQUEST, error),
+    };
     if let Some(provider_id) = body.provider_id {
         let providers = match state.db.list_upstream_providers().await {
             Ok(v) => v,
@@ -3198,12 +3250,6 @@ async fn create_price(req: Request<Incoming>, state: SharedState) -> HttpRespons
             return http::json_error(StatusCode::NOT_FOUND, "provider not found");
         }
     }
-    let json_str = match serde_json::to_string(&body.price_data) {
-        Ok(v) => v,
-        Err(e) => {
-            return http::json_error(StatusCode::BAD_REQUEST, format!("invalid price_data: {e}"));
-        }
-    };
     let id = match state
         .db
         .insert_model_price(
@@ -3219,21 +3265,84 @@ async fn create_price(req: Request<Incoming>, state: SharedState) -> HttpRespons
     };
     state.caches.upstream.invalidate();
     let (backfilled_requests, history_recalculation_pending) =
-        match reconcile_unpriced_usage(&state, i64::MIN, i64::MAX).await {
-            Ok(backfilled_requests) => (backfilled_requests, false),
-            Err(error) => {
-                log::warn!(
-                    "price version {} was saved but historical usage reconciliation failed: {}",
-                    id,
-                    error
-                );
-                (0, true)
-            }
-        };
+        reconcile_after_price_change(&state, id).await;
     http::json(
         StatusCode::OK,
         &serde_json::json!({
             "id": id,
+            "backfilled_requests": backfilled_requests,
+            "history_recalculation_pending": history_recalculation_pending
+        }),
+    )
+}
+
+async fn update_price(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let Some(price_id) = parse_id_suffix(req.uri().path(), "/api/v1/prices/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid price id");
+    };
+    let (_, body, _raw) = match http::read_json_limited::<UpdatePriceReq>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let json_str = match validate_complete_price_data(&body.price_data) {
+        Ok(value) => value,
+        Err(error) => return http::json_error(StatusCode::BAD_REQUEST, error),
+    };
+    let id = match state
+        .db
+        .update_model_price(price_id, &json_str, util::now_ms())
+        .await
+    {
+        Ok(Some(id)) => id,
+        Ok(None) => return http::json_error(StatusCode::NOT_FOUND, "active price not found"),
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    state.caches.upstream.invalidate();
+    let (backfilled_requests, history_recalculation_pending) =
+        reconcile_after_price_change(&state, id).await;
+    http::json(
+        StatusCode::OK,
+        &serde_json::json!({
+            "id": id,
+            "replaced_price_id": price_id,
+            "backfilled_requests": backfilled_requests,
+            "history_recalculation_pending": history_recalculation_pending
+        }),
+    )
+}
+
+async fn delete_price(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let Some(price_id) = parse_id_suffix(req.uri().path(), "/api/v1/prices/") else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid price id");
+    };
+    let deactivated = match state
+        .db
+        .deactivate_model_price(price_id, util::now_ms())
+        .await
+    {
+        Ok(Some(price)) => price,
+        Ok(None) => return http::json_error(StatusCode::NOT_FOUND, "active price not found"),
+        Err(error) => {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
+    };
+    state.caches.upstream.invalidate();
+    let (backfilled_requests, history_recalculation_pending) =
+        reconcile_after_price_change(&state, price_id).await;
+    http::json(
+        StatusCode::OK,
+        &serde_json::json!({
+            "ok": true,
+            "deactivated_price_id": price_id,
+            "provider_id": deactivated.provider_id,
+            "model_name": deactivated.model_name,
             "backfilled_requests": backfilled_requests,
             "history_recalculation_pending": history_recalculation_pending
         }),
@@ -4061,6 +4170,43 @@ mod tests {
         assert_eq!(missing.max_concurrency, None);
         assert_eq!(cleared.max_concurrency, Some(None));
         assert_eq!(limited.max_concurrency, Some(Some(12)));
+    }
+
+    #[test]
+    fn price_api_should_require_all_token_rates() {
+        let price_data = serde_json::json!({
+            "schema_version": 2,
+            "unit": "usd_per_million_tokens",
+            "base": {
+                "input": "1",
+                "output": "2",
+                "cache_read": null,
+                "cache_write": "0"
+            },
+            "tiers": []
+        });
+
+        assert_eq!(
+            validate_complete_price_data(&price_data).unwrap_err(),
+            "base.cache_read must have a price; use 0 when that token category is free"
+        );
+    }
+
+    #[test]
+    fn price_api_should_accept_explicit_zero_for_free_token_rates() {
+        let price_data = serde_json::json!({
+            "schema_version": 2,
+            "unit": "usd_per_million_tokens",
+            "base": {
+                "input": "1",
+                "output": "2",
+                "cache_read": "0",
+                "cache_write": "0"
+            },
+            "tiers": []
+        });
+
+        assert!(validate_complete_price_data(&price_data).is_ok());
     }
 
     #[test]

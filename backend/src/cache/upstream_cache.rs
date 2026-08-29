@@ -57,6 +57,58 @@ impl UpstreamSnapshot {
         })
     }
 
+    pub fn find_price_for_historical_request(
+        &self,
+        provider_id: i64,
+        requested_model: &str,
+    ) -> Option<PriceVersion> {
+        let requested_price = self.find_price(provider_id, requested_model);
+        let mut upstream_models = BTreeSet::new();
+
+        if let Some(target) = self.alias_to_provider_model.get(requested_model)
+            && target.provider_id == provider_id
+            && target.enabled
+        {
+            upstream_models.insert(target.upstream_model.clone());
+        }
+
+        if let Some(alias) = self.model_aliases_by_name.get(requested_model)
+            && alias.enabled
+        {
+            for target in self
+                .alias_targets_by_alias
+                .get(&alias.id)
+                .into_iter()
+                .flatten()
+                .filter(|target| target.provider_id == provider_id && target.enabled)
+            {
+                upstream_models.insert(target.upstream_model.clone());
+            }
+        }
+
+        if upstream_models.is_empty() {
+            upstream_models.insert(requested_model.to_string());
+        }
+
+        let mut common_price: Option<Option<PriceVersion>> = None;
+        for upstream_model in upstream_models {
+            let effective = self
+                .find_price(provider_id, &upstream_model)
+                .or_else(|| requested_price.clone());
+            if let Some(existing) = &common_price {
+                if existing.as_ref().map(|price| price.id)
+                    != effective.as_ref().map(|price| price.id)
+                {
+                    return None;
+                }
+            } else {
+                common_price = Some(effective);
+            }
+        }
+
+        common_price.flatten().or(requested_price)
+    }
+
     pub fn is_model_globally_enabled(&self, model_name: &str) -> bool {
         !self.globally_disabled_models.contains(model_name)
     }
@@ -537,6 +589,80 @@ mod tests {
             .and_then(|item| item.card.base.input);
 
         assert_eq!(found, Some(Decimal::new(3, 0)));
+    }
+
+    #[test]
+    fn historical_price_should_resolve_unique_provider_model_alias() {
+        let mut snapshot = snapshot_with_prices();
+        snapshot.alias_to_provider_model.insert(
+            "gateway-alias".to_string(),
+            ProviderModelAliasTarget {
+                provider_id: 7,
+                upstream_model: "upstream-model".to_string(),
+                enabled: true,
+            },
+        );
+
+        let found = snapshot
+            .find_price_for_historical_request(7, "gateway-alias")
+            .and_then(|item| item.card.base.input);
+
+        assert_eq!(found, Some(Decimal::new(7, 0)));
+    }
+
+    #[test]
+    fn historical_price_should_skip_ambiguous_alias_targets() {
+        let mut snapshot = snapshot_with_prices();
+        snapshot.provider_prices_by_model.insert(
+            7,
+            HashMap::from([
+                ("upstream-model".to_string(), price(7)),
+                ("other-model".to_string(), price(9)),
+            ]),
+        );
+        snapshot.model_aliases_by_name.insert(
+            "gateway-alias".to_string(),
+            ModelAlias {
+                id: 11,
+                name: "gateway-alias".to_string(),
+                enabled: true,
+                mode: "weighted".to_string(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            },
+        );
+        snapshot.alias_targets_by_alias.insert(
+            11,
+            vec![
+                ModelAliasTarget {
+                    id: 1,
+                    alias_id: 11,
+                    provider_id: 7,
+                    upstream_model: "upstream-model".to_string(),
+                    enabled: true,
+                    priority: 100,
+                    weight: 1,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                ModelAliasTarget {
+                    id: 2,
+                    alias_id: 11,
+                    provider_id: 7,
+                    upstream_model: "other-model".to_string(),
+                    enabled: true,
+                    priority: 100,
+                    weight: 1,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+            ],
+        );
+
+        assert_eq!(
+            snapshot.find_price_for_historical_request(7, "gateway-alias"),
+            None
+        );
     }
 
     #[test]

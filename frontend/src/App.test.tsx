@@ -13,7 +13,7 @@ import { ModelsPage } from '@/components/ModelsPage';
 import { PricesPage } from '@/components/PricesPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { initializeI18n } from '@/lib/i18n';
-import type { ProviderWorkspace } from '@/lib/types';
+import type { ModelPrice, ProviderWorkspace } from '@/lib/types';
 import { theme } from '@/theme';
 
 function renderWithTheme(children: ReactNode) {
@@ -58,6 +58,27 @@ function providerWorkspace(): ProviderWorkspace {
     },
     endpoints: [],
     keys: [],
+  };
+}
+
+function modelPrice(): ModelPrice {
+  return {
+    id: 11,
+    provider_id: null,
+    model_name: 'model-a',
+    price_data: {
+      schema_version: 2,
+      unit: 'usd_per_million_tokens',
+      base: {
+        input: '5',
+        output: '30',
+        cache_read: '0.5',
+        cache_write: '0.75',
+      },
+      tiers: [],
+    },
+    created_at_ms: 1_900_000_000_000,
+    updated_at_ms: 1_900_000_000_000,
   };
 }
 
@@ -297,6 +318,111 @@ describe('admin console smoke test', () => {
     expect(table.className).toContain('table-fixed');
     expect(Array.from(table.querySelectorAll('th')).every(cell => cell.className.includes('whitespace-nowrap'))).toBe(true);
     expect(table.closest('.grid')?.className).not.toContain('grid-cols');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('updates a price as a new version and reports historical repricing', async () => {
+    let request: { method: string; path: string; body: Record<string, any> } | null = null;
+    const refreshMessages: string[] = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      request = {
+        method: init?.method ?? 'GET',
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body ?? '{}')) as Record<string, any>,
+      };
+      return jsonResponse({
+        id: 12,
+        replaced_price_id: 11,
+        backfilled_requests: 90,
+        history_recalculation_pending: false,
+      });
+    });
+
+    renderWithTheme(
+      <PricesPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        providers={[]}
+        items={[modelPrice()]}
+        onRefresh={async message => { refreshMessages.push(message ?? ''); }}
+        onMessage={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit price model-a' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit Model Price' });
+    fireEvent.change(within(dialog).getByDisplayValue('5'), { target: { value: '6' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save Price' }));
+
+    await waitFor(() => expect(request).not.toBeNull());
+    expect(request).toMatchObject({ method: 'PATCH', path: '/api/v1/prices/11' });
+    expect((request as any).body.price_data.base.input).toBe('6');
+    expect(refreshMessages).toEqual([
+      'Price model-a updated. Repriced 90 historical requests with the current price.',
+    ]);
+    expect(screen.queryByRole('dialog', { name: 'Edit Model Price' })).toBeNull();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('deletes only the active price after an in-app confirmation', async () => {
+    const requests: string[] = [];
+    const refreshMessages: string[] = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      requests.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+      return jsonResponse({
+        ok: true,
+        deactivated_price_id: 11,
+        provider_id: null,
+        model_name: 'model-a',
+        backfilled_requests: 0,
+        history_recalculation_pending: false,
+      });
+    });
+
+    renderWithTheme(
+      <PricesPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        providers={[]}
+        items={[modelPrice()]}
+        onRefresh={async message => { refreshMessages.push(message ?? ''); }}
+        onMessage={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete price model-a' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Current Price' });
+    expect(within(dialog).getByText(/historical price versions/i)).toBeTruthy();
+    const cancelButton = within(dialog).getByRole('button', { name: 'Cancel' });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(cancelButton);
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(requests).toEqual(['DELETE /api/v1/prices/11']));
+    expect(refreshMessages).toEqual([
+      'Price model-a deleted. No historical requests required repricing.',
+    ]);
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Delete Current Price' })).toBeNull();
+    });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit value for every token price category', () => {
+    renderWithTheme(
+      <PricesPage
+        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+        providers={[]}
+        items={[]}
+        onRefresh={async () => undefined}
+        onMessage={() => undefined}
+      />,
+    );
+
+    expect((screen.getByPlaceholderText('2.50') as HTMLInputElement).required).toBe(true);
+    expect((screen.getByPlaceholderText('15.00') as HTMLInputElement).required).toBe(true);
+    expect((screen.getByPlaceholderText('0.25') as HTMLInputElement).required).toBe(true);
+    expect((screen.getByPlaceholderText('3.125') as HTMLInputElement).required).toBe(true);
+    expect(screen.getByText('All four rates are required; enter 0 for free token categories.')).toBeTruthy();
     expect(consoleError).not.toHaveBeenCalled();
   });
 

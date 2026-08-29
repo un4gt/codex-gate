@@ -1276,7 +1276,15 @@ SELECT provider_id, api_key_id, price_version_id, price_tier_index,
   COALESCE(SUM(reasoning_output_tokens), 0) AS reasoning_output_tokens
 FROM stats_events
 WHERE time_ms >= ? AND time_ms < ?
-GROUP BY provider_id, api_key_id, price_version_id, price_tier_index
+GROUP BY
+  provider_id,
+  api_key_id,
+  price_version_id,
+  price_tier_index,
+  CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN output_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN cache_read_input_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN cache_creation_input_tokens > 0 THEN 1 ELSE 0 END
 ORDER BY provider_id, api_key_id
 "#;
 
@@ -1292,7 +1300,15 @@ SELECT provider_id, api_key_id, price_version_id, price_tier_index,
   COALESCE(SUM(reasoning_output_tokens), 0)::BIGINT AS reasoning_output_tokens
 FROM stats_events
 WHERE time_ms >= $1 AND time_ms < $2
-GROUP BY provider_id, api_key_id, price_version_id, price_tier_index
+GROUP BY
+  provider_id,
+  api_key_id,
+  price_version_id,
+  price_tier_index,
+  input_tokens > 0,
+  output_tokens > 0,
+  cache_read_input_tokens > 0,
+  cache_creation_input_tokens > 0
 ORDER BY provider_id, api_key_id
 "#;
 
@@ -1521,6 +1537,44 @@ mod tests {
             .await
             .expect("channels");
         assert!(channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn usage_aggregation_separates_rows_by_token_component_usage() {
+        let database = sqlite_memory_db().await;
+        let Database::Sqlite(pool) = &database else {
+            panic!("expected sqlite database");
+        };
+        for (id, cache_read_input_tokens) in [("without-cache", 0_i64), ("with-cache", 50)] {
+            sqlx::query(
+                r#"
+INSERT INTO stats_events (
+  id, time_ms, api_key_id, provider_id, api_format, http_status,
+  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+  usage_observed, price_version_id, price_tier_index, created_at_ms
+) VALUES (?, 100, 7, 11, 'responses', 200, 100, 25, ?, 0, 1, 19, 0, 100)
+"#,
+            )
+            .bind(id)
+            .bind(cache_read_input_tokens)
+            .execute(pool)
+            .await
+            .expect("insert usage event");
+        }
+
+        let rows = database
+            .notification_aggregate_usage(0, 200)
+            .await
+            .expect("aggregate notification usage");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.usage.cache_read_input_tokens)
+                .collect::<Vec<_>>(),
+            vec![0, 50]
+        );
+        assert!(rows.iter().all(|row| row.usage_observed_requests == 1));
     }
 
     #[tokio::test]

@@ -660,6 +660,32 @@ export async function createPrice(settings: ConnectionSettings, payload: CreateP
   }>(apiBase, '/api/v1/prices', adminToken, payload);
 }
 
+export async function updatePrice(
+  settings: ConnectionSettings,
+  priceId: number,
+  priceData: CreatePriceInput['price_data'],
+) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return patchJson<{
+    id: number;
+    replaced_price_id: number;
+    backfilled_requests: number;
+    history_recalculation_pending: boolean;
+  }>(apiBase, `/api/v1/prices/${priceId}`, adminToken, { price_data: priceData });
+}
+
+export async function deletePrice(settings: ConnectionSettings, priceId: number) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return deleteJson<{
+    ok: boolean;
+    deactivated_price_id: number;
+    provider_id: number | null;
+    model_name: string;
+    backfilled_requests: number;
+    history_recalculation_pending: boolean;
+  }>(apiBase, `/api/v1/prices/${priceId}`, adminToken);
+}
+
 export async function createApiKey(settings: ConnectionSettings, payload: CreateApiKeyInput) {
   const { apiBase, adminToken } = requireConnection(settings);
   return postJson<CreatedApiKey>(apiBase, '/api/v1/api-keys', adminToken, payload);

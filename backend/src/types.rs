@@ -279,9 +279,15 @@ pub struct PricingUsageGroupRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnpricedUsageKeyRow {
+pub struct PricingReconciliationKeyRow {
     pub provider_id: Option<i64>,
     pub model: String,
+    pub price_version_id: Option<i64>,
+    pub price_tier_index: Option<i32>,
+    pub has_input_tokens: bool,
+    pub has_output_tokens: bool,
+    pub has_cache_read_input_tokens: bool,
+    pub has_cache_creation_input_tokens: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

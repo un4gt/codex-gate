@@ -11,10 +11,10 @@ use crate::pricing::{PriceCard, PriceVersion};
 use crate::request_overrides::RequestOverrides;
 use crate::types::{
     ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelRoute,
-    PricingUsageGroupRow, ProviderGroup, ProviderGroupMembership, ProviderGroupRef, ProviderModel,
-    RequestLogRow, RuntimeSettingRow, StatsDailyRow, StatsEventRow, StatsHourlyRow,
-    StatsOverviewAggRow, UnpricedUsageKeyRow, UpstreamEndpoint, UpstreamKey, UpstreamKeyMeta,
-    UpstreamKeyModel, UpstreamProvider,
+    PricingReconciliationKeyRow, PricingUsageGroupRow, ProviderGroup, ProviderGroupMembership,
+    ProviderGroupRef, ProviderModel, RequestLogRow, RuntimeSettingRow, StatsDailyRow,
+    StatsEventRow, StatsHourlyRow, StatsOverviewAggRow, UpstreamEndpoint, UpstreamKey,
+    UpstreamKeyMeta, UpstreamKeyModel, UpstreamProvider,
 };
 
 const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
@@ -1486,45 +1486,46 @@ WHERE id = $7
         price_data_json: &str,
         now_ms: i64,
     ) -> Result<i64, DbError> {
-        let value: Value = serde_json::from_str(price_data_json)
-            .map_err(|e| DbError::new(format!("invalid price_data_json: {e}")))?;
-        let price = PriceCard::from_json(&value).map_err(DbError::new)?;
-        let normalized_json = serde_json::to_string(&price.to_json())
-            .map_err(|e| DbError::new(format!("invalid normalized price data: {e}")))?;
+        let normalized_json = normalize_model_price_data(price_data_json)?;
 
         match self {
             Database::Sqlite(pool) => {
-                let res = sqlx::query(
-                    r#"
-INSERT INTO model_prices (provider_id, model_name, price_data_json, created_at_ms, updated_at_ms)
-VALUES (?, ?, ?, ?, ?)
-"#,
-                )
-                .bind(provider_id)
-                .bind(model_name)
-                .bind(&normalized_json)
-                .bind(now_ms)
-                .bind(now_ms)
-                .execute(pool)
-                .await?;
-                Ok(res.last_insert_rowid())
+                insert_model_price_sqlite(pool, provider_id, model_name, &normalized_json, now_ms)
+                    .await
             }
             Database::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-INSERT INTO model_prices (provider_id, model_name, price_data_json, created_at_ms, updated_at_ms)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id
-"#,
-                )
-                .bind(provider_id)
-                .bind(model_name)
-                .bind(&normalized_json)
-                .bind(now_ms)
-                .bind(now_ms)
-                .fetch_one(pool)
-                .await?;
-                Ok(row.get::<i64, _>("id"))
+                insert_model_price_postgres(pool, provider_id, model_name, &normalized_json, now_ms)
+                    .await
+            }
+        }
+    }
+
+    pub async fn update_model_price(
+        &self,
+        price_id: i64,
+        price_data_json: &str,
+        now_ms: i64,
+    ) -> Result<Option<i64>, DbError> {
+        let normalized_json = normalize_model_price_data(price_data_json)?;
+        match self {
+            Database::Sqlite(pool) => {
+                update_model_price_sqlite(pool, price_id, &normalized_json, now_ms).await
+            }
+            Database::Postgres(pool) => {
+                update_model_price_postgres(pool, price_id, &normalized_json, now_ms).await
+            }
+        }
+    }
+
+    pub async fn deactivate_model_price(
+        &self,
+        price_id: i64,
+        now_ms: i64,
+    ) -> Result<Option<ModelPrice>, DbError> {
+        match self {
+            Database::Sqlite(pool) => deactivate_model_price_sqlite(pool, price_id, now_ms).await,
+            Database::Postgres(pool) => {
+                deactivate_model_price_postgres(pool, price_id, now_ms).await
             }
         }
     }
@@ -1606,51 +1607,35 @@ RETURNING id
         }
     }
 
-    pub async fn list_unpriced_usage_keys(
+    pub async fn list_pricing_reconciliation_keys(
         &self,
         time_from_ms: i64,
         time_to_ms: i64,
-    ) -> Result<Vec<UnpricedUsageKeyRow>, DbError> {
+    ) -> Result<Vec<PricingReconciliationKeyRow>, DbError> {
         match self {
             Database::Sqlite(pool) => {
-                list_unpriced_usage_keys_sqlite(pool, time_from_ms, time_to_ms).await
+                list_pricing_reconciliation_keys_sqlite(pool, time_from_ms, time_to_ms).await
             }
             Database::Postgres(pool) => {
-                list_unpriced_usage_keys_postgres(pool, time_from_ms, time_to_ms).await
+                list_pricing_reconciliation_keys_postgres(pool, time_from_ms, time_to_ms).await
             }
         }
     }
 
-    pub async fn backfill_unpriced_usage(
+    pub async fn rebind_pricing_usage_group(
         &self,
-        provider_id: Option<i64>,
-        model: &str,
+        key: &PricingReconciliationKeyRow,
         price: &PriceVersion,
         time_from_ms: i64,
         time_to_ms: i64,
     ) -> Result<u64, DbError> {
         match self {
             Database::Sqlite(pool) => {
-                backfill_unpriced_usage_sqlite(
-                    pool,
-                    provider_id,
-                    model,
-                    price,
-                    time_from_ms,
-                    time_to_ms,
-                )
-                .await
+                rebind_pricing_usage_group_sqlite(pool, key, price, time_from_ms, time_to_ms).await
             }
             Database::Postgres(pool) => {
-                backfill_unpriced_usage_postgres(
-                    pool,
-                    provider_id,
-                    model,
-                    price,
-                    time_from_ms,
-                    time_to_ms,
-                )
-                .await
+                rebind_pricing_usage_group_postgres(pool, key, price, time_from_ms, time_to_ms)
+                    .await
             }
         }
     }
@@ -3723,7 +3708,13 @@ SELECT
   COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens
 FROM stats_events
 WHERE time_ms >= ? AND time_ms <= ? AND usage_observed != 0
-GROUP BY price_version_id, price_tier_index
+GROUP BY
+  price_version_id,
+  price_tier_index,
+  CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN output_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN cache_read_input_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN cache_creation_input_tokens > 0 THEN 1 ELSE 0 END
 ORDER BY price_version_id, price_tier_index
 "#,
     )
@@ -3763,7 +3754,13 @@ SELECT
   COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens
 FROM stats_events
 WHERE time_ms >= $1 AND time_ms <= $2 AND usage_observed
-GROUP BY price_version_id, price_tier_index
+GROUP BY
+  price_version_id,
+  price_tier_index,
+  input_tokens > 0,
+  output_tokens > 0,
+  cache_read_input_tokens > 0,
+  cache_creation_input_tokens > 0
 ORDER BY price_version_id, price_tier_index
 "#,
     )
@@ -3786,28 +3783,41 @@ ORDER BY price_version_id, price_tier_index
         .collect())
 }
 
-async fn list_unpriced_usage_keys_sqlite(
+async fn list_pricing_reconciliation_keys_sqlite(
     pool: &SqlitePool,
     time_from_ms: i64,
     time_to_ms: i64,
-) -> Result<Vec<UnpricedUsageKeyRow>, DbError> {
+) -> Result<Vec<PricingReconciliationKeyRow>, DbError> {
     let rows = sqlx::query(
         r#"
-SELECT provider_id, model
+SELECT DISTINCT
+  provider_id,
+  model,
+  price_version_id,
+  price_tier_index,
+  CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END AS has_input_tokens,
+  CASE WHEN output_tokens > 0 THEN 1 ELSE 0 END AS has_output_tokens,
+  CASE WHEN cache_read_input_tokens > 0 THEN 1 ELSE 0 END AS has_cache_read_input_tokens,
+  CASE WHEN cache_creation_input_tokens > 0 THEN 1 ELSE 0 END AS has_cache_creation_input_tokens
 FROM (
-  SELECT provider_id, model
+  SELECT
+    provider_id, model, price_version_id, price_tier_index,
+    input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens
   FROM stats_events
   WHERE time_ms >= ? AND time_ms <= ?
-    AND usage_observed != 0 AND price_version_id IS NULL
+    AND usage_observed != 0
     AND model IS NOT NULL AND TRIM(model) != ''
-  UNION
-  SELECT provider_id, model
+  UNION ALL
+  SELECT
+    provider_id, model, price_version_id, price_tier_index,
+    input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens
   FROM request_logs
   WHERE time_ms >= ? AND time_ms <= ?
-    AND usage_observed != 0 AND price_version_id IS NULL
-    AND model IS NOT NULL AND TRIM(model) != '' AND span_kind = 'request'
+    AND usage_observed != 0
+    AND model IS NOT NULL AND TRIM(model) != ''
+    AND span_kind IN ('request', 'ws_turn')
 )
-ORDER BY provider_id, model
+ORDER BY provider_id, model, price_version_id, price_tier_index
 "#,
     )
     .bind(time_from_ms)
@@ -3819,35 +3829,55 @@ ORDER BY provider_id, model
 
     Ok(rows
         .into_iter()
-        .map(|row| UnpricedUsageKeyRow {
+        .map(|row| PricingReconciliationKeyRow {
             provider_id: row.get::<Option<i64>, _>("provider_id"),
             model: row.get::<String, _>("model"),
+            price_version_id: row.get::<Option<i64>, _>("price_version_id"),
+            price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
+            has_input_tokens: row.get::<i64, _>("has_input_tokens") != 0,
+            has_output_tokens: row.get::<i64, _>("has_output_tokens") != 0,
+            has_cache_read_input_tokens: row.get::<i64, _>("has_cache_read_input_tokens") != 0,
+            has_cache_creation_input_tokens: row.get::<i64, _>("has_cache_creation_input_tokens")
+                != 0,
         })
         .collect())
 }
 
-async fn list_unpriced_usage_keys_postgres(
+async fn list_pricing_reconciliation_keys_postgres(
     pool: &PgPool,
     time_from_ms: i64,
     time_to_ms: i64,
-) -> Result<Vec<UnpricedUsageKeyRow>, DbError> {
+) -> Result<Vec<PricingReconciliationKeyRow>, DbError> {
     let rows = sqlx::query(
         r#"
-SELECT provider_id, model
+SELECT DISTINCT
+  provider_id,
+  model,
+  price_version_id,
+  price_tier_index,
+  input_tokens > 0 AS has_input_tokens,
+  output_tokens > 0 AS has_output_tokens,
+  cache_read_input_tokens > 0 AS has_cache_read_input_tokens,
+  cache_creation_input_tokens > 0 AS has_cache_creation_input_tokens
 FROM (
-  SELECT provider_id, model
+  SELECT
+    provider_id, model, price_version_id, price_tier_index,
+    input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens
   FROM stats_events
   WHERE time_ms >= $1 AND time_ms <= $2
-    AND usage_observed AND price_version_id IS NULL
+    AND usage_observed
     AND model IS NOT NULL AND BTRIM(model) != ''
-  UNION
-  SELECT provider_id, model
+  UNION ALL
+  SELECT
+    provider_id, model, price_version_id, price_tier_index,
+    input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens
   FROM request_logs
   WHERE time_ms >= $1 AND time_ms <= $2
-    AND usage_observed AND price_version_id IS NULL
-    AND model IS NOT NULL AND BTRIM(model) != '' AND span_kind = 'request'
-) AS unpriced_usage
-ORDER BY provider_id, model
+    AND usage_observed
+    AND model IS NOT NULL AND BTRIM(model) != ''
+    AND span_kind IN ('request', 'ws_turn')
+) AS pricing_rows
+ORDER BY provider_id, model, price_version_id, price_tier_index
 "#,
     )
     .bind(time_from_ms)
@@ -3857,14 +3887,192 @@ ORDER BY provider_id, model
 
     Ok(rows
         .into_iter()
-        .map(|row| UnpricedUsageKeyRow {
+        .map(|row| PricingReconciliationKeyRow {
             provider_id: row.get::<Option<i64>, _>("provider_id"),
             model: row.get::<String, _>("model"),
+            price_version_id: row.get::<Option<i64>, _>("price_version_id"),
+            price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
+            has_input_tokens: row.get::<bool, _>("has_input_tokens"),
+            has_output_tokens: row.get::<bool, _>("has_output_tokens"),
+            has_cache_read_input_tokens: row.get::<bool, _>("has_cache_read_input_tokens"),
+            has_cache_creation_input_tokens: row.get::<bool, _>("has_cache_creation_input_tokens"),
         })
         .collect())
 }
 
+fn push_sqlite_reconciliation_filters<'a>(
+    query: &mut QueryBuilder<'a, Sqlite>,
+    table: &'static str,
+    key: &'a PricingReconciliationKeyRow,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) {
+    query
+        .push(" WHERE time_ms >= ")
+        .push_bind(time_from_ms)
+        .push(" AND time_ms <= ")
+        .push_bind(time_to_ms)
+        .push(" AND usage_observed != 0 AND model = ")
+        .push_bind(&key.model);
+    if table == "request_logs" {
+        query.push(" AND span_kind IN ('request', 'ws_turn')");
+    }
+    match key.provider_id {
+        Some(provider_id) => {
+            query.push(" AND provider_id = ").push_bind(provider_id);
+        }
+        None => {
+            query.push(" AND provider_id IS NULL");
+        }
+    }
+    match key.price_version_id {
+        Some(version_id) => {
+            query.push(" AND price_version_id = ").push_bind(version_id);
+        }
+        None => {
+            query.push(" AND price_version_id IS NULL");
+        }
+    }
+    match key.price_tier_index {
+        Some(tier_index) => {
+            query.push(" AND price_tier_index = ").push_bind(tier_index);
+        }
+        None => {
+            query.push(" AND price_tier_index IS NULL");
+        }
+    }
+    for (column, has_tokens) in [
+        ("input_tokens", key.has_input_tokens),
+        ("output_tokens", key.has_output_tokens),
+        ("cache_read_input_tokens", key.has_cache_read_input_tokens),
+        (
+            "cache_creation_input_tokens",
+            key.has_cache_creation_input_tokens,
+        ),
+    ] {
+        query
+            .push(" AND ")
+            .push(column)
+            .push(if has_tokens { " > 0" } else { " <= 0" });
+    }
+}
+
+fn push_postgres_reconciliation_filters<'a>(
+    query: &mut QueryBuilder<'a, Postgres>,
+    table: &'static str,
+    key: &'a PricingReconciliationKeyRow,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) {
+    query
+        .push(" WHERE time_ms >= ")
+        .push_bind(time_from_ms)
+        .push(" AND time_ms <= ")
+        .push_bind(time_to_ms)
+        .push(" AND usage_observed AND model = ")
+        .push_bind(&key.model);
+    if table == "request_logs" {
+        query.push(" AND span_kind IN ('request', 'ws_turn')");
+    }
+    match key.provider_id {
+        Some(provider_id) => {
+            query.push(" AND provider_id = ").push_bind(provider_id);
+        }
+        None => {
+            query.push(" AND provider_id IS NULL");
+        }
+    }
+    match key.price_version_id {
+        Some(version_id) => {
+            query.push(" AND price_version_id = ").push_bind(version_id);
+        }
+        None => {
+            query.push(" AND price_version_id IS NULL");
+        }
+    }
+    match key.price_tier_index {
+        Some(tier_index) => {
+            query.push(" AND price_tier_index = ").push_bind(tier_index);
+        }
+        None => {
+            query.push(" AND price_tier_index IS NULL");
+        }
+    }
+    for (column, has_tokens) in [
+        ("input_tokens", key.has_input_tokens),
+        ("output_tokens", key.has_output_tokens),
+        ("cache_read_input_tokens", key.has_cache_read_input_tokens),
+        (
+            "cache_creation_input_tokens",
+            key.has_cache_creation_input_tokens,
+        ),
+    ] {
+        query
+            .push(" AND ")
+            .push(column)
+            .push(if has_tokens { " > 0" } else { " <= 0" });
+    }
+}
+
+async fn rebind_pricing_usage_group_sqlite(
+    pool: &SqlitePool,
+    key: &PricingReconciliationKeyRow,
+    price: &PriceVersion,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<u64, DbError> {
+    let mut tx = pool.begin().await?;
+    let mut rebound_requests = 0;
+    for table in ["stats_events", "request_logs"] {
+        let mut query = QueryBuilder::<Sqlite>::new("UPDATE ");
+        query
+            .push(table)
+            .push(" SET price_version_id = ")
+            .push_bind(price.id)
+            .push(", price_tier_index = ");
+        push_sqlite_price_tier_case(&mut query, price);
+        push_sqlite_reconciliation_filters(&mut query, table, key, time_from_ms, time_to_ms);
+        let result = query.build().execute(&mut *tx).await?;
+        if table == "stats_events" {
+            rebound_requests = result.rows_affected();
+        }
+    }
+    tx.commit().await?;
+    Ok(rebound_requests)
+}
+
+async fn rebind_pricing_usage_group_postgres(
+    pool: &PgPool,
+    key: &PricingReconciliationKeyRow,
+    price: &PriceVersion,
+    time_from_ms: i64,
+    time_to_ms: i64,
+) -> Result<u64, DbError> {
+    let mut tx = pool.begin().await?;
+    let mut rebound_requests = 0;
+    for table in ["stats_events", "request_logs"] {
+        let mut query = QueryBuilder::<Postgres>::new("UPDATE ");
+        query
+            .push(table)
+            .push(" SET price_version_id = ")
+            .push_bind(price.id)
+            .push(", price_tier_index = ");
+        push_postgres_price_tier_case(&mut query, price);
+        push_postgres_reconciliation_filters(&mut query, table, key, time_from_ms, time_to_ms);
+        let result = query.build().execute(&mut *tx).await?;
+        if table == "stats_events" {
+            rebound_requests = result.rows_affected();
+        }
+    }
+    tx.commit().await?;
+    Ok(rebound_requests)
+}
+
 fn push_sqlite_price_tier_case(query: &mut QueryBuilder<'_, Sqlite>, price: &PriceVersion) {
+    if price.card.tiers.is_empty() {
+        query.push("0");
+        return;
+    }
     const TOTAL_INPUT: &str = "(MAX(input_tokens, 0) + MAX(cache_read_input_tokens, 0) + MAX(cache_creation_input_tokens, 0))";
     query.push("CASE");
     for (index, tier) in price.card.tiers.iter().enumerate().rev() {
@@ -3880,6 +4088,10 @@ fn push_sqlite_price_tier_case(query: &mut QueryBuilder<'_, Sqlite>, price: &Pri
 }
 
 fn push_postgres_price_tier_case(query: &mut QueryBuilder<'_, Postgres>, price: &PriceVersion) {
+    if price.card.tiers.is_empty() {
+        query.push("0");
+        return;
+    }
     const TOTAL_INPUT: &str = "(GREATEST(input_tokens, 0) + GREATEST(cache_read_input_tokens, 0) + GREATEST(cache_creation_input_tokens, 0))";
     query.push("CASE");
     for (index, tier) in price.card.tiers.iter().enumerate().rev() {
@@ -3892,148 +4104,6 @@ fn push_postgres_price_tier_case(query: &mut QueryBuilder<'_, Postgres>, price: 
             .push_bind(index as i32 + 1);
     }
     query.push(" ELSE 0 END");
-}
-
-async fn backfill_unpriced_table_sqlite(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
-    table: &str,
-    provider_id: Option<i64>,
-    model: &str,
-    price: &PriceVersion,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<u64, DbError> {
-    let mut query = QueryBuilder::<Sqlite>::new("UPDATE ");
-    query
-        .push(table)
-        .push(" SET price_version_id = ")
-        .push_bind(price.id)
-        .push(", price_tier_index = ");
-    push_sqlite_price_tier_case(&mut query, price);
-    query
-        .push(" WHERE time_ms >= ")
-        .push_bind(time_from_ms)
-        .push(" AND time_ms <= ")
-        .push_bind(time_to_ms)
-        .push(" AND usage_observed != 0 AND price_version_id IS NULL AND model = ")
-        .push_bind(model);
-    if table == "request_logs" {
-        query.push(" AND span_kind = 'request'");
-    }
-    match provider_id {
-        Some(provider_id) => {
-            query.push(" AND provider_id = ").push_bind(provider_id);
-        }
-        None => {
-            query.push(" AND provider_id IS NULL");
-        }
-    }
-    let result = query.build().execute(&mut **tx).await?;
-    Ok(result.rows_affected())
-}
-
-async fn backfill_unpriced_usage_sqlite(
-    pool: &SqlitePool,
-    provider_id: Option<i64>,
-    model: &str,
-    price: &PriceVersion,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<u64, DbError> {
-    let mut tx = pool.begin().await?;
-    let backfilled_requests = backfill_unpriced_table_sqlite(
-        &mut tx,
-        "stats_events",
-        provider_id,
-        model,
-        price,
-        time_from_ms,
-        time_to_ms,
-    )
-    .await?;
-    backfill_unpriced_table_sqlite(
-        &mut tx,
-        "request_logs",
-        provider_id,
-        model,
-        price,
-        time_from_ms,
-        time_to_ms,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(backfilled_requests)
-}
-
-async fn backfill_unpriced_table_postgres(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    table: &str,
-    provider_id: Option<i64>,
-    model: &str,
-    price: &PriceVersion,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<u64, DbError> {
-    let mut query = QueryBuilder::<Postgres>::new("UPDATE ");
-    query
-        .push(table)
-        .push(" SET price_version_id = ")
-        .push_bind(price.id)
-        .push(", price_tier_index = ");
-    push_postgres_price_tier_case(&mut query, price);
-    query
-        .push(" WHERE time_ms >= ")
-        .push_bind(time_from_ms)
-        .push(" AND time_ms <= ")
-        .push_bind(time_to_ms)
-        .push(" AND usage_observed AND price_version_id IS NULL AND model = ")
-        .push_bind(model);
-    if table == "request_logs" {
-        query.push(" AND span_kind = 'request'");
-    }
-    match provider_id {
-        Some(provider_id) => {
-            query.push(" AND provider_id = ").push_bind(provider_id);
-        }
-        None => {
-            query.push(" AND provider_id IS NULL");
-        }
-    }
-    let result = query.build().execute(&mut **tx).await?;
-    Ok(result.rows_affected())
-}
-
-async fn backfill_unpriced_usage_postgres(
-    pool: &PgPool,
-    provider_id: Option<i64>,
-    model: &str,
-    price: &PriceVersion,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<u64, DbError> {
-    let mut tx = pool.begin().await?;
-    let backfilled_requests = backfill_unpriced_table_postgres(
-        &mut tx,
-        "stats_events",
-        provider_id,
-        model,
-        price,
-        time_from_ms,
-        time_to_ms,
-    )
-    .await?;
-    backfill_unpriced_table_postgres(
-        &mut tx,
-        "request_logs",
-        provider_id,
-        model,
-        price,
-        time_from_ms,
-        time_to_ms,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(backfilled_requests)
 }
 
 async fn list_request_logs_before_sqlite(
@@ -5290,6 +5360,7 @@ CREATE TABLE IF NOT EXISTS model_prices (
   provider_id INTEGER,
   model_name TEXT NOT NULL,
   price_data_json TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
@@ -5467,6 +5538,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_sqlite_model_prices_provider_scope(pool).await?;
     migrate_sqlite_provider_model_aliases(pool).await?;
     migrate_sqlite_pricing_storage(pool).await?;
+    ensure_sqlite_model_prices_active(pool).await?;
     ensure_sqlite_responses_via_chat_columns(pool).await?;
     crate::notification::migrate_sqlite(pool).await?;
     Ok(())
@@ -5696,6 +5768,7 @@ CREATE TABLE IF NOT EXISTS model_prices (
   provider_id BIGINT,
   model_name TEXT NOT NULL,
   price_data_json TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL
 );
@@ -5873,6 +5946,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_postgres_model_prices_provider_scope(pool).await?;
     migrate_postgres_provider_model_aliases(pool).await?;
     migrate_postgres_pricing_storage(pool).await?;
+    ensure_postgres_model_prices_active(pool).await?;
     crate::notification::migrate_postgres(pool).await?;
     Ok(())
 }
@@ -5889,6 +5963,29 @@ async fn sqlite_column_exists(
         .any(|row| row.get::<String, _>("name") == column_name))
 }
 
+async fn postgres_column_exists(
+    pool: &PgPool,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool, DbError> {
+    let row = sqlx::query(
+        r#"
+SELECT EXISTS (
+  SELECT 1
+  FROM information_schema.columns
+  WHERE table_schema = current_schema()
+    AND table_name = $1
+    AND column_name = $2
+) AS present
+"#,
+    )
+    .bind(table_name)
+    .bind(column_name)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<bool, _>("present"))
+}
+
 async fn ensure_sqlite_model_prices_provider_scope(pool: &SqlitePool) -> Result<(), DbError> {
     if !sqlite_column_exists(pool, "model_prices", "provider_id").await? {
         sqlx::query("ALTER TABLE model_prices ADD COLUMN provider_id INTEGER")
@@ -5897,6 +5994,50 @@ async fn ensure_sqlite_model_prices_provider_scope(pool: &SqlitePool) -> Result<
     }
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_model_prices_provider_model_created ON model_prices(provider_id, model_name, created_at_ms DESC, id DESC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_sqlite_model_prices_active(pool: &SqlitePool) -> Result<(), DbError> {
+    if !sqlite_column_exists(pool, "model_prices", "active").await? {
+        sqlx::query("ALTER TABLE model_prices ADD COLUMN active INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            r#"
+UPDATE model_prices
+SET active = 1
+WHERE id IN (
+  SELECT current.id
+  FROM model_prices AS current
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM model_prices AS newer
+    WHERE newer.model_name = current.model_name
+      AND (
+        newer.provider_id = current.provider_id
+        OR (newer.provider_id IS NULL AND current.provider_id IS NULL)
+      )
+      AND (
+        newer.created_at_ms > current.created_at_ms
+        OR (newer.created_at_ms = current.created_at_ms AND newer.id > current.id)
+      )
+  )
+)
+"#,
+        )
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_model_prices_active_scope ON model_prices(active, provider_id, model_name)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_model_prices_one_active_scope ON model_prices(COALESCE(provider_id, -1), model_name) WHERE active != 0",
     )
     .execute(pool)
     .await?;
@@ -6187,6 +6328,39 @@ async fn ensure_postgres_model_prices_provider_scope(pool: &PgPool) -> Result<()
         .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_model_prices_provider_model_created ON model_prices(provider_id, model_name, created_at_ms DESC, id DESC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_postgres_model_prices_active(pool: &PgPool) -> Result<(), DbError> {
+    if !postgres_column_exists(pool, "model_prices", "active").await? {
+        sqlx::query("ALTER TABLE model_prices ADD COLUMN active BOOLEAN NOT NULL DEFAULT FALSE")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            r#"
+WITH latest AS (
+  SELECT DISTINCT ON (provider_id, model_name) id
+  FROM model_prices
+  ORDER BY provider_id, model_name, created_at_ms DESC, id DESC
+)
+UPDATE model_prices
+SET active = TRUE
+WHERE id IN (SELECT id FROM latest)
+"#,
+        )
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_model_prices_active_scope ON model_prices(active, provider_id, model_name)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_model_prices_one_active_scope ON model_prices(COALESCE(provider_id, -1), model_name) WHERE active",
     )
     .execute(pool)
     .await?;
@@ -7191,6 +7365,60 @@ INSERT INTO stats_daily (
     }
 
     #[tokio::test]
+    async fn migrate_sqlite_should_activate_only_latest_price_per_scope() {
+        let db = Database::connect("sqlite::memory:", 1)
+            .await
+            .expect("connect legacy sqlite memory db");
+        let Database::Sqlite(pool) = &db else {
+            panic!("expected sqlite db");
+        };
+        sqlx::query(
+            r#"
+CREATE TABLE model_prices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER,
+  model_name TEXT NOT NULL,
+  price_data_json TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+)
+"#,
+        )
+        .execute(pool)
+        .await
+        .expect("create legacy model prices");
+        let price_data = r#"{
+          "schema_version": 2,
+          "unit": "usd_per_million_tokens",
+          "base": { "input": "1", "output": "2", "cache_read": "0", "cache_write": "0" },
+          "tiers": []
+        }"#;
+        for (provider_id, created_at_ms) in [(None, 100_i64), (None, 200), (Some(7), 150)] {
+            sqlx::query(
+                "INSERT INTO model_prices (provider_id, model_name, price_data_json, created_at_ms, updated_at_ms) VALUES (?, 'model-a', ?, ?, ?)",
+            )
+            .bind(provider_id)
+            .bind(price_data)
+            .bind(created_at_ms)
+            .bind(created_at_ms)
+            .execute(pool)
+            .await
+            .expect("insert legacy price version");
+        }
+
+        db.migrate().await.expect("migrate legacy price versions");
+
+        let active_ids = sqlx::query("SELECT id FROM model_prices WHERE active != 0 ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .expect("load active prices")
+            .into_iter()
+            .map(|row| row.get::<i64, _>("id"))
+            .collect::<Vec<_>>();
+        assert_eq!(active_ids, vec![2, 3]);
+    }
+
+    #[tokio::test]
     async fn migrate_sqlite_should_add_span_columns_before_parent_index() {
         let db = Database::connect("sqlite::memory:", 1)
             .await
@@ -7436,9 +7664,172 @@ CREATE TABLE stats_events (
     }
 
     #[tokio::test]
-    async fn backfill_unpriced_usage_should_bind_only_matching_observed_history() {
+    async fn model_price_update_should_switch_active_version_and_keep_old_card() {
+        let db = sqlite_memory_db().await;
+        let first = r#"{
+          "schema_version": 2,
+          "unit": "usd_per_million_tokens",
+          "base": { "input": "1", "output": "2", "cache_read": "0", "cache_write": "0" },
+          "tiers": []
+        }"#;
+        let second = r#"{
+          "schema_version": 2,
+          "unit": "usd_per_million_tokens",
+          "base": { "input": "3", "output": "4", "cache_read": "0", "cache_write": "0" },
+          "tiers": []
+        }"#;
+        let first_id = db
+            .insert_model_price(None, "model-a", first, 100)
+            .await
+            .expect("insert first price");
+        let second_id = db
+            .update_model_price(first_id, second, 200)
+            .await
+            .expect("update active price")
+            .expect("new active price id");
+
+        let active = db
+            .list_latest_model_prices()
+            .await
+            .expect("list active prices");
+        assert_eq!(
+            active.iter().map(|price| price.id).collect::<Vec<_>>(),
+            vec![second_id]
+        );
+
+        let retained = db
+            .list_price_versions(&[first_id, second_id])
+            .await
+            .expect("load retained versions");
+        assert_eq!(retained.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn model_price_deactivation_should_hide_active_mapping_and_keep_history() {
         let db = sqlite_memory_db().await;
         let price_data = r#"{
+          "schema_version": 2,
+          "unit": "usd_per_million_tokens",
+          "base": { "input": "1", "output": "2", "cache_read": "0", "cache_write": "0" },
+          "tiers": []
+        }"#;
+        let price_id = db
+            .insert_model_price(Some(7), "model-a", price_data, 100)
+            .await
+            .expect("insert active price");
+        let deactivated = db
+            .deactivate_model_price(price_id, 200)
+            .await
+            .expect("deactivate active price")
+            .expect("deactivated price");
+        assert_eq!(deactivated.id, price_id);
+        assert!(
+            db.list_latest_model_prices()
+                .await
+                .expect("list active prices")
+                .is_empty()
+        );
+        assert_eq!(
+            db.list_price_versions(&[price_id])
+                .await
+                .expect("load retained version")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn pricing_usage_groups_should_separate_missing_rate_token_masks() {
+        let db = sqlite_memory_db().await;
+        let mut without_cache = stats_event("without-cache", 1_000, Some(200));
+        without_cache.price_version_id = Some(7);
+        without_cache.price_tier_index = Some(0);
+        without_cache.cache_read_input_tokens = 0;
+        let mut with_cache = stats_event("with-cache", 1_500, Some(200));
+        with_cache.price_version_id = Some(7);
+        with_cache.price_tier_index = Some(0);
+        with_cache.cache_read_input_tokens = 1;
+        db.insert_stats_events(&[without_cache, with_cache])
+            .await
+            .expect("insert differently covered usage");
+
+        let groups = db
+            .aggregate_pricing_usage_groups(1_000, 2_000)
+            .await
+            .expect("aggregate pricing groups");
+
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_should_bind_flat_price_to_tier_zero() {
+        let db = sqlite_memory_db().await;
+        let price_id = db
+            .insert_model_price(
+                Some(2),
+                "model-a",
+                r#"{
+                  "schema_version": 2,
+                  "unit": "usd_per_million_tokens",
+                  "base": { "input": "1", "output": "2", "cache_read": "0", "cache_write": "0" },
+                  "tiers": []
+                }"#,
+                900,
+            )
+            .await
+            .expect("insert flat price");
+        let price = db
+            .list_price_versions(&[price_id])
+            .await
+            .expect("load flat price")
+            .pop()
+            .expect("flat price version");
+        let mut event = stats_event("flat-price", 1_000, Some(200));
+        event.price_version_id = None;
+        event.price_tier_index = None;
+        db.insert_stats_events(&[event])
+            .await
+            .expect("insert unpriced event");
+
+        let key = db
+            .list_pricing_reconciliation_keys(900, 1_100)
+            .await
+            .expect("list reconciliation keys")
+            .into_iter()
+            .find(|key| key.provider_id == Some(2) && key.price_version_id.is_none())
+            .expect("flat price reconciliation key");
+        let rebound = db
+            .rebind_pricing_usage_group(&key, &price, 900, 1_100)
+            .await
+            .expect("bind flat price");
+
+        assert_eq!(rebound, 1);
+        let Database::Sqlite(pool) = &db else {
+            panic!("expected sqlite database");
+        };
+        let row = sqlx::query(
+            "SELECT price_version_id, price_tier_index FROM stats_events WHERE id = 'flat-price'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("load flat-price event");
+        assert_eq!(
+            row.get::<Option<i64>, _>("price_version_id"),
+            Some(price_id)
+        );
+        assert_eq!(row.get::<Option<i32>, _>("price_tier_index"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_should_rebind_only_matching_unpriceable_usage_masks() {
+        let db = sqlite_memory_db().await;
+        let partial_price = r#"{
+          "schema_version": 2,
+          "unit": "usd_per_million_tokens",
+          "base": { "input": "1", "output": "2", "cache_read": null, "cache_write": "3" },
+          "tiers": []
+        }"#;
+        let complete_price = r#"{
           "schema_version": 2,
           "unit": "usd_per_million_tokens",
           "base": { "input": "1", "output": "2", "cache_read": "0.5", "cache_write": "3" },
@@ -7448,29 +7839,30 @@ CREATE TABLE stats_events (
           }]
         }"#;
         let old_price_id = db
-            .insert_model_price(Some(2), "model-a", price_data, 800)
+            .insert_model_price(Some(2), "model-a", partial_price, 800)
             .await
-            .expect("insert old price version");
+            .expect("insert partial price version");
         let price_id = db
-            .insert_model_price(Some(2), "model-a", price_data, 900)
+            .insert_model_price(Some(2), "model-a", complete_price, 900)
             .await
-            .expect("insert price version");
+            .expect("insert complete price version");
         let price = db
             .list_price_versions(&[price_id])
             .await
-            .expect("load price version")
+            .expect("load complete price version")
             .pop()
-            .expect("price version");
+            .expect("complete price version");
 
-        let mut base_tier = stats_event("base-tier", 1_000, Some(200));
-        base_tier.input_tokens = 1;
-        base_tier.cache_read_input_tokens = 1;
-        base_tier.cache_creation_input_tokens = 1;
-        base_tier.price_version_id = None;
-        base_tier.price_tier_index = None;
-        let mut context_tier = stats_event("context-tier", 1_500, Some(200));
-        context_tier.price_version_id = None;
-        context_tier.price_tier_index = None;
+        let mut unbound = stats_event("unbound", 1_000, Some(200));
+        unbound.price_version_id = None;
+        unbound.price_tier_index = None;
+        let mut partial_unpriceable = stats_event("partial-unpriceable", 1_500, Some(200));
+        partial_unpriceable.price_version_id = Some(old_price_id);
+        partial_unpriceable.price_tier_index = Some(0);
+        let mut partial_priceable = stats_event("partial-priceable", 1_500, Some(200));
+        partial_priceable.cache_read_input_tokens = 0;
+        partial_priceable.price_version_id = Some(old_price_id);
+        partial_priceable.price_tier_index = Some(0);
         let mut other_provider = stats_event("other-provider", 1_500, Some(200));
         other_provider.provider_id = Some(9);
         other_provider.price_version_id = None;
@@ -7479,65 +7871,48 @@ CREATE TABLE stats_events (
         usage_missing.usage_observed = false;
         usage_missing.price_version_id = None;
         usage_missing.price_tier_index = None;
-        let mut already_priced = stats_event("already-priced", 1_500, Some(200));
-        already_priced.price_version_id = Some(old_price_id);
-        already_priced.price_tier_index = Some(0);
         db.insert_stats_events(&[
-            base_tier,
-            context_tier,
+            unbound,
+            partial_unpriceable,
+            partial_priceable,
             other_provider,
             usage_missing,
-            already_priced,
         ])
         .await
         .expect("insert stats events");
 
+        let keys = db
+            .list_pricing_reconciliation_keys(1_000, 2_000)
+            .await
+            .expect("list reconciliation keys");
+        let matching_keys = keys
+            .iter()
+            .filter(|key| {
+                key.provider_id == Some(2)
+                    && key.model == "model-a"
+                    && (key.price_version_id.is_none()
+                        || (key.price_version_id == Some(old_price_id)
+                            && key.has_cache_read_input_tokens))
+            })
+            .collect::<Vec<_>>();
+        let mut rebound = 0;
+        for key in matching_keys {
+            rebound += db
+                .rebind_pricing_usage_group(key, &price, 1_000, 2_000)
+                .await
+                .expect("rebind reconciliation group");
+        }
+        assert_eq!(rebound, 2);
+
         let Database::Sqlite(pool) = &db else {
             panic!("expected sqlite db");
         };
-        sqlx::query(
-            r#"
-INSERT INTO request_logs (
-  id, time_ms, api_key_id, provider_id, api_format, model,
-  input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-  usage_observed, span_kind, transport, created_at_ms
-) VALUES ('log-unpriced', 1500, 1, 2, 'chat_completions', 'model-a', 20, 2, 1, 2, 1, 'request', 'http', 1500)
-"#,
-        )
-        .execute(pool)
-        .await
-        .expect("insert unpriced request log");
-
-        let keys = db
-            .list_unpriced_usage_keys(1_000, 2_000)
-            .await
-            .expect("list unpriced usage keys");
-        assert_eq!(
-            keys,
-            vec![
-                UnpricedUsageKeyRow {
-                    provider_id: Some(2),
-                    model: "model-a".to_string(),
-                },
-                UnpricedUsageKeyRow {
-                    provider_id: Some(9),
-                    model: "model-a".to_string(),
-                },
-            ]
-        );
-
-        let backfilled = db
-            .backfill_unpriced_usage(Some(2), "model-a", &price, 1_000, 2_000)
-            .await
-            .expect("backfill unpriced usage");
-        assert_eq!(backfilled, 2);
-
         let rows = sqlx::query(
             "SELECT id, price_version_id, price_tier_index FROM stats_events ORDER BY id",
         )
         .fetch_all(pool)
         .await
-        .expect("load backfilled stats events");
+        .expect("load rebound stats events");
         let pricing_by_id = rows
             .into_iter()
             .map(|row| {
@@ -7550,26 +7925,17 @@ INSERT INTO request_logs (
                 )
             })
             .collect::<HashMap<_, _>>();
-        assert_eq!(pricing_by_id["base-tier"], (Some(price_id), Some(0)));
-        assert_eq!(pricing_by_id["context-tier"], (Some(price_id), Some(1)));
-        assert_eq!(pricing_by_id["other-provider"], (None, None));
-        assert_eq!(pricing_by_id["usage-missing"], (None, None));
+        assert_eq!(pricing_by_id["unbound"], (Some(price_id), Some(1)));
         assert_eq!(
-            pricing_by_id["already-priced"],
+            pricing_by_id["partial-unpriceable"],
+            (Some(price_id), Some(1))
+        );
+        assert_eq!(
+            pricing_by_id["partial-priceable"],
             (Some(old_price_id), Some(0))
         );
-
-        let log = sqlx::query(
-            "SELECT price_version_id, price_tier_index FROM request_logs WHERE id = 'log-unpriced'",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("load backfilled request log");
-        assert_eq!(
-            log.get::<Option<i64>, _>("price_version_id"),
-            Some(price_id)
-        );
-        assert_eq!(log.get::<Option<i32>, _>("price_tier_index"), Some(1));
+        assert_eq!(pricing_by_id["other-provider"], (None, None));
+        assert_eq!(pricing_by_id["usage-missing"], (None, None));
     }
 
     #[tokio::test]
@@ -8116,11 +8482,267 @@ FROM model_route_providers
         .collect())
 }
 
+fn normalize_model_price_data(json: &str) -> Result<String, DbError> {
+    let value: Value = serde_json::from_str(json)
+        .map_err(|error| DbError::new(format!("invalid price_data_json: {error}")))?;
+    let price = PriceCard::from_json(&value).map_err(DbError::new)?;
+    serde_json::to_string(&price.to_json())
+        .map_err(|error| DbError::new(format!("invalid normalized price data: {error}")))
+}
+
+async fn insert_model_price_sqlite(
+    pool: &SqlitePool,
+    provider_id: Option<i64>,
+    model_name: &str,
+    normalized_json: &str,
+    now_ms: i64,
+) -> Result<i64, DbError> {
+    let mut tx = pool.begin().await?;
+    let mut deactivate =
+        QueryBuilder::<Sqlite>::new("UPDATE model_prices SET active = 0, updated_at_ms = ");
+    deactivate
+        .push_bind(now_ms)
+        .push(" WHERE active != 0 AND model_name = ")
+        .push_bind(model_name);
+    match provider_id {
+        Some(provider_id) => {
+            deactivate
+                .push(" AND provider_id = ")
+                .push_bind(provider_id);
+        }
+        None => {
+            deactivate.push(" AND provider_id IS NULL");
+        }
+    }
+    deactivate.build().execute(&mut *tx).await?;
+
+    let result = sqlx::query(
+        r#"
+INSERT INTO model_prices (
+  provider_id, model_name, price_data_json, active, created_at_ms, updated_at_ms
+) VALUES (?, ?, ?, 1, ?, ?)
+"#,
+    )
+    .bind(provider_id)
+    .bind(model_name)
+    .bind(normalized_json)
+    .bind(now_ms)
+    .bind(now_ms)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.last_insert_rowid())
+}
+
+async fn insert_model_price_postgres(
+    pool: &PgPool,
+    provider_id: Option<i64>,
+    model_name: &str,
+    normalized_json: &str,
+    now_ms: i64,
+) -> Result<i64, DbError> {
+    let mut tx = pool.begin().await?;
+    let mut deactivate =
+        QueryBuilder::<Postgres>::new("UPDATE model_prices SET active = FALSE, updated_at_ms = ");
+    deactivate
+        .push_bind(now_ms)
+        .push(" WHERE active AND model_name = ")
+        .push_bind(model_name);
+    match provider_id {
+        Some(provider_id) => {
+            deactivate
+                .push(" AND provider_id = ")
+                .push_bind(provider_id);
+        }
+        None => {
+            deactivate.push(" AND provider_id IS NULL");
+        }
+    }
+    deactivate.build().execute(&mut *tx).await?;
+
+    let row = sqlx::query(
+        r#"
+INSERT INTO model_prices (
+  provider_id, model_name, price_data_json, active, created_at_ms, updated_at_ms
+) VALUES ($1, $2, $3, TRUE, $4, $5)
+RETURNING id
+"#,
+    )
+    .bind(provider_id)
+    .bind(model_name)
+    .bind(normalized_json)
+    .bind(now_ms)
+    .bind(now_ms)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row.get::<i64, _>("id"))
+}
+
+async fn update_model_price_sqlite(
+    pool: &SqlitePool,
+    price_id: i64,
+    normalized_json: &str,
+    now_ms: i64,
+) -> Result<Option<i64>, DbError> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query(
+        "SELECT provider_id, model_name FROM model_prices WHERE id = ? AND active != 0",
+    )
+    .bind(price_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(current) = current else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let provider_id = current.get::<Option<i64>, _>("provider_id");
+    let model_name = current.get::<String, _>("model_name");
+    sqlx::query("UPDATE model_prices SET active = 0, updated_at_ms = ? WHERE id = ?")
+        .bind(now_ms)
+        .bind(price_id)
+        .execute(&mut *tx)
+        .await?;
+    let result = sqlx::query(
+        r#"
+INSERT INTO model_prices (
+  provider_id, model_name, price_data_json, active, created_at_ms, updated_at_ms
+) VALUES (?, ?, ?, 1, ?, ?)
+"#,
+    )
+    .bind(provider_id)
+    .bind(model_name)
+    .bind(normalized_json)
+    .bind(now_ms)
+    .bind(now_ms)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(result.last_insert_rowid()))
+}
+
+async fn update_model_price_postgres(
+    pool: &PgPool,
+    price_id: i64,
+    normalized_json: &str,
+    now_ms: i64,
+) -> Result<Option<i64>, DbError> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query(
+        "SELECT provider_id, model_name FROM model_prices WHERE id = $1 AND active FOR UPDATE",
+    )
+    .bind(price_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(current) = current else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let provider_id = current.get::<Option<i64>, _>("provider_id");
+    let model_name = current.get::<String, _>("model_name");
+    sqlx::query("UPDATE model_prices SET active = FALSE, updated_at_ms = $1 WHERE id = $2")
+        .bind(now_ms)
+        .bind(price_id)
+        .execute(&mut *tx)
+        .await?;
+    let row = sqlx::query(
+        r#"
+INSERT INTO model_prices (
+  provider_id, model_name, price_data_json, active, created_at_ms, updated_at_ms
+) VALUES ($1, $2, $3, TRUE, $4, $5)
+RETURNING id
+"#,
+    )
+    .bind(provider_id)
+    .bind(model_name)
+    .bind(normalized_json)
+    .bind(now_ms)
+    .bind(now_ms)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(row.get::<i64, _>("id")))
+}
+
+async fn deactivate_model_price_sqlite(
+    pool: &SqlitePool,
+    price_id: i64,
+    now_ms: i64,
+) -> Result<Option<ModelPrice>, DbError> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+SELECT id, provider_id, model_name, price_data_json, created_at_ms, updated_at_ms
+FROM model_prices
+WHERE id = ? AND active != 0
+"#,
+    )
+    .bind(price_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    sqlx::query("UPDATE model_prices SET active = 0, updated_at_ms = ? WHERE id = ?")
+        .bind(now_ms)
+        .bind(price_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(ModelPrice {
+        id: row.get::<i64, _>("id"),
+        provider_id: row.get::<Option<i64>, _>("provider_id"),
+        model_name: row.get::<String, _>("model_name"),
+        price: parse_model_price_data(&row.get::<String, _>("price_data_json"))?,
+        created_at_ms: row.get::<i64, _>("created_at_ms"),
+        updated_at_ms: now_ms,
+    }))
+}
+
+async fn deactivate_model_price_postgres(
+    pool: &PgPool,
+    price_id: i64,
+    now_ms: i64,
+) -> Result<Option<ModelPrice>, DbError> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+SELECT id, provider_id, model_name, price_data_json, created_at_ms, updated_at_ms
+FROM model_prices
+WHERE id = $1 AND active
+FOR UPDATE
+"#,
+    )
+    .bind(price_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    sqlx::query("UPDATE model_prices SET active = FALSE, updated_at_ms = $1 WHERE id = $2")
+        .bind(now_ms)
+        .bind(price_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(ModelPrice {
+        id: row.get::<i64, _>("id"),
+        provider_id: row.get::<Option<i64>, _>("provider_id"),
+        model_name: row.get::<String, _>("model_name"),
+        price: parse_model_price_data(&row.get::<String, _>("price_data_json"))?,
+        created_at_ms: row.get::<i64, _>("created_at_ms"),
+        updated_at_ms: now_ms,
+    }))
+}
+
 async fn list_latest_model_prices_sqlite(pool: &SqlitePool) -> Result<Vec<ModelPrice>, DbError> {
     let rows = sqlx::query(
         r#"
 SELECT id, provider_id, model_name, price_data_json, created_at_ms, updated_at_ms
 FROM model_prices
+WHERE active != 0
 ORDER BY (provider_id IS NOT NULL) ASC, provider_id ASC, model_name ASC, created_at_ms DESC, id DESC
 "#,
     )
@@ -8160,6 +8782,7 @@ async fn list_latest_model_prices_postgres(pool: &PgPool) -> Result<Vec<ModelPri
         r#"
 SELECT id, provider_id, model_name, price_data_json, created_at_ms, updated_at_ms
 FROM model_prices
+WHERE active
 ORDER BY (provider_id IS NOT NULL) ASC, provider_id ASC, model_name ASC, created_at_ms DESC, id DESC
 "#,
     )
