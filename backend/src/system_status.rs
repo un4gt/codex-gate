@@ -15,9 +15,22 @@ pub struct ServerStatus {
     pub cpu_capacity_cores: f64,
     pub cpu_sample_ms: Option<u64>,
     pub memory_used_bytes: Option<u64>,
+    pub memory_current_bytes: Option<u64>,
+    pub memory_reclaimable_bytes: Option<u64>,
     pub memory_total_bytes: Option<u64>,
     pub memory_usage_percent: Option<f64>,
     pub memory_limited: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryStatus {
+    pub scope: &'static str,
+    pub used_bytes: Option<u64>,
+    pub current_bytes: Option<u64>,
+    pub reclaimable_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub usage_percent: Option<f64>,
+    pub limited: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +66,8 @@ struct CpuSample {
 struct MemoryReading {
     scope: &'static str,
     used_bytes: Option<u64>,
+    current_bytes: Option<u64>,
+    reclaimable_bytes: Option<u64>,
     total_bytes: Option<u64>,
     limited: bool,
 }
@@ -72,7 +87,7 @@ impl SystemStatusMonitor {
     }
 
     pub fn snapshot(&self) -> ServerStatus {
-        let memory = read_memory_reading();
+        let memory = self.memory_snapshot();
         let current = read_cpu_reading().map(|reading| CpuSample {
             reading,
             at: Instant::now(),
@@ -85,9 +100,24 @@ impl SystemStatusMonitor {
             cpu_capacity_cores,
             cpu_sample_ms,
             memory_used_bytes: memory.used_bytes,
+            memory_current_bytes: memory.current_bytes,
+            memory_reclaimable_bytes: memory.reclaimable_bytes,
             memory_total_bytes: memory.total_bytes,
-            memory_usage_percent: percent(memory.used_bytes, memory.total_bytes),
+            memory_usage_percent: memory.usage_percent,
             memory_limited: memory.limited,
+        }
+    }
+
+    pub fn memory_snapshot(&self) -> MemoryStatus {
+        let memory = read_memory_reading();
+        MemoryStatus {
+            scope: memory.scope,
+            used_bytes: memory.used_bytes,
+            current_bytes: memory.current_bytes,
+            reclaimable_bytes: memory.reclaimable_bytes,
+            total_bytes: memory.total_bytes,
+            usage_percent: percent(memory.used_bytes, memory.total_bytes),
+            limited: memory.limited,
         }
     }
 
@@ -182,7 +212,8 @@ fn read_memory_reading() -> MemoryReading {
 
 fn read_cgroup_v2_memory(host_total: Option<u64>, containerized: bool) -> Option<MemoryReading> {
     let cgroup_path = cgroup_v2_path()?;
-    let used = read_u64_file(&cgroup_path.join("memory.current"))?;
+    let current = read_u64_file(&cgroup_path.join("memory.current"))?;
+    let reclaimable = read_memory_stat_value(&cgroup_path.join("memory.stat"), &["inactive_file"]);
     let limit = read_memory_max(&cgroup_path.join("memory.max"));
     let should_use = containerized || limit.is_some();
     if !should_use {
@@ -191,7 +222,9 @@ fn read_cgroup_v2_memory(host_total: Option<u64>, containerized: bool) -> Option
 
     Some(MemoryReading {
         scope: if containerized { "container" } else { "cgroup" },
-        used_bytes: Some(used),
+        used_bytes: Some(cgroup_working_set_bytes(current, reclaimable)),
+        current_bytes: Some(current),
+        reclaimable_bytes: reclaimable,
         total_bytes: limit.or(host_total),
         limited: limit.is_some(),
     })
@@ -199,7 +232,11 @@ fn read_cgroup_v2_memory(host_total: Option<u64>, containerized: bool) -> Option
 
 fn read_cgroup_v1_memory(host_total: Option<u64>, containerized: bool) -> Option<MemoryReading> {
     let cgroup_path = cgroup_v1_path("memory", "memory.usage_in_bytes")?;
-    let used = read_u64_file(&cgroup_path.join("memory.usage_in_bytes"))?;
+    let current = read_u64_file(&cgroup_path.join("memory.usage_in_bytes"))?;
+    let reclaimable = read_memory_stat_value(
+        &cgroup_path.join("memory.stat"),
+        &["total_inactive_file", "inactive_file"],
+    );
     let limit = read_memory_max(&cgroup_path.join("memory.limit_in_bytes"));
     let should_use = containerized || limit.is_some();
     if !should_use {
@@ -208,7 +245,9 @@ fn read_cgroup_v1_memory(host_total: Option<u64>, containerized: bool) -> Option
 
     Some(MemoryReading {
         scope: if containerized { "container" } else { "cgroup" },
-        used_bytes: Some(used),
+        used_bytes: Some(cgroup_working_set_bytes(current, reclaimable)),
+        current_bytes: Some(current),
+        reclaimable_bytes: reclaimable,
         total_bytes: limit.or(host_total),
         limited: limit.is_some(),
     })
@@ -226,9 +265,30 @@ fn read_host_memory(host_total: Option<u64>) -> MemoryReading {
     MemoryReading {
         scope: "host",
         used_bytes: used,
+        current_bytes: None,
+        reclaimable_bytes: None,
         total_bytes: total,
         limited: false,
     }
+}
+
+fn cgroup_working_set_bytes(current: u64, reclaimable: Option<u64>) -> u64 {
+    current.saturating_sub(reclaimable.unwrap_or(0))
+}
+
+fn read_memory_stat_value(path: &Path, keys: &[&str]) -> Option<u64> {
+    let raw = read_trimmed(path)?;
+    keys.iter()
+        .find_map(|key| parse_memory_stat_value(&raw, key))
+}
+
+fn parse_memory_stat_value(raw: &str, key: &str) -> Option<u64> {
+    raw.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        (parts.next() == Some(key))
+            .then(|| parts.next()?.parse::<u64>().ok())
+            .flatten()
+    })
 }
 
 fn read_cpu_reading() -> Option<CpuReading> {
@@ -564,6 +624,23 @@ mod tests {
             parsed.map(|info| (info.total_bytes, info.available_bytes)),
             Some((Some(2_097_152), Some(1_572_864)))
         );
+    }
+
+    #[test]
+    fn parse_memory_stat_value_reads_requested_counter() {
+        let raw = "anon 1024\ninactive_file 4096\nactive_file 2048\n";
+
+        assert_eq!(parse_memory_stat_value(raw, "inactive_file"), Some(4096));
+    }
+
+    #[test]
+    fn cgroup_working_set_excludes_reclaimable_inactive_files() {
+        assert_eq!(cgroup_working_set_bytes(10_000, Some(4_000)), 6_000);
+    }
+
+    #[test]
+    fn cgroup_working_set_saturates_when_stats_race() {
+        assert_eq!(cgroup_working_set_bytes(1_000, Some(2_000)), 0);
     }
 
     #[test]

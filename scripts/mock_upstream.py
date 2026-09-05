@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -107,6 +108,11 @@ def parse_route(raw, default_format):
 
 class MockHandler(BaseHTTPRequestHandler):
     server_version = 'little-gate-mock/0.1'
+    protocol_version = 'HTTP/1.1'
+
+    def setup(self):
+        super().setup()
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     def do_GET(self):
         parsed = urlparse(self.path)

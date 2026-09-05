@@ -25,6 +25,8 @@ pub struct Config {
     pub log_queue_capacity: usize,
     pub stats_flush_interval: Duration,
     pub upstream_connect_timeout: Duration,
+    pub upstream_pool_idle_timeout: Duration,
+    pub upstream_pool_max_idle_per_host: usize,
     pub upstream_request_timeout: Duration,
     pub affinity_ttl: Duration,
     pub affinity_max_entries: usize,
@@ -110,6 +112,13 @@ impl Config {
                 .unwrap_or(2_000)
                 .max(100),
         );
+        let upstream_pool_idle_timeout = Duration::from_millis(
+            getenv_u64("UPSTREAM_POOL_IDLE_TIMEOUT_MS")
+                .unwrap_or(30_000)
+                .max(1_000),
+        );
+        let upstream_pool_max_idle_per_host =
+            getenv_usize("UPSTREAM_POOL_MAX_IDLE_PER_HOST").unwrap_or(8);
         let upstream_request_timeout = Duration::from_millis(
             getenv_u64("UPSTREAM_REQUEST_TIMEOUT_MS")
                 .unwrap_or(120_000)
@@ -176,6 +185,8 @@ impl Config {
             log_queue_capacity,
             stats_flush_interval,
             upstream_connect_timeout,
+            upstream_pool_idle_timeout,
+            upstream_pool_max_idle_per_host,
             upstream_request_timeout,
             affinity_ttl,
             affinity_max_entries,

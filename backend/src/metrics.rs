@@ -386,6 +386,7 @@ pub async fn render_prometheus(state: &SharedState) -> String {
     let responses = state.metrics.responses.snapshot();
     let db_ready = state.db.ping().await.is_ok();
     let now_ms = util::now_ms();
+    let memory = state.system_status.memory_snapshot();
 
     let mut provider_counts = EntityStateCounts::default();
     let mut key_counts = EntityStateCounts::default();
@@ -485,6 +486,31 @@ pub async fn render_prometheus(state: &SharedState) -> String {
         out.push_str(&format!(
             "little_gate_process_resident_memory_bytes {}\n",
             rss_bytes
+        ));
+    }
+
+    if let Some(used_bytes) = memory.used_bytes {
+        out.push_str("# HELP little_gate_system_memory_working_set_bytes Memory in active use after excluding reclaimable inactive file cache.\n");
+        out.push_str("# TYPE little_gate_system_memory_working_set_bytes gauge\n");
+        out.push_str(&format!(
+            "little_gate_system_memory_working_set_bytes{{scope=\"{}\"}} {}\n",
+            memory.scope, used_bytes
+        ));
+    }
+    if let Some(current_bytes) = memory.current_bytes {
+        out.push_str("# HELP little_gate_system_memory_current_bytes Raw memory charged to the cgroup, including reclaimable file cache.\n");
+        out.push_str("# TYPE little_gate_system_memory_current_bytes gauge\n");
+        out.push_str(&format!(
+            "little_gate_system_memory_current_bytes{{scope=\"{}\"}} {}\n",
+            memory.scope, current_bytes
+        ));
+    }
+    if let Some(reclaimable_bytes) = memory.reclaimable_bytes {
+        out.push_str("# HELP little_gate_system_memory_reclaimable_bytes Inactive file cache excluded from the working set.\n");
+        out.push_str("# TYPE little_gate_system_memory_reclaimable_bytes gauge\n");
+        out.push_str(&format!(
+            "little_gate_system_memory_reclaimable_bytes{{scope=\"{}\"}} {}\n",
+            memory.scope, reclaimable_bytes
         ));
     }
 

@@ -873,6 +873,8 @@ export interface StatsOverviewResponse {
     cpu_capacity_cores: number;
     cpu_sample_ms: number | null;
     memory_used_bytes: number | null;
+    memory_current_bytes: number | null;
+    memory_reclaimable_bytes: number | null;
     memory_total_bytes: number | null;
     memory_usage_percent: number | null;
     memory_limited: boolean;

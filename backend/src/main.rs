@@ -255,8 +255,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         retention,
     )
     .await?;
-    let upstream = upstream::new_upstream_client(config.upstream_connect_timeout)
-        .map_err(|e| format!("upstream client: {e}"))?;
+    let upstream = upstream::new_upstream_client(
+        config.upstream_connect_timeout,
+        config.upstream_pool_idle_timeout,
+        config.upstream_pool_max_idle_per_host,
+    )
+    .map_err(|e| format!("upstream client: {e}"))?;
     let endpoint_health = Arc::new(health::EndpointHealthBook::new(
         config.circuit_breaker_failure_threshold,
         config.circuit_breaker_open_ms,

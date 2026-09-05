@@ -358,7 +358,7 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | `CODEX_OAUTH_CALLBACK_LISTEN_ADDR` | 二进制 `127.0.0.1:1455`；容器 `0.0.0.0:1455` | Codex OAuth 本机回调监听地址；端口必须为 `1455`。 |
 | `STATIC_DIR` | `/app/static`（容器） | 前端静态文件目录。 |
 | `DB_DSN` | `sqlite:///app/data/little_gate.sqlite` | 数据库连接串（SQLite/Postgres）。 |
-| `DB_MAX_CONNECTIONS` | `10` | 数据库连接池上限。 |
+| `DB_MAX_CONNECTIONS` | `2` | 数据库连接池上限。 |
 | `RUST_LOG` | `info` | Rust 日志级别。 |
 
 ### 缓存与吞吐字段
@@ -367,14 +367,14 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | --- | --- | --- |
 | `INJECT_INCLUDE_USAGE` | `true` | 对流式请求补齐 `stream_options.include_usage=true`。 |
 | `API_KEY_CACHE_TTL_MS` | `30000` | API Key 校验缓存 TTL。 |
-| `API_KEY_CACHE_MAX_ENTRIES` | `100000` | API Key 缓存条目上限。 |
+| `API_KEY_CACHE_MAX_ENTRIES` | `2048` | API Key 缓存条目上限。 |
 | `UPSTREAM_CACHE_TTL_MS` | `2000` | 上游快照缓存 TTL。 |
 | `UPSTREAM_CACHE_STALE_GRACE_MS` | `30000` | 上游缓存过期后的容错窗口。 |
-| `MAX_REQUEST_BYTES` | `10485760` | 单次请求体最大字节数（10MB）。 |
-| `USAGE_CAPTURE_BYTES` | `2097152` | 非流式响应用量采样窗口总字节数（2MB）。 |
-| `USAGE_CAPTURE_TAIL_BYTES` | `1048576` | 用量采样窗口中保留尾部的字节数（1MB）。 |
-| `LOG_QUEUE_CAPACITY` | `2048` | 异步日志/遥测队列容量。 |
-| `STATS_FLUSH_INTERVAL_MS` | `2000` | 统计聚合刷新周期。 |
+| `MAX_REQUEST_BYTES` | `4194304` | 单次请求体最大字节数（4MB）。 |
+| `USAGE_CAPTURE_BYTES` | `65536` | 非流式响应用量采样窗口总字节数（64KB）。 |
+| `USAGE_CAPTURE_TAIL_BYTES` | `16384` | 用量采样窗口中保留尾部的字节数（16KB）。 |
+| `LOG_QUEUE_CAPACITY` | `256` | 异步日志/遥测队列容量。 |
+| `STATS_FLUSH_INTERVAL_MS` | `5000` | 统计聚合刷新周期。 |
 
 旧版 `MAX_RESPONSE_BYTES` 仍可作为 `USAGE_CAPTURE_BYTES` 的回退值，但新部署建议使用上面的用量采样字段。
 
@@ -386,6 +386,8 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | 熔断触发失败阈值。 |
 | `CIRCUIT_BREAKER_OPEN_MS` | `30000` | 熔断打开时长。 |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `2000` | 上游连接超时。 |
+| `UPSTREAM_POOL_IDLE_TIMEOUT_MS` | `30000` | 上游连接池空闲连接主动回收时间；最低 1000ms。 |
+| `UPSTREAM_POOL_MAX_IDLE_PER_HOST` | `8` | 每个上游主机最多保留的空闲连接数；设为 `0` 可禁用连接复用。 |
 | `UPSTREAM_REQUEST_TIMEOUT_MS` | `120000` | 上游请求总超时。 |
 | `SESSION_AFFINITY_TTL_MS` | `1800000` | 会话到 Provider 亲和绑定的滑动 TTL（30 分钟）。 |
 | `SESSION_AFFINITY_MAX_ENTRIES` | `10000` | 单进程最多保留的会话亲和条目数。 |
@@ -454,3 +456,21 @@ MOCK_PORT=19130 GW_PORT=18130 scripts/test_openai_compatible_responses.sh
 - `python3 scripts/bench_gateway.py ...`：基础并发 / 长压 / RSS 采样
 - `python3 scripts/bench_failover.py ...`：endpoint / key failover 基线
 - `python3 scripts/run_regression.py --archive-compress`：一键跑 build / 长压 / failover / archive 回归
+
+排查“请求越多、容器内存越高”时，不要只比较冷启动与负载峰值。先在停止请求且
+`little_gate_inflight_requests` 回到 `0` 后，连续比较多轮相同负载的稳定基线：
+
+```bash
+curl -fsSL http://127.0.0.1:8080/metrics \
+  | grep -E 'little_gate_(process_resident_memory_bytes|system_memory|inflight_requests|telemetry_dropped_total)'
+docker stats --no-stream little-gate
+docker exec little-gate sh -c \
+  'cat /sys/fs/cgroup/memory.current; grep -E "^(anon|file|inactive_file|active_file|slab) " /sys/fs/cgroup/memory.stat'
+```
+
+`little_gate_process_resident_memory_bytes` 是网关进程 RSS；
+`little_gate_system_memory_working_set_bytes` 与管理台内存用量会排除可回收的
+`inactive_file`；`little_gate_system_memory_current_bytes` 保留原始 cgroup charge，后者还包含
+SQLite/WAL 文件页缓存。数据库随请求日志增长时，`current`、`file` 和 `inactive_file`
+上升并不等同于 Rust 堆泄漏。真正需要继续分析的是：相同负载每轮结束、等待超过
+`UPSTREAM_POOL_IDLE_TIMEOUT_MS` 后，RSS 与 working set 仍持续阶梯式增长，且没有进入平台。
