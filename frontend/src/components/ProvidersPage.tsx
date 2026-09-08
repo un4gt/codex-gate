@@ -1,3 +1,5 @@
+import { UpstreamKeyModels } from './UpstreamKeyModels';
+import { routingAvailabilityLabel } from '@/lib/routingAvailability';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { AlertCircle, Check, ChevronRight, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from "lucide-react";
 import { DetailDrawer } from '@/components/console/DetailDrawer';
@@ -13,9 +15,9 @@ import {
 } from '@/components/console/RequestOverridesEditor';
 import { CodexOAuthLoginDialog, CodexOAuthPanel } from '@/components/CodexOAuthPanel';
 import { t } from '@/lib/i18n';
-import { addUpstreamKeyModels, createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, deleteUpstreamKeyModel, loadUpstreamKeyModels, resetProviderCircuit, syncProviderModels, syncUpstreamKeyModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateUpstreamKeyModel, updateProviderKey } from '../lib/api';
+import { createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, resetProviderCircuit, syncProviderModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateProviderKey } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
-import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, ProviderGroup, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpstreamKeyModel, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
+import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, ProviderGroup, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
@@ -88,12 +90,6 @@ function parseProviderRoutingValue(raw: string, minimum: number): number | null 
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > MAX_PROVIDER_ROUTING_VALUE) return null;
   return parsed;
-}
-function parseModelList(raw: string): string[] {
-  const items = raw.split(/[\s,]+/g).map(value => value.trim()).filter(value => value.length > 0);
-  const unique = Array.from(new Set(items));
-  unique.sort((a, b) => a.localeCompare(b));
-  return unique;
 }
 function healthStatus(state?: string, available?: boolean) {
   if (!available || state === 'open') return {
@@ -313,15 +309,12 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const createIsPersisted = createResources !== null;
   const createFieldsDisabled = createIsBusy || createStage === 'complete' || createStage === 'partial';
   const [selectedUpstreamKeyId, setSelectedUpstreamKeyId] = useState<number | null>(null);
-  const [upstreamKeyModels, setUpstreamKeyModels] = useState<UpstreamKeyModel[] | null>(null);
-  const [upstreamKeyModelsError, setUpstreamKeyModelsError] = useState<string | null>(null);
-  const [upstreamKeyModelsDraft, setUpstreamKeyModelsDraft] = useState('');
   const providerTypeDescription = (value: string) => PROVIDER_TYPE_OPTIONS.find(option => option.value === value)?.description ?? '—';
   const stats = (): StatItem[] => {
     const totalEndpoints = props.items.reduce((sum, item) => sum + item.endpoints.length, 0);
-    const unhealthy = props.items.filter(item => !item.provider.health?.available || item.provider.health?.state === 'open').length;
+    const unhealthy = props.items.filter(item => !item.provider.routing_availability?.available).length;
     const degraded = props.items.filter(item => item.provider.health?.state === 'half_open').length;
-    const healthy = props.items.filter(item => item.provider.health?.state === 'closed' && item.provider.health.available).length;
+    const healthy = props.items.filter(item => item.provider.routing_availability?.available).length;
     return [{
       label: '上游总数',
       value: String(props.items.length),
@@ -892,9 +885,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
   };
   useEffect(() => {
     setSelectedUpstreamKeyId(null);
-    setUpstreamKeyModels(null);
-    setUpstreamKeyModelsError(null);
-    setUpstreamKeyModelsDraft('');
     setProviderTypeDraft('');
     setProviderPriorityDraft(selected ? String(selected.provider.priority) : '');
     setProviderWeightDraft(selected ? String(selected.provider.weight) : '');
@@ -936,101 +926,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
     }
     setSelectedUpstreamKeyId(keys[0].id);
   }, [selectedProviderId, selected?.keys, selectedUpstreamKeyId]);
-  useEffect(() => {
-    const item = selected;
-    const upstreamKeyId = selectedUpstreamKeyId;
-    if (!item || upstreamKeyId === null || !isLive()) return;
-    let cancelled = false;
-    setUpstreamKeyModels(null);
-    setUpstreamKeyModelsError(null);
-    setUpstreamKeyModelsDraft('');
-    void loadUpstreamKeyModels(props.settings, upstreamKeyId).then(models => {
-      if (cancelled) return;
-      setUpstreamKeyModels(models);
-    }).catch(error => {
-      if (cancelled) return;
-      setUpstreamKeyModels([]);
-      setUpstreamKeyModelsError(error instanceof Error ? error.message : '加载密钥模型失败。');
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [selected?.provider.id, selectedUpstreamKeyId, props.settings]);
-  const syncKeyModels = async (upstreamKeyId: number) => {
-    if (!ensureLive()) return;
-    setBusy(`key-models-sync-${upstreamKeyId}`);
-    try {
-      const models = await syncUpstreamKeyModels(props.settings, upstreamKeyId);
-      setUpstreamKeyModels(models);
-      setUpstreamKeyModelsError(null);
-      props.onMessage(t('已同步 {{count}} 个密钥模型。', {
-        count: models.length
-      }));
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '同步密钥模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const addKeyModels = async (upstreamKeyId: number) => {
-    if (!ensureLive()) return;
-    const models = parseModelList(upstreamKeyModelsDraft);
-    if (models.length === 0) {
-      props.onMessage('请先输入至少一个模型名称。');
-      return;
-    }
-    setBusy(`key-models-add-${upstreamKeyId}`);
-    try {
-      const updated = await addUpstreamKeyModels(props.settings, upstreamKeyId, models);
-      setUpstreamKeyModels(updated);
-      setUpstreamKeyModelsError(null);
-      setUpstreamKeyModelsDraft('');
-      props.onMessage(t('已写入 {{count}} 个模型。', {
-        count: models.length
-      }));
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '写入密钥模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const toggleKeyModelEnabled = async (model: UpstreamKeyModel, enabled: boolean) => {
-    if (!ensureLive()) return;
-    setBusy(`key-model-${model.id}`);
-    setUpstreamKeyModels(current => current ? current.map(row => row.id === model.id ? {
-      ...row,
-      enabled
-    } : row) : current);
-    try {
-      await updateUpstreamKeyModel(props.settings, model.id, {
-        enabled
-      });
-    } catch (error) {
-      setUpstreamKeyModels(current => current ? current.map(row => row.id === model.id ? {
-        ...row,
-        enabled: model.enabled
-      } : row) : current);
-      props.onMessage(error instanceof Error ? error.message : '更新密钥模型状态失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
-  const removeKeyModel = async (model: UpstreamKeyModel) => {
-    if (!ensureLive()) return;
-    if (!window.confirm(t('确认删除密钥模型 {{name}}？', {
-      name: model.model_name
-    }))) return;
-    setBusy(`key-model-${model.id}`);
-    try {
-      await deleteUpstreamKeyModel(props.settings, model.id);
-      setUpstreamKeyModels(current => current ? current.filter(row => row.id !== model.id) : current);
-      props.onMessage('已删除密钥模型。');
-    } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除密钥模型失败。');
-    } finally {
-      setBusy(null);
-    }
-  };
   const submitGroupCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!ensureLive()) return;
@@ -1146,7 +1041,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                 {props.items.map(item => {
               const health = healthStatus(
                 item.provider.runtime?.state ?? item.provider.health?.state,
-                item.provider.runtime?.available ?? item.provider.health?.available,
+                item.provider.routing_availability?.available ?? item.provider.runtime?.available ?? item.provider.health?.available,
               );
               return <TableRow key={item.provider.id} className="cursor-pointer border-b border-border/40 hover:bg-muted/30 transition-colors" onClick={() => setSelectedProviderId(item.provider.id)}>
                         <TableCell>
@@ -1159,7 +1054,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         </TableCell>
                         <TableCell>
                           <Box className="flex min-w-[9rem] items-center gap-2">
-                            <StatusBadge tone={health.tone}>{t(health.label)}</StatusBadge>
+                            <StatusBadge tone={health.tone}>{routingAvailabilityLabel(item.provider.routing_availability)}</StatusBadge>
                             <Box className="font-mono text-[0.6875rem] text-muted-foreground" component="span">
                               {item.provider.runtime?.in_flight ?? 0}/{item.provider.max_concurrency ?? '∞'} · {item.provider.runtime?.latency_ewma_ms == null ? '—' : formatMs(item.provider.runtime.latency_ewma_ms)}
                             </Box>
@@ -1203,7 +1098,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
               {props.items.map(item => {
                 const health = healthStatus(
                   item.provider.runtime?.state ?? item.provider.health?.state,
-                  item.provider.runtime?.available ?? item.provider.health?.available,
+                  item.provider.routing_availability?.available ?? item.provider.runtime?.available ?? item.provider.health?.available,
                 );
                 const lastError = item.provider.runtime?.last_error_type ?? item.provider.health?.last_error_type;
                 return <Box key={item.provider.id} className="flex min-w-0 items-stretch">
@@ -1217,7 +1112,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <Box className="flex min-w-0 flex-1 flex-col gap-2">
                     <Box className="flex min-w-0 items-center gap-2">
                       <Box className="min-w-0 flex-1 truncate text-sm font-medium text-foreground" component="strong">{item.provider.name}</Box>
-                      <StatusBadge tone={health.tone}>{t(health.label)}</StatusBadge>
+                      <StatusBadge tone={health.tone}>{routingAvailabilityLabel(item.provider.routing_availability)}</StatusBadge>
                       <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
                     </Box>
                     <Box className="truncate font-mono text-[0.7rem] text-muted-foreground" component="span">
@@ -1546,14 +1441,14 @@ export function ProvidersPage(props: ProvidersPageProps) {
         const item = itemSignal;
         const health = healthStatus(
           item.provider.runtime?.state ?? item.provider.health?.state,
-          item.provider.runtime?.available ?? item.provider.health?.available,
+          item.provider.routing_availability?.available ?? item.provider.runtime?.available ?? item.provider.health?.available,
         );
         return <Box className="flex flex-col gap-5">
                 <Box className="grid gap-4 md:grid-cols-4 border-b border-border/40 pb-5">
                   <Box className="flex flex-col gap-1.5 border-l border-border/40 pl-3 border-l-2 border-l-primary">
                       <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('状态')}</Box>
                       <Box className="mt-1.5">
-                        <StatusBadge tone={health.tone}>{health.label}</StatusBadge>
+                        <StatusBadge tone={health.tone}>{routingAvailabilityLabel(item.provider.routing_availability)}</StatusBadge>
                       </Box>
                   </Box>
                   <Box className="flex flex-col gap-1.5 border-l border-border/40 pl-3 border-l-2 border-l-primary/20">
@@ -1860,113 +1755,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </Box>
                 </Box>
 
-                <Box className="grid gap-4 mt-5" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
-                    <Box className="flex items-center gap-2.5">
-                      <ShieldCheck className="size-4 opacity-70" />
-                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('密钥模型限制')}</Box>
-                    </Box>
-                  </Box>
-
-                  {isLive() ? <Card className="border border-border bg-background shadow-none">
-                      <Box className="flex flex-row items-start justify-between gap-4 p-4 pb-4">
-                        <Box className="grid gap-1.5">
-                          <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("按密钥限制模型")}</Typography>
-                          <Typography className="mt-0.5 font-mono text-[0.6875rem] uppercase leading-4 tracking-wider text-muted-foreground" component="div">{t('未设置时允许所有模型；设置后只允许列表中的模型。')}</Typography>
-                        </Box>
-                        <Box className="flex flex-wrap items-center gap-2">
-                          <Select displayEmpty value={selectedUpstreamKeyId === null ? '' : String(selectedUpstreamKeyId)} onChange={event => {
-                    const raw = event.target.value.trim();
-                    const parsed = Number.parseInt(raw, 10);
-                    setSelectedUpstreamKeyId(Number.isFinite(parsed) ? parsed : null);
-                  }} disabled={item.keys.length === 0} className="w-[240px]">
-                            <MenuItem value="">{t('选择密钥…')}</MenuItem>
-                            {item.keys.map(key => <MenuItem key={key.id} value={String(key.id)}>{key.name} (#{key.id})</MenuItem>)}
-                          </Select>
-                          <Button type="button" size="sm" className="text-xs tracking-wider" onClick={() => {
-                    const keyId = selectedUpstreamKeyId;
-                    if (keyId === null) {
-                      props.onMessage('请先选择一个密钥。');
-                      return;
-                    }
-                    void syncKeyModels(keyId);
-                  }} disabled={selectedUpstreamKeyId === null || busy === `key-models-sync-${selectedUpstreamKeyId ?? 0}`}>
-                            <RefreshCw className="mr-2 size-3" />
-                            {t('SYNC')}
-                          </Button>
-                        </Box>
-                      </Box>
-                      <CardContent className="grid gap-4 border-t border-border/40 pt-4">
-                        {upstreamKeyModelsError ? (message => <Box className="border border-border/40 bg-background px-3 py-2.5 font-mono text-xs text-muted-foreground opacity-80">{message}</Box>)(upstreamKeyModelsError) : null}
-
-                        {item.keys.length > 0 ? <><Box className="flex flex-col gap-3 rounded border border-dashed border-border/60 bg-transparent p-4">
-                            <FormControl>
-                              <FormLabel>{t("添加模型（逗号或空格分隔）")}</FormLabel>
-                              <Box className="flex items-center gap-2">
-                                <InputBase value={upstreamKeyModelsDraft} placeholder={t("gpt-4.1, o4-mini …")} disabled={selectedUpstreamKeyId === null || busy === `key-models-add-${selectedUpstreamKeyId ?? 0}`} onChange={event => setUpstreamKeyModelsDraft(event.target.value)} className="font-mono text-[0.8125rem]" />
-                                <Button type="button" size="sm" className="font-mono text-[0.6875rem] uppercase tracking-widest px-3.5 whitespace-nowrap" onClick={() => {
-                          const keyId = selectedUpstreamKeyId;
-                          if (keyId === null) {
-                            props.onMessage('请先选择一个密钥。');
-                            return;
-                          }
-                          void addKeyModels(keyId);
-                        }} disabled={selectedUpstreamKeyId === null || busy === `key-models-add-${selectedUpstreamKeyId ?? 0}`}>
-                                  {t('添加模型')}
-                                </Button>
-                              </Box>
-                            </FormControl>
-                          </Box><TableContainer className="border-border/40 bg-muted/5">
-                            {(() => {
-                      const keyId = selectedUpstreamKeyId;
-                      if (keyId === null) {
-                        return <Box className="px-4 py-5 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                    {t('请选择一个密钥。')}
-                                  </Box>;
-                      }
-                      const models = upstreamKeyModels;
-                      if (models === null) {
-                        return <Box className="px-4 py-5 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                    {t('读取中…')}
-                                  </Box>;
-                      }
-                      if (models.length === 0) {
-                        return <Box className="px-4 py-5 text-center font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-60">
-                                    {t('当前未限制模型；同步或添加后将按列表限制。')}
-                                  </Box>;
-                      }
-                      return <Table>
-                                  <TableHead>
-                                    <TableRow className="border-b border-border/40 hover:bg-transparent bg-background">
-                                      <TableCell>{t("模型")}</TableCell>
-                                      <TableCell>{t("启用")}</TableCell>
-                                      <TableCell className="text-right">{t("操作")}</TableCell>
-                                    </TableRow>
-                                  </TableHead>
-                                  <TableBody>
-                                    {models.map(model => <TableRow key={model.id} className={`border-b border-border/40 hover:bg-muted/30 transition-colors ${model.enabled ? '' : 'opacity-50'}`}>
-                                          <TableCell className="font-mono text-[0.8125rem] max-w-[200px] truncate" title={model.model_name}>{model.model_name}</TableCell>
-                                          <TableCell>
-                                            <Checkbox checked={model.enabled} disabled={busy === `key-model-${model.id}`} onChange={event => void toggleKeyModelEnabled(model, event.currentTarget.checked)} />
-                                          </TableCell>
-                                          <TableCell className="text-right">
-                                            <Button type="button" size="sm" variant="ghost" className="font-mono text-[0.6875rem] uppercase tracking-widest hover:bg-transparent hover:text-destructive px-0 shrink-0" onClick={() => void removeKeyModel(model)} disabled={busy === `key-model-${model.id}`}>
-                                              {t('移除')}
-                                            </Button>
-                                          </TableCell>
-                                        </TableRow>)}
-                                  </TableBody>
-                                </Table>;
-                    })()}
-                          </TableContainer></> : <Box className="rounded border border-dashed border-border/60 bg-transparent px-3 py-4 text-[0.8125rem] text-muted-foreground opacity-70">
-                              {t('还没有上游密钥，请先创建。')}
-                            </Box>}
-                      </CardContent>
-                    </Card> : <Card className="border border-border bg-background shadow-none">
-                        <CardContent className="p-4 font-mono text-xs uppercase tracking-widest text-muted-foreground opacity-70">
-                          连接后台后可为每个上游密钥设置可用模型。
-                        </CardContent>
-                      </Card>}
+                <Box component="section" sx={{ display: 'grid', gap: 2, mt: 3 }}>
+                  <Typography component="h3">{t('密钥模型限制')}</Typography>
+                  <Select displayEmpty value={selectedUpstreamKeyId === null ? '' : String(selectedUpstreamKeyId)} onChange={event => setSelectedUpstreamKeyId(Number(event.target.value) || null)} sx={{ width: '100%', maxWidth: 320 }}>
+                    <MenuItem value="">{t('选择密钥…')}</MenuItem>
+                    {item.keys.map(key => <MenuItem key={key.id} value={String(key.id)}>{key.name}</MenuItem>)}
+                  </Select>
+                  {isLive() && selectedUpstreamKeyId !== null ? <UpstreamKeyModels key={selectedUpstreamKeyId} settings={props.settings} keyId={selectedUpstreamKeyId} onChanged={() => props.onRefresh()} /> : null}
                 </Box>
                 </>}
 

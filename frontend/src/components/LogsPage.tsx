@@ -79,6 +79,7 @@ const EMPTY_FILTERS: LogFilters = {
 };
 export const LOG_COLUMN_DEFINITIONS = [
   { id: 'time', label: '时间', defaultWidth: 160, minWidth: 112, maxWidth: 320 },
+  { id: 'service_tier', label: '服务档位', defaultWidth: 140, minWidth: 100, maxWidth: 280 },
   { id: 'model', label: '模型', defaultWidth: 180, minWidth: 120, maxWidth: 480 },
   { id: 'request_path', label: '请求路径 / 转换', defaultWidth: 240, minWidth: 160, maxWidth: 480 },
   { id: 'status', label: '状态', defaultWidth: 88, minWidth: 72, maxWidth: 180 },
@@ -106,6 +107,7 @@ const LEGACY_LOG_USAGE_COLUMN_IDS = new Set([
 export const DEFAULT_LOG_COLUMNS: LogColumnId[] = [
   'time',
   'model',
+  'service_tier',
   'request_path',
   'status',
   'duration',
@@ -685,6 +687,10 @@ export function LogsPage(props: LogsPageProps) {
                     <Box className="grid md:grid-cols-2">
                       <DetailItem label="时间" value={formatDateTime(row.time_ms)} onCopy={() => void copyField(String(row.time_ms), '时间')} />
                       <DetailItem label="模型" value={formatModelName(row.model)} onCopy={() => void copyField(formatModelName(row.model), '模型')} />
+                      <DetailItem label="服务档位" value={formatServiceTier(row.service_tier)} />
+                      <DetailItem label="客户端请求档位" value={row.requested_service_tier ?? '—'} />
+                      <DetailItem label="上游请求档位" value={row.upstream_service_tier ?? '—'} />
+                      <DetailItem label="上游返回档位" value={row.service_tier ?? t('未确认')} />
                       <DetailItem label="密钥" value={apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`} onCopy={() => void copyField(String(row.api_key_id), '密钥')} />
                       <DetailItem label="请求路径" value={formatRequestPath(row.api_format, row.upstream_api_format)} onCopy={() => void copyField(formatRequestPath(row.api_format, row.upstream_api_format), '请求路径')} />
                       <DetailItem label="客户端端点" value={formatRequestType(row.api_format)} onCopy={() => void copyField(formatRequestType(row.api_format), '客户端端点')} />
@@ -879,6 +885,8 @@ function LogColumnValue(props: {
   switch (id) {
     case 'time':
       return <Box className={`${mono} truncate whitespace-nowrap`} title={formatDateTime(row.time_ms)}>{formatDateTime(row.time_ms)}</Box>;
+    case 'service_tier':
+      return <Box className={mono}>{formatServiceTier(row.service_tier)}</Box>;
     case 'model':
       return <Box className={`${mono} max-w-[260px] break-all`} title={formatModelName(row.model)}>
         {isWsSession(row) ? t('WS 会话') : formatModelName(row.model)}
@@ -973,4 +981,11 @@ function DetailItem(props: {
           <Copy className="size-3" aria-hidden="true" />
         </Button> : null}
     </Box>;
+}
+
+export function formatServiceTier(value: string | null | undefined): string {
+  if (!value) return t('未确认');
+  if (value === 'fast' || value === 'priority') return 'Fast';
+  if (value === 'default') return 'Standard';
+  return value;
 }

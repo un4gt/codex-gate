@@ -725,6 +725,7 @@ pub fn chat_response_to_responses(
         "instructions": Value::Null,
         "max_output_tokens": Value::Null,
         "model": chat.get("model").cloned().unwrap_or(Value::Null),
+        "service_tier": chat.get("service_tier").cloned().unwrap_or(Value::Null),
         "output": output,
         "parallel_tool_calls": true,
         "previous_response_id": Value::Null,
@@ -988,6 +989,7 @@ pub struct ChatSseToResponses {
     tools: HashMap<usize, StreamToolCall>,
     tool_order: Vec<usize>,
     usage: Value,
+    service_tier: Option<String>,
     finish_reason: Option<String>,
     saw_done: bool,
     terminal: bool,
@@ -1013,6 +1015,7 @@ impl ChatSseToResponses {
             tools: HashMap::new(),
             tool_order: Vec::new(),
             usage: Value::Null,
+            service_tier: None,
             finish_reason: None,
             saw_done: false,
             terminal: false,
@@ -1088,6 +1091,9 @@ impl ChatSseToResponses {
     }
 
     fn process_chunk(&mut self, chunk: &Value) -> Vec<Bytes> {
+        if let Some(tier) = crate::response_events::service_tier(chunk) {
+            self.service_tier = Some(tier);
+        }
         let mut events = Vec::new();
         if !self.created {
             if let Some(id) = chunk.get("id").and_then(Value::as_str) {
@@ -1437,6 +1443,7 @@ impl ChatSseToResponses {
                     "output": self.output,
                     "model": self.model,
                     "usage": self.usage,
+                    "service_tier": self.service_tier,
                 },
             }),
         ));
@@ -1459,6 +1466,7 @@ impl ChatSseToResponses {
             "output": self.output,
             "parallel_tool_calls": true,
             "usage": self.usage,
+            "service_tier": self.service_tier,
             "metadata": {},
         })
     }

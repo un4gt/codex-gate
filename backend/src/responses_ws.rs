@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{Sink, SinkExt, StreamExt};
-use http_body_util::{BodyExt, Limited};
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::header::{
     ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
@@ -33,11 +33,16 @@ use crate::upstream_url;
 use crate::util;
 
 type UpstreamWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
+struct PendingTurnLog {
+    permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
+    event: TelemetryEvent,
+    pricing: PricingEvaluation,
+    succeeded: bool,
+}
 
 const UPSTREAM_RESPONSES_PATH: &str = "/responses";
 const RESPONSES_WS_BETA: &str = "responses_websockets=2026-02-06";
 const BETA_FEATURE_RESPONSES_HTTP_TO_WS: &str = "responses-http-to-ws";
-const CODEX_ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 struct WsContext {
@@ -48,6 +53,11 @@ struct WsContext {
     session_id: String,
     session_log_id: String,
     session_started_at_ms: i64,
+    disconnected_at: tokio::sync::watch::Sender<Option<Instant>>,
+    requested_service_tier: Option<String>,
+    upstream_service_tier: Option<String>,
+    observation: std::sync::Arc<parking_lot::Mutex<crate::response_events::Observation>>,
+    pending_turn_log: std::sync::Arc<parking_lot::Mutex<Option<PendingTurnLog>>>,
 }
 
 struct ActiveUpstream {
@@ -69,6 +79,7 @@ struct WsBridgeError {
     scope: proxy::FailureScope,
 }
 
+#[derive(Clone)]
 struct TurnOutcome {
     status: StatusCode,
     error_type: Option<String>,
@@ -204,6 +215,11 @@ pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpRespo
         session_id: util::new_ulid(),
         session_log_id: util::new_ulid(),
         session_started_at_ms: util::now_ms(),
+        disconnected_at: tokio::sync::watch::channel(None).0,
+        requested_service_tier: None,
+        upstream_service_tier: None,
+        observation: Default::default(),
+        pending_turn_log: Default::default(),
     };
     tokio::spawn(async move {
         serve_websocket(websocket, ctx).await;
@@ -268,7 +284,7 @@ fn record_handshake_metric(
 async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsContext) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let _inflight = ctx.state.metrics.inflight_guard();
-    let mut downstream = match websocket.await {
+    let downstream = match websocket.await {
         Ok(ws) => ws,
         Err(err) => {
             log::warn!("responses websocket upgrade failed: {err}");
@@ -276,12 +292,29 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
         }
     };
 
+    let (mut downstream, mut reader) = downstream.split();
+    let (sender, mut messages) = mpsc::channel(8);
+    let disconnected = ctx.disconnected_at.clone();
+    let reader_task = tokio::spawn(async move {
+        while let Some(message) = reader.next().await {
+            let closed = matches!(&message, Ok(Message::Close(_)) | Err(_));
+            if closed {
+                disconnected.send_replace(Some(Instant::now()));
+            }
+            if sender.send(message).await.is_err() || closed {
+                break;
+            }
+        }
+        if disconnected.borrow().is_none() {
+            disconnected.send_replace(Some(Instant::now()));
+        }
+    });
     record_session_open(&ctx);
     let mut active: Option<ActiveUpstream> = None;
     let mut close_status = StatusCode::OK;
     let mut close_error_type: Option<String> = None;
     let mut close_error_message: Option<String> = None;
-    while let Some(message) = downstream.next().await {
+    while let Some(message) = messages.recv().await {
         let message = match message {
             Ok(message) => message,
             Err(err) => {
@@ -310,6 +343,8 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     }
                 };
 
+                let mut ctx = ctx.clone();
+                ctx.requested_service_tier = crate::response_events::service_tier(&value);
                 let Some(event_type) = value.get("type").and_then(Value::as_str) else {
                     let _ = send_ws_error(
                         &mut downstream,
@@ -458,7 +493,32 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
 
                 let original_value = value;
                 let mut turn_complete = false;
+                let mut turn_ctx = ctx.clone();
+                turn_ctx.requested_service_tier =
+                    crate::response_events::service_tier(&original_value);
+                turn_ctx.pending_turn_log = Default::default();
                 while active.is_some() {
+                    if let Some(selected) = active.as_mut()
+                        && let Err(message) = refresh_active_upstream(&ctx, selected).await
+                    {
+                        turn_ctx.pending_turn_log.lock().take();
+                        record_ws_setup_failed_turn(
+                            &ctx,
+                            Some(&requested_model),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "upstream_target_changed",
+                            &message,
+                            turn_start,
+                        );
+                        let _ = send_ws_error(
+                            &mut downstream,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "upstream_target_changed",
+                            &message,
+                        )
+                        .await;
+                        break;
+                    }
                     let Some(selected) = active.as_ref() else {
                         break;
                     };
@@ -481,23 +541,49 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                             &ctx.request_override_context,
                         )
                     {
+                        let message =
+                            format!("failed to apply provider request body overrides: {error}");
+                        turn_ctx.pending_turn_log.lock().take();
+                        record_ws_setup_failed_turn(
+                            &ctx,
+                            Some(&requested_model),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "request_override_failed",
+                            &message,
+                            turn_start,
+                        );
                         let _ = send_ws_error(
                             &mut downstream,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "request_override_failed",
-                            &format!("failed to apply provider request body overrides: {error}"),
+                            &message,
                         )
                         .await;
                         break;
                     }
+                    if selected.resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+                        && routed_value.get("service_tier").and_then(Value::as_str) == Some("fast")
+                    {
+                        routed_value["service_tier"] = Value::String("priority".into());
+                    }
                     let payload = match serde_json::to_string(&routed_value) {
                         Ok(payload) => payload,
                         Err(err) => {
+                            let message = format!("failed to encode websocket payload: {err}");
+                            turn_ctx.pending_turn_log.lock().take();
+                            record_ws_setup_failed_turn(
+                                &ctx,
+                                Some(&requested_model),
+                                StatusCode::BAD_REQUEST,
+                                "invalid_payload",
+                                &message,
+                                turn_start,
+                            );
                             let _ = send_ws_error(
                                 &mut downstream,
                                 StatusCode::BAD_REQUEST,
                                 "invalid_payload",
-                                &format!("failed to encode websocket payload: {err}"),
+                                &message,
                             )
                             .await;
                             break;
@@ -507,9 +593,16 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     let Some(active_upstream) = active.as_mut() else {
                         break;
                     };
-                    let result =
-                        forward_response_create(&ctx, &mut downstream, active_upstream, payload)
-                            .await;
+                    turn_ctx.upstream_service_tier =
+                        crate::response_events::service_tier(&routed_value);
+                    turn_ctx.observation = Default::default();
+                    let result = forward_response_create(
+                        &turn_ctx,
+                        &mut downstream,
+                        active_upstream,
+                        payload,
+                    )
+                    .await;
                     match result {
                         ForwardResult::Complete => {
                             turn_complete = true;
@@ -517,6 +610,9 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                         }
                         ForwardResult::Fatal => break,
                         ForwardResult::RetryableBeforeEvent(err) => {
+                            if ctx.disconnected_at.borrow().is_some() {
+                                break;
+                            }
                             let failed_provider_id = active
                                 .as_ref()
                                 .map(|item| item.resolved.provider.id)
@@ -558,6 +654,34 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                         }
                     }
                 }
+                if let Some(mut pending) = turn_ctx.pending_turn_log.lock().take() {
+                    pending.event.duration_ms = Some(
+                        (turn_start.elapsed().as_millis() as i64)
+                            .saturating_sub(
+                                ctx.disconnected_at
+                                    .borrow()
+                                    .map_or(0, |at| at.elapsed().as_millis() as i64),
+                            )
+                            .max(0),
+                    );
+                    ctx.state.metrics.record_request(
+                        ApiFormat::Responses,
+                        RequestMetric {
+                            http_status: pending.event.http_status,
+                            error_type: if pending.succeeded {
+                                None
+                            } else {
+                                pending.event.error_type.as_deref()
+                            },
+                            duration_ms: pending.event.duration_ms,
+                            usage: pending.event.usage,
+                            pricing: pending.pricing,
+                        },
+                    );
+                    if let Some(permit) = pending.permit {
+                        let _ = permit.send(pending.event);
+                    }
+                }
                 if !turn_complete {
                     close_status = StatusCode::BAD_GATEWAY;
                     close_error_type = Some("websocket_turn_failed".to_string());
@@ -592,7 +716,78 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
             Message::Frame(_) => {}
         }
     }
+    reader_task.abort();
     record_session_close(&ctx, close_status, close_error_type, close_error_message);
+}
+
+async fn refresh_active_upstream(
+    ctx: &WsContext,
+    active: &mut ActiveUpstream,
+) -> Result<(), String> {
+    let snap = ctx
+        .state
+        .caches
+        .upstream
+        .get(&ctx.state.db, &ctx.state.config.master_key)
+        .await?;
+    let provider = snap
+        .providers
+        .iter()
+        .find(|provider| provider.id == active.resolved.provider.id)
+        .ok_or_else(|| "upstream removed; reconnect required".to_string())?;
+    let key = snap
+        .keys_by_provider
+        .get(&provider.id)
+        .and_then(|keys| keys.iter().find(|key| key.id == active.resolved.key.id))
+        .ok_or_else(|| "account removed; reconnect required".to_string())?;
+    let availability = crate::routing_availability::account(
+        &ctx.state,
+        &snap,
+        provider,
+        key,
+        Some(&active.resolved.upstream_model),
+        active._provider_capacity.is_some(),
+    );
+    if !availability.available {
+        return Err(format!(
+            "{}; reconnect required",
+            availability.reason.unwrap_or("account unavailable")
+        ));
+    }
+    if !provider.websocket_enabled || !snap.is_model_globally_enabled(&active.requested_model) {
+        return Err("websocket or requested model disabled; reconnect required".into());
+    }
+    // Re-resolve aliases and group authorization without reserving another concurrency slot.
+    if !proxy::ws_target_still_routed(
+        &snap,
+        &ctx.api_key,
+        &active.requested_model,
+        provider.id,
+        &active.resolved.upstream_model,
+    ) {
+        return Err("model route or provider authorization changed; reconnect required".into());
+    }
+    let endpoint = snap
+        .endpoints_by_provider
+        .get(&provider.id)
+        .and_then(|endpoints| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == active.resolved.endpoint.id && endpoint.enabled)
+        })
+        .ok_or_else(|| "endpoint disabled; reconnect required".to_string())?;
+    if endpoint.base_url != active.resolved.endpoint.base_url {
+        return Err("endpoint changed; reconnect required".into());
+    }
+    active.resolved.provider = provider.clone();
+    active.resolved.key = key.clone();
+    active.resolved.endpoint = endpoint.clone();
+    active.resolved.price = snap.find_price_for_request(
+        provider.id,
+        &active.requested_model,
+        &active.resolved.upstream_model,
+    );
+    Ok(())
 }
 
 async fn connect_selected_upstream(
@@ -1264,305 +1459,174 @@ where
     let t_stream_ms = Some(turn_start.elapsed().as_millis() as i64);
     let mut first_byte_ms = None;
     let mut first_token_ms = None;
-    let mut usage = Usage::default();
-    let mut usage_observed = false;
     let mut emitted_event = false;
-
-    loop {
-        let polled =
-            tokio::time::timeout(ctx.state.config.upstream_request_timeout, ws.next()).await;
-        let message = match polled {
-            Ok(Some(Ok(message))) => message,
-            Ok(Some(Err(err))) => {
-                let error_message = err.to_string();
-                let outcome = TurnOutcome::from_parts(
-                    StatusCode::BAD_GATEWAY,
-                    Some("upstream_websocket_read_error".to_string()),
-                    Some(error_message.clone()),
-                    t_stream_ms,
-                    first_byte_ms,
-                    first_token_ms,
-                    usage,
-                    usage_observed,
-                    turn_start,
-                );
-                record_turn(
-                    ctx,
-                    resolved,
-                    requested_model,
-                    TurnTransport::NativeWs,
-                    &outcome,
-                    telemetry_permit,
-                    Some(reservation),
-                );
-                if !emitted_event {
-                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                        status: outcome.status,
-                        error_type: "upstream_websocket_read_error",
-                        message: error_message,
-                        scope: proxy::FailureScope::Provider,
-                    });
-                }
-                let _ = send_ws_error(
-                    downstream,
-                    outcome.status,
-                    outcome.error_type.as_deref().unwrap_or("upstream_error"),
-                    &error_message,
-                )
-                .await;
-                return ForwardResult::Fatal;
-            }
-            Ok(None) => {
-                let error_message =
-                    "upstream websocket closed before response completed".to_string();
-                let outcome = TurnOutcome::from_parts(
-                    StatusCode::BAD_GATEWAY,
-                    Some("upstream_websocket_closed".to_string()),
-                    Some(error_message.clone()),
-                    t_stream_ms,
-                    first_byte_ms,
-                    first_token_ms,
-                    usage,
-                    usage_observed,
-                    turn_start,
-                );
-                record_turn(
-                    ctx,
-                    resolved,
-                    requested_model,
-                    TurnTransport::NativeWs,
-                    &outcome,
-                    telemetry_permit,
-                    Some(reservation),
-                );
-                if !emitted_event {
-                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                        status: outcome.status,
-                        error_type: "upstream_websocket_closed",
-                        message: error_message,
-                        scope: proxy::FailureScope::Provider,
-                    });
-                }
-                let _ = send_ws_error(
-                    downstream,
-                    outcome.status,
-                    "upstream_websocket_closed",
-                    &error_message,
-                )
-                .await;
-                return ForwardResult::Fatal;
-            }
-            Err(_) => {
-                let error_message = format!(
-                    "upstream websocket timeout after {:?}",
-                    ctx.state.config.upstream_request_timeout
-                );
-                let outcome = TurnOutcome::from_parts(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Some("upstream_timeout".to_string()),
-                    Some(error_message.clone()),
-                    t_stream_ms,
-                    first_byte_ms,
-                    first_token_ms,
-                    usage,
-                    usage_observed,
-                    turn_start,
-                );
-                record_turn(
-                    ctx,
-                    resolved,
-                    requested_model,
-                    TurnTransport::NativeWs,
-                    &outcome,
-                    telemetry_permit,
-                    Some(reservation),
-                );
-                if !emitted_event {
-                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                        status: outcome.status,
-                        error_type: "upstream_timeout",
-                        message: error_message,
-                        scope: proxy::FailureScope::Provider,
-                    });
-                }
-                let _ = send_ws_error(
-                    downstream,
-                    outcome.status,
-                    "upstream_timeout",
-                    &error_message,
-                )
-                .await;
-                return ForwardResult::Fatal;
-            }
-        };
-
-        match message {
-            Message::Text(text) => {
-                if first_byte_ms.is_none() {
-                    first_byte_ms = Some(turn_start.elapsed().as_millis() as i64);
-                }
-
-                let text_for_parse = text.to_string();
-                let event = serde_json::from_str::<Value>(&text_for_parse).ok();
-                if first_token_ms.is_none() && event.as_ref().is_some_and(is_responses_delta_event)
-                {
-                    first_token_ms = Some(turn_start.elapsed().as_millis() as i64);
-                }
-                if let Some(event) = event.as_ref()
-                    && let Some(parsed) = parse_response_event_usage(event)
-                {
-                    usage = parsed;
-                    usage_observed = true;
-                }
-
-                if let Some(event) = event.as_ref()
-                    && is_terminal_response_event(event)
-                {
-                    let (status, error_type, error_message) = terminal_status(event);
-                    if let Ok(bytes) = serde_json::to_vec(event) {
-                        observe_codex_account_error(&ctx.state, resolved, status, &bytes).await;
+    let (status, error_type, error_message) = loop {
+        match read_with_disconnect_grace(ctx, ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                first_byte_ms.get_or_insert_with(|| turn_start.elapsed().as_millis() as i64);
+                if let Ok(event) = serde_json::from_str::<Value>(&text) {
+                    ctx.observation.lock().observe(&event);
+                    if first_token_ms.is_none() && is_responses_delta_event(&event) {
+                        first_token_ms = Some(turn_start.elapsed().as_millis() as i64);
                     }
-                    let outcome = TurnOutcome::from_parts(
-                        status,
-                        error_type,
-                        error_message,
-                        t_stream_ms,
-                        first_byte_ms,
-                        first_token_ms,
-                        usage,
-                        usage_observed,
-                        turn_start,
-                    );
-                    let scope = proxy::classify_failure_scope(
-                        Some(status.as_u16() as i32),
-                        proxy::OutcomeOrigin::UpstreamEvent,
-                    );
-                    if scope == proxy::FailureScope::Quota {
-                        ctx.state.quota.observe_response(
-                            resolved.key.id,
-                            status.as_u16() as i32,
-                            &HeaderMap::new(),
-                            util::now_ms(),
-                            ctx.state.config.rate_limit_fallback_cooldown,
-                        );
-                    }
-                    if should_retry_terminal_before_event(event, emitted_event) {
-                        let message = outcome.error_message.clone().unwrap_or_else(|| {
-                            "upstream websocket returned a retryable terminal event".to_string()
-                        });
-                        record_turn(
-                            ctx,
+                    if is_terminal_response_event(&event) {
+                        let outcome = terminal_status(&event);
+                        observe_codex_account_error(
+                            &ctx.state,
                             resolved,
-                            requested_model,
-                            TurnTransport::NativeWs,
-                            &outcome,
-                            telemetry_permit,
-                            Some(reservation),
-                        );
-                        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                            status,
-                            error_type: "upstream_websocket_terminal_error",
-                            message,
-                            scope,
-                        });
+                            outcome.0,
+                            text.as_bytes(),
+                        )
+                        .await;
+                        if !should_retry_terminal_before_event(&event, emitted_event) {
+                            send_turn_event(ctx, downstream, Message::Text(text)).await;
+                            emitted_event = true;
+                        }
+                        break outcome;
                     }
-                    if downstream.send(Message::Text(text)).await.is_err() {
-                        return ForwardResult::Fatal;
-                    }
-                    record_turn(
-                        ctx,
-                        resolved,
-                        requested_model,
-                        TurnTransport::NativeWs,
-                        &outcome,
-                        telemetry_permit,
-                        Some(reservation),
-                    );
-                    return ForwardResult::Complete;
                 }
-                if downstream.send(Message::Text(text)).await.is_err() {
-                    return ForwardResult::Fatal;
-                }
+                send_turn_event(ctx, downstream, Message::Text(text)).await;
                 emitted_event = true;
             }
-            Message::Binary(bytes) => {
-                if first_byte_ms.is_none() {
-                    first_byte_ms = Some(turn_start.elapsed().as_millis() as i64);
-                }
-                if downstream.send(Message::Binary(bytes)).await.is_err() {
-                    return ForwardResult::Fatal;
-                }
-                emitted_event = true;
-            }
-            Message::Ping(payload) => {
-                if ws.send(Message::Pong(payload)).await.is_err() {
-                    let message = "failed to send websocket pong upstream".to_string();
-                    let outcome = TurnOutcome::provider_error(
+            Ok(Some(Ok(Message::Ping(payload)))) => {
+                if let Err(error) = ws.send(Message::Pong(payload)).await {
+                    break (
                         StatusCode::BAD_GATEWAY,
-                        "upstream_websocket_write_error",
-                        message.clone(),
-                        turn_start,
+                        Some("upstream_websocket_write_error".into()),
+                        Some(error.to_string()),
                     );
-                    record_turn(
-                        ctx,
-                        resolved,
-                        requested_model,
-                        TurnTransport::NativeWs,
-                        &outcome,
-                        telemetry_permit,
-                        Some(reservation),
-                    );
-                    if !emitted_event {
-                        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                            status: StatusCode::BAD_GATEWAY,
-                            error_type: "upstream_websocket_write_error",
-                            message,
-                            scope: proxy::FailureScope::Provider,
-                        });
-                    }
-                    return ForwardResult::Fatal;
                 }
             }
-            Message::Pong(_) => {}
-            Message::Close(frame) => {
-                let error_message =
-                    "upstream websocket closed before terminal response event".to_string();
-                let outcome = TurnOutcome::from_parts(
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                send_turn_event(ctx, downstream, Message::Binary(bytes)).await;
+                emitted_event = true;
+            }
+            Ok(Some(Ok(Message::Pong(_) | Message::Frame(_)))) => {}
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                break (
                     StatusCode::BAD_GATEWAY,
-                    Some("upstream_websocket_closed".to_string()),
-                    Some(error_message),
-                    t_stream_ms,
-                    first_byte_ms,
-                    first_token_ms,
-                    usage,
-                    usage_observed,
-                    turn_start,
+                    Some("upstream_websocket_closed".into()),
+                    Some("upstream closed before terminal response event".into()),
                 );
-                record_turn(
-                    ctx,
-                    resolved,
-                    requested_model,
-                    TurnTransport::NativeWs,
-                    &outcome,
-                    telemetry_permit,
-                    Some(reservation),
-                );
-                if !emitted_event {
-                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                        status: outcome.status,
-                        error_type: "upstream_websocket_closed",
-                        message: outcome
-                            .error_message
-                            .clone()
-                            .unwrap_or_else(|| "upstream websocket closed".to_string()),
-                        scope: proxy::FailureScope::Provider,
-                    });
-                }
-                let _ = downstream.send(Message::Close(frame)).await;
-                return ForwardResult::Fatal;
             }
-            Message::Frame(_) => {}
+            Ok(Some(Err(error))) => {
+                break (
+                    StatusCode::BAD_GATEWAY,
+                    Some("upstream_websocket_read_error".into()),
+                    Some(error.to_string()),
+                );
+            }
+            Err(()) => {
+                break (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Some("upstream_timeout".into()),
+                    Some("upstream read deadline exceeded".into()),
+                );
+            }
         }
+    };
+    let outcome = TurnOutcome::from_parts(
+        status,
+        error_type,
+        error_message,
+        t_stream_ms,
+        first_byte_ms,
+        first_token_ms,
+        Usage::default(),
+        false,
+        turn_start,
+    );
+    finish_forwarded_turn(
+        ctx,
+        resolved,
+        requested_model,
+        TurnTransport::NativeWs,
+        outcome,
+        emitted_event,
+        telemetry_permit,
+        reservation,
+    )
+}
+
+async fn read_with_disconnect_grace<T>(
+    ctx: &WsContext,
+    read: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    let mut disconnected = ctx.disconnected_at.subscribe();
+    let read_deadline = tokio::time::Instant::now() + ctx.state.config.upstream_request_timeout;
+    tokio::pin!(read);
+    loop {
+        let disconnected_at = *disconnected.borrow();
+        let deadline = disconnected_at
+            .map(|at| tokio::time::Instant::from_std(at) + crate::response_events::DISCONNECT_GRACE)
+            .map_or(read_deadline, |deadline| deadline.min(read_deadline));
+        tokio::select! {
+            result = tokio::time::timeout_at(deadline, &mut read) => return result.map_err(|_| ()),
+            _ = disconnected.changed(), if disconnected_at.is_none() => {}
+        }
+    }
+}
+
+async fn send_turn_event<D, E>(ctx: &WsContext, downstream: &mut D, message: Message)
+where
+    D: Sink<Message, Error = E> + Unpin,
+    E: Display,
+{
+    if ctx.disconnected_at.borrow().is_none() && downstream.send(message).await.is_err() {
+        ctx.disconnected_at.send_replace(Some(Instant::now()));
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "settles a single forwarded turn with its owned reservation"
+)]
+fn finish_forwarded_turn(
+    ctx: &WsContext,
+    resolved: &ResolvedUpstream,
+    requested_model: &str,
+    transport: TurnTransport,
+    outcome: TurnOutcome,
+    emitted_event: bool,
+    telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
+    reservation: proxy::UpstreamAttemptReservation,
+) -> ForwardResult {
+    let disconnected = ctx.disconnected_at.borrow().is_some();
+    let scope = proxy::classify_failure_scope(Some(outcome.status.as_u16() as i32), outcome.origin);
+    if scope == proxy::FailureScope::Quota && !disconnected {
+        ctx.state.quota.observe_response(
+            resolved.key.id,
+            outcome.status.as_u16() as i32,
+            &HeaderMap::new(),
+            util::now_ms(),
+            ctx.state.config.rate_limit_fallback_cooldown,
+        );
+    }
+    record_turn(
+        ctx,
+        resolved,
+        requested_model,
+        transport,
+        &outcome,
+        telemetry_permit,
+        Some(reservation),
+    );
+    if disconnected {
+        return ForwardResult::Fatal;
+    }
+    if !emitted_event && scope.is_retryable() {
+        ForwardResult::RetryableBeforeEvent(WsBridgeError {
+            status: outcome.status,
+            error_type: "upstream_response_failed",
+            message: outcome
+                .error_message
+                .unwrap_or_else(|| "upstream response failed".into()),
+            scope,
+        })
+    } else if scope == proxy::FailureScope::Success {
+        ForwardResult::Complete
+    } else {
+        ForwardResult::Fatal
     }
 }
 
@@ -1901,47 +1965,6 @@ where
         util::now_ms(),
         ctx.state.config.rate_limit_fallback_cooldown,
     );
-    if proxy::should_retry_response_status(status_i32) {
-        if is_codex_oauth
-            && matches!(
-                status,
-                StatusCode::FORBIDDEN
-                    | StatusCode::PAYMENT_REQUIRED
-                    | StatusCode::TOO_MANY_REQUESTS
-            )
-            && let Ok(collected) =
-                Limited::new(upstream_resp.into_body(), CODEX_ERROR_BODY_MAX_BYTES)
-                    .collect()
-                    .await
-        {
-            observe_codex_account_error(&ctx.state, resolved, status, &collected.to_bytes()).await;
-        }
-        let message = format!("retryable upstream HTTP bridge status {status_i32}");
-        let outcome = TurnOutcome::upstream_response_error(
-            status,
-            "upstream_retry_status",
-            message.clone(),
-            turn_start,
-        );
-        record_turn(
-            ctx,
-            resolved,
-            requested_model,
-            TurnTransport::HttpBridge,
-            &outcome,
-            telemetry_permit,
-            Some(reservation),
-        );
-        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-            status,
-            error_type: "upstream_retry_status",
-            message,
-            scope: proxy::classify_failure_scope(
-                Some(status_i32),
-                proxy::OutcomeOrigin::UpstreamResponse,
-            ),
-        });
-    }
     let (parts, mut body) = upstream_resp.into_parts();
     let is_sse = parts
         .headers
@@ -1952,292 +1975,95 @@ where
 
     let mut first_byte_ms = None;
     let mut first_token_ms = None;
-    let mut usage = Usage::default();
-    let mut usage_observed = false;
-    let mut terminal: Option<(StatusCode, Option<String>, Option<String>)> = None;
-    let mut sse = SseToWsParser::new();
+    let mut terminal = None;
+    let mut sse = SseToWsParser::default();
     let mut capture = BytesMut::new();
     let mut emitted_event = false;
-
     loop {
-        let polled =
-            tokio::time::timeout(ctx.state.config.upstream_request_timeout, body.frame()).await;
-        let frame = match polled {
-            Ok(Some(Ok(frame))) => frame,
-            Ok(Some(Err(err))) => {
-                let message = err.to_string();
-                let outcome = TurnOutcome::from_parts(
+        let frame = match read_with_disconnect_grace(ctx, body.frame()).await {
+            Ok(Some(Ok(frame))) => Some(frame),
+            Ok(None) => None,
+            Ok(Some(Err(error))) => {
+                terminal = Some((
                     StatusCode::BAD_GATEWAY,
-                    Some("upstream_body_error".to_string()),
-                    Some(message.clone()),
-                    t_stream_ms,
-                    first_byte_ms,
-                    first_token_ms,
-                    usage,
-                    usage_observed,
-                    turn_start,
-                );
-                record_turn(
-                    ctx,
-                    resolved,
-                    requested_model,
-                    TurnTransport::HttpBridge,
-                    &outcome,
-                    telemetry_permit,
-                    Some(reservation),
-                );
-                if emitted_event {
-                    let _ =
-                        send_ws_error(downstream, outcome.status, "upstream_body_error", &message)
-                            .await;
-                    return ForwardResult::Fatal;
-                }
-                return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                    status: outcome.status,
-                    error_type: "upstream_body_error",
-                    message,
-                    scope: proxy::FailureScope::Provider,
-                });
+                    Some("upstream_body_error".into()),
+                    Some(error.to_string()),
+                ));
+                None
             }
-            Ok(None) => break,
-            Err(_) => {
-                let message = format!(
-                    "upstream HTTP bridge timeout after {:?}",
-                    ctx.state.config.upstream_request_timeout
-                );
-                let outcome = TurnOutcome::from_parts(
+            Err(()) => {
+                terminal = Some((
                     StatusCode::GATEWAY_TIMEOUT,
-                    Some("upstream_timeout".to_string()),
-                    Some(message.clone()),
-                    t_stream_ms,
-                    first_byte_ms,
-                    first_token_ms,
-                    usage,
-                    usage_observed,
-                    turn_start,
-                );
-                record_turn(
-                    ctx,
-                    resolved,
-                    requested_model,
-                    TurnTransport::HttpBridge,
-                    &outcome,
-                    telemetry_permit,
-                    Some(reservation),
-                );
-                if emitted_event {
-                    let _ = send_ws_error(downstream, outcome.status, "upstream_timeout", &message)
-                        .await;
-                    return ForwardResult::Fatal;
-                }
-                return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                    status: outcome.status,
-                    error_type: "upstream_timeout",
-                    message,
-                    scope: proxy::FailureScope::Provider,
-                });
+                    Some("upstream_timeout".into()),
+                    Some("upstream read deadline exceeded".into()),
+                ));
+                None
             }
         };
-
-        let Some(data) = frame.data_ref() else {
-            continue;
-        };
-        if first_byte_ms.is_none() {
-            first_byte_ms = Some(turn_start.elapsed().as_millis() as i64);
-        }
-
-        if is_sse {
-            let events = sse.push_bytes(data);
-            for event in events {
-                if !emitted_event && is_terminal_response_event(&event) {
-                    let (event_status, _event_error_type, event_error_message) =
-                        terminal_status(&event);
-                    let scope = proxy::classify_failure_scope(
-                        Some(event_status.as_u16() as i32),
-                        proxy::OutcomeOrigin::UpstreamEvent,
-                    );
-                    if should_retry_terminal_before_event(&event, emitted_event) {
-                        let message = event_error_message
-                            .unwrap_or_else(|| "upstream SSE returned an error event".to_string());
-                        let outcome = TurnOutcome::from_parts(
-                            event_status,
-                            Some("upstream_sse_error_event".to_string()),
-                            Some(message.clone()),
-                            t_stream_ms,
-                            first_byte_ms,
-                            first_token_ms,
-                            usage,
-                            usage_observed,
-                            turn_start,
-                        );
-                        record_turn(
-                            ctx,
-                            resolved,
-                            requested_model,
-                            TurnTransport::HttpBridge,
-                            &outcome,
-                            telemetry_permit,
-                            Some(reservation),
-                        );
-                        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                            status: outcome.status,
-                            error_type: "upstream_sse_error_event",
-                            message,
-                            scope,
-                        });
-                    }
-                }
-                if first_token_ms.is_none() && is_responses_delta_event(&event) {
-                    first_token_ms = Some(turn_start.elapsed().as_millis() as i64);
-                }
-                if let Some(parsed) = parse_response_event_usage(&event) {
-                    usage = parsed;
-                    usage_observed = true;
-                }
-                if downstream
-                    .send(Message::Text(event.to_string().into()))
-                    .await
-                    .is_err()
+        let eof = frame.is_none();
+        let events = if let Some(data) = frame.as_ref().and_then(|frame| frame.data_ref()) {
+            first_byte_ms.get_or_insert_with(|| turn_start.elapsed().as_millis() as i64);
+            if is_sse {
+                sse.push_bytes(data)
+            } else {
+                if capture.len().saturating_add(data.len())
+                    > crate::response_events::MAX_EVENT_BYTES
                 {
-                    return ForwardResult::Fatal;
+                    terminal = Some((
+                        StatusCode::BAD_GATEWAY,
+                        Some("response_too_large".into()),
+                        Some("HTTP bridge JSON exceeds 4 MiB parsing limit".into()),
+                    ));
+                    break;
                 }
-                emitted_event = true;
-                if is_terminal_response_event(&event) {
-                    terminal = Some(terminal_status(&event));
-                }
+                capture.extend_from_slice(data);
+                Vec::new()
+            }
+        } else if eof {
+            if is_sse {
+                sse.finish()
+            } else if !capture.is_empty() {
+                vec![json_response_to_ws_event(status, &capture)]
+            } else {
+                Vec::new()
             }
         } else {
-            capture.extend_from_slice(data);
-        }
-    }
-
-    if is_sse {
-        for event in sse.finish() {
-            if !emitted_event && is_terminal_response_event(&event) {
-                let (event_status, _event_error_type, event_error_message) =
-                    terminal_status(&event);
-                let scope = proxy::classify_failure_scope(
-                    Some(event_status.as_u16() as i32),
-                    proxy::OutcomeOrigin::UpstreamEvent,
-                );
-                if should_retry_terminal_before_event(&event, emitted_event) {
-                    let message = event_error_message
-                        .unwrap_or_else(|| "upstream SSE returned an error event".to_string());
-                    let outcome = TurnOutcome::from_parts(
-                        event_status,
-                        Some("upstream_sse_error_event".to_string()),
-                        Some(message.clone()),
-                        t_stream_ms,
-                        first_byte_ms,
-                        first_token_ms,
-                        usage,
-                        usage_observed,
-                        turn_start,
-                    );
-                    record_turn(
-                        ctx,
-                        resolved,
-                        requested_model,
-                        TurnTransport::HttpBridge,
-                        &outcome,
-                        telemetry_permit,
-                        Some(reservation),
-                    );
-                    return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-                        status: outcome.status,
-                        error_type: "upstream_sse_error_event",
-                        message,
-                        scope,
-                    });
-                }
-            }
-            if downstream
-                .send(Message::Text(event.to_string().into()))
-                .await
-                .is_err()
-            {
-                return ForwardResult::Fatal;
-            }
-            emitted_event = true;
-            if is_terminal_response_event(&event) {
-                terminal = Some(terminal_status(&event));
-            }
-        }
-    } else if !capture.is_empty() {
-        let event = json_response_to_ws_event(status, &capture);
-        if let Some(parsed) = event
-            .get("response")
-            .and_then(|response| response.get("usage"))
-            .and_then(proxy::parse_responses_usage)
-        {
-            usage = parsed;
-            usage_observed = true;
-        }
-        if downstream
-            .send(Message::Text(event.to_string().into()))
-            .await
-            .is_err()
-        {
-            return ForwardResult::Fatal;
-        }
-        emitted_event = true;
-        terminal = Some(terminal_status(&event));
-    }
-
-    if terminal.is_none() {
-        let message = if is_sse {
-            "upstream SSE ended before a terminal response event".to_string()
-        } else {
-            "upstream HTTP bridge returned an empty response".to_string()
+            Vec::new()
         };
-        let outcome = TurnOutcome::from_parts(
-            StatusCode::BAD_GATEWAY,
-            Some("upstream_incomplete_response".to_string()),
-            Some(message.clone()),
-            t_stream_ms,
-            first_byte_ms,
-            first_token_ms,
-            usage,
-            usage_observed,
-            turn_start,
-        );
-        record_turn(
-            ctx,
-            resolved,
-            requested_model,
-            TurnTransport::HttpBridge,
-            &outcome,
-            telemetry_permit,
-            Some(reservation),
-        );
-        if emitted_event {
-            let _ = send_ws_error(
-                downstream,
-                outcome.status,
-                "upstream_incomplete_response",
-                &message,
-            )
-            .await;
-            return ForwardResult::Fatal;
+        for event in events {
+            ctx.observation.lock().observe(&event);
+            if first_token_ms.is_none() && is_responses_delta_event(&event) {
+                first_token_ms = Some(turn_start.elapsed().as_millis() as i64);
+            }
+            let terminal_event = is_terminal_response_event(&event);
+            if terminal_event {
+                terminal = Some(terminal_status(&event));
+                observe_codex_account_error(
+                    &ctx.state,
+                    resolved,
+                    terminal.as_ref().map(|value| value.0).unwrap_or(status),
+                    event.to_string().as_bytes(),
+                )
+                .await;
+            }
+            if !should_retry_terminal_before_event(&event, emitted_event) {
+                send_turn_event(ctx, downstream, Message::Text(event.to_string().into())).await;
+                emitted_event = true;
+            }
         }
-        return ForwardResult::RetryableBeforeEvent(WsBridgeError {
-            status: outcome.status,
-            error_type: "upstream_incomplete_response",
-            message,
-            scope: proxy::FailureScope::Provider,
-        });
+        if eof || terminal.is_some() {
+            break;
+        }
     }
-
     let (final_status, error_type, error_message) = terminal.unwrap_or_else(|| {
-        if status.is_success() {
-            (StatusCode::OK, None, None)
-        } else {
-            (
-                status,
-                Some("upstream_http_error".to_string()),
-                Some(format!("upstream HTTP bridge returned status {status_i32}")),
-            )
-        }
+        (
+            StatusCode::BAD_GATEWAY,
+            Some("upstream_incomplete_response".into()),
+            Some(
+                sse.error
+                    .unwrap_or_else(|| "upstream ended without terminal response event".into()),
+            ),
+        )
     });
     let outcome = TurnOutcome::from_parts(
         final_status,
@@ -2246,28 +2072,20 @@ where
         t_stream_ms,
         first_byte_ms,
         first_token_ms,
-        usage,
-        usage_observed,
+        Usage::default(),
+        false,
         turn_start,
     );
-    record_turn(
+    finish_forwarded_turn(
         ctx,
         resolved,
         requested_model,
         TurnTransport::HttpBridge,
-        &outcome,
+        outcome,
+        emitted_event,
         telemetry_permit,
-        Some(reservation),
-    );
-    if proxy::classify_failure_scope(
-        Some(final_status.as_u16() as i32),
-        proxy::OutcomeOrigin::UpstreamEvent,
-    ) == proxy::FailureScope::Success
-    {
-        ForwardResult::Complete
-    } else {
-        ForwardResult::Fatal
-    }
+        reservation,
+    )
 }
 
 async fn observe_codex_account_error(
@@ -2383,6 +2201,25 @@ fn record_turn(
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
     reservation: Option<proxy::UpstreamAttemptReservation>,
 ) {
+    let mut outcome = outcome.clone();
+    let observation = ctx.observation.lock();
+    if let Some(usage) = observation.usage {
+        outcome.usage = usage;
+        outcome.usage_observed = true;
+    }
+    let service_tier = observation.service_tier.clone();
+    drop(observation);
+    let disconnected = *ctx.disconnected_at.borrow();
+    if let Some(at) = disconnected {
+        outcome.duration_ms = outcome
+            .duration_ms
+            .saturating_sub(at.elapsed().as_millis() as i64)
+            .max(0);
+        outcome.error_type = Some("client_disconnected".into());
+        outcome.error_message =
+            Some("client disconnected; upstream metering collection finished".into());
+        outcome.origin = proxy::OutcomeOrigin::Gateway;
+    }
     let pricing = evaluate_price(
         &outcome.usage,
         outcome.usage_observed,
@@ -2400,16 +2237,20 @@ fn record_turn(
     let scope = proxy::classify_failure_scope(Some(status_i32), outcome.origin);
     let attempted_upstream = reservation.is_some();
     if let Some(reservation) = reservation {
-        reservation.finish(
-            proxy::AttemptOutcome {
-                status: Some(status_i32),
-                origin: outcome.origin,
-                error_type,
-                error_message,
-                observed_latency_ms,
-            },
-            &ctx.state.metrics,
-        );
+        if disconnected.is_some() {
+            reservation.neutral();
+        } else {
+            reservation.finish(
+                proxy::AttemptOutcome {
+                    status: Some(status_i32),
+                    origin: outcome.origin,
+                    error_type,
+                    error_message,
+                    observed_latency_ms,
+                },
+                &ctx.state.metrics,
+            );
+        }
     }
     if attempted_upstream && scope == proxy::FailureScope::Success {
         if let Some(identity) = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id)
@@ -2454,25 +2295,7 @@ fn record_turn(
             ),
         );
     }
-    ctx.state.metrics.record_request(
-        ApiFormat::Responses,
-        RequestMetric {
-            http_status: Some(status_i32),
-            error_type: if scope == proxy::FailureScope::Success {
-                None
-            } else {
-                error_type
-            },
-            duration_ms: Some(outcome.duration_ms),
-            usage: outcome.usage,
-            pricing,
-        },
-    );
-
-    let Some(permit) = telemetry_permit.take() else {
-        return;
-    };
-    let _ = permit.send(TelemetryEvent {
+    let event = TelemetryEvent {
         id: None,
         api_key_id: ctx.api_key.id,
         log_enabled: ctx.api_key.log_enabled,
@@ -2498,7 +2321,16 @@ fn record_turn(
         transport: transport.as_log_value(),
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_service_tier: ctx.requested_service_tier.clone(),
+        upstream_service_tier: ctx.upstream_service_tier.clone(),
+        service_tier,
         routing_trace: None,
+    };
+    *ctx.pending_turn_log.lock() = Some(PendingTurnLog {
+        permit: telemetry_permit.take(),
+        event,
+        pricing,
+        succeeded: scope == proxy::FailureScope::Success,
     });
 }
 
@@ -2561,6 +2393,9 @@ fn record_ws_setup_failed_turn(
         transport: TurnTransport::WsSetup.as_log_value(),
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_service_tier: ctx.requested_service_tier.clone(),
+        upstream_service_tier: None,
+        service_tier: None,
         routing_trace: None,
     });
 }
@@ -2596,6 +2431,9 @@ fn record_session_open(ctx: &WsContext) {
         transport: "ws",
         parent_id: None,
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_service_tier: None,
+        upstream_service_tier: None,
+        service_tier: None,
         routing_trace: None,
     });
 }
@@ -2609,6 +2447,19 @@ fn record_session_close(
     let Ok(permit) = ctx.state.telemetry.try_reserve_permit() else {
         ctx.state.metrics.record_telemetry_dropped();
         return;
+    };
+    let disconnected = *ctx.disconnected_at.borrow();
+    let duration_ms = util::now_ms()
+        .saturating_sub(ctx.session_started_at_ms)
+        .saturating_sub(disconnected.map_or(0, |at| at.elapsed().as_millis() as i64))
+        .max(0);
+    let (error_type, error_message) = if disconnected.is_some() {
+        (
+            Some("client_disconnected".into()),
+            Some("client disconnected".into()),
+        )
+    } else {
+        (error_type, error_message)
     };
     let _ = permit.send(TelemetryEvent {
         id: None,
@@ -2626,7 +2477,7 @@ fn record_session_close(
         t_stream_ms: None,
         t_first_byte_ms: None,
         t_first_token_ms: None,
-        duration_ms: Some(util::now_ms().saturating_sub(ctx.session_started_at_ms)),
+        duration_ms: Some(duration_ms),
         usage: Usage::default(),
         usage_observed: false,
         price_version_id: None,
@@ -2636,6 +2487,9 @@ fn record_session_close(
         transport: "ws",
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_service_tier: None,
+        upstream_service_tier: None,
+        service_tier: None,
         routing_trace: None,
     });
 }
@@ -2648,28 +2502,13 @@ fn is_responses_delta_event(value: &Value) -> bool {
         && proxy::responses_has_delta(value)
 }
 
-fn parse_response_event_usage(value: &Value) -> Option<Usage> {
-    value
-        .get("response")
-        .and_then(|response| response.get("usage"))
-        .and_then(proxy::parse_responses_usage)
-}
-
-fn is_terminal_response_event(value: &Value) -> bool {
-    matches!(
-        value.get("type").and_then(Value::as_str),
-        Some(
-            "response.completed"
-                | "response.failed"
-                | "response.incomplete"
-                | "response.cancelled"
-                | "error"
-        )
-    )
-}
+use crate::response_events::{is_terminal_response_event, terminal_status};
 
 fn should_retry_terminal_before_event(value: &Value, emitted_event: bool) -> bool {
-    if emitted_event || !is_terminal_response_event(value) {
+    if emitted_event
+        || crate::response_events::event_usage(value).is_some()
+        || !is_terminal_response_event(value)
+    {
         return false;
     }
     let (status, _, _) = terminal_status(value);
@@ -2680,225 +2519,7 @@ fn should_retry_terminal_before_event(value: &Value, emitted_event: bool) -> boo
     .is_retryable()
 }
 
-fn terminal_status(value: &Value) -> (StatusCode, Option<String>, Option<String>) {
-    match value.get("type").and_then(Value::as_str) {
-        Some("response.completed") => return (StatusCode::OK, None, None),
-        Some("response.failed") => {
-            return response_failure_status(value, "response_failed", "response failed");
-        }
-        Some("response.incomplete") => {
-            return response_incomplete_status(value);
-        }
-        Some("response.cancelled") => {
-            return response_cancelled_status(value);
-        }
-        _ => {}
-    }
-
-    let error = value.get("error");
-    let status = status_from_value(Some(value))
-        .or_else(|| status_from_value(error))
-        .unwrap_or(StatusCode::BAD_GATEWAY);
-    let code = error
-        .and_then(|error| error.get("code").or_else(|| error.get("type")))
-        .and_then(Value::as_str)
-        .unwrap_or("upstream_error")
-        .to_string();
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("upstream websocket returned an error")
-        .to_string();
-    (status, Some(code), Some(message))
-}
-
-fn response_failure_status(
-    value: &Value,
-    fallback_code: &'static str,
-    fallback_message: &'static str,
-) -> (StatusCode, Option<String>, Option<String>) {
-    let response = value.get("response");
-    let error = response
-        .and_then(|response| response.get("error"))
-        .or_else(|| value.get("error"));
-    let status = status_from_value(response)
-        .or_else(|| status_from_value(error))
-        .or_else(|| status_from_value(Some(value)))
-        .unwrap_or(StatusCode::BAD_GATEWAY);
-    let (code, message) = error_fields(error, fallback_code, fallback_message);
-    (status, Some(code), Some(message))
-}
-
-fn response_incomplete_status(value: &Value) -> (StatusCode, Option<String>, Option<String>) {
-    let response = value.get("response");
-    if response
-        .and_then(|response| response.get("error"))
-        .or_else(|| value.get("error"))
-        .is_some()
-    {
-        return response_failure_status(value, "response_incomplete", "response incomplete");
-    }
-
-    let details = response.and_then(|response| response.get("incomplete_details"));
-    let reason = details
-        .and_then(|details| details.get("reason"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            response
-                .and_then(|response| response.get("status"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or("response incomplete");
-    let status = status_from_value(response)
-        .or_else(|| status_from_value(Some(value)))
-        .unwrap_or(StatusCode::OK);
-    (
-        status,
-        Some("response_incomplete".to_string()),
-        Some(reason.to_string()),
-    )
-}
-
-fn response_cancelled_status(value: &Value) -> (StatusCode, Option<String>, Option<String>) {
-    let response = value.get("response");
-    if response
-        .and_then(|response| response.get("error"))
-        .or_else(|| value.get("error"))
-        .is_some()
-    {
-        return response_failure_status(value, "response_cancelled", "response cancelled");
-    }
-
-    let status = status_from_value(response)
-        .or_else(|| status_from_value(Some(value)))
-        .unwrap_or(StatusCode::OK);
-    (
-        status,
-        Some("response_cancelled".to_string()),
-        Some("response cancelled".to_string()),
-    )
-}
-
-fn status_from_value(value: Option<&Value>) -> Option<StatusCode> {
-    let value = value?;
-    let status = value.get("status").or_else(|| value.get("status_code"))?;
-    let status = status.as_u64().or_else(|| {
-        status
-            .as_str()
-            .and_then(|status| status.parse::<u64>().ok())
-    })?;
-    StatusCode::from_u16(status as u16).ok()
-}
-
-fn error_fields(
-    error: Option<&Value>,
-    fallback_code: &'static str,
-    fallback_message: &'static str,
-) -> (String, String) {
-    let code = error
-        .and_then(|error| error.get("code").or_else(|| error.get("type")))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(fallback_code)
-        .to_string();
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(fallback_message)
-        .to_string();
-    (code, message)
-}
-
-struct SseToWsParser {
-    buf: BytesMut,
-    event_type: Option<String>,
-    data_lines: Vec<String>,
-}
-
-impl SseToWsParser {
-    fn new() -> Self {
-        Self {
-            buf: BytesMut::with_capacity(8 * 1024),
-            event_type: None,
-            data_lines: Vec::new(),
-        }
-    }
-
-    fn push_bytes(&mut self, data: &Bytes) -> Vec<Value> {
-        self.buf.extend_from_slice(data);
-        let mut out = Vec::new();
-        while let Some(pos) = memchr::memchr(b'\n', &self.buf) {
-            let mut line = self.buf.split_to(pos + 1);
-            if line.ends_with(b"\n") {
-                line.truncate(line.len() - 1);
-            }
-            if line.ends_with(b"\r") {
-                line.truncate(line.len() - 1);
-            }
-            if line.is_empty() {
-                if let Some(event) = self.take_event() {
-                    out.push(event);
-                }
-                continue;
-            }
-            if line.starts_with(b":") {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix(b"event:") {
-                self.event_type = Some(String::from_utf8_lossy(rest).trim().to_string());
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix(b"data:") {
-                let data = String::from_utf8_lossy(rest).trim_start().to_string();
-                if data == "[DONE]" {
-                    continue;
-                }
-                self.data_lines.push(data);
-            }
-        }
-        self.cap_buffer();
-        out
-    }
-
-    fn finish(&mut self) -> Vec<Value> {
-        self.take_event().into_iter().collect()
-    }
-
-    fn take_event(&mut self) -> Option<Value> {
-        if self.data_lines.is_empty() {
-            self.event_type = None;
-            return None;
-        }
-        let data = self.data_lines.join("\n");
-        self.data_lines.clear();
-        let event_type = self.event_type.take();
-        let mut value = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| {
-            json!({
-                "type": event_type.as_deref().unwrap_or("response.output_text.delta"),
-                "delta": data
-            })
-        });
-        if let Some(event_type) = event_type
-            && value.get("type").is_none()
-            && let Some(root) = value.as_object_mut()
-        {
-            root.insert("type".to_string(), Value::String(event_type));
-        }
-        Some(value)
-    }
-
-    fn cap_buffer(&mut self) {
-        const MAX_BUF: usize = 128 * 1024;
-        if self.buf.len() <= MAX_BUF {
-            return;
-        }
-        let keep = MAX_BUF / 2;
-        let start = self.buf.len().saturating_sub(keep);
-        let tail = self.buf.split_off(start);
-        self.buf = tail;
-    }
-}
+type SseToWsParser = crate::response_events::SseDecoder;
 
 fn json_response_to_ws_event(status: StatusCode, body: &[u8]) -> Value {
     let parsed = serde_json::from_slice::<Value>(body).unwrap_or_else(|_| {
@@ -2910,6 +2531,9 @@ fn json_response_to_ws_event(status: StatusCode, body: &[u8]) -> Value {
         })
     });
 
+    if is_terminal_response_event(&parsed) && parsed.get("type").is_some() {
+        return parsed;
+    }
     if status.is_success() {
         return json!({
             "type": "response.completed",
@@ -2920,7 +2544,8 @@ fn json_response_to_ws_event(status: StatusCode, body: &[u8]) -> Value {
     json!({
         "type": "error",
         "status": status.as_u16(),
-        "error": parsed.get("error").cloned().unwrap_or(parsed)
+        "response": parsed,
+        "error": parsed.get("error").cloned().unwrap_or_else(|| parsed.clone())
     })
 }
 
@@ -3138,7 +2763,7 @@ mod tests {
 
     #[test]
     fn sse_to_ws_parser_should_inject_event_type_when_missing() {
-        let mut parser = SseToWsParser::new();
+        let mut parser = SseToWsParser::default();
 
         let events = parser.push_bytes(&Bytes::from_static(
             b"event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\n",

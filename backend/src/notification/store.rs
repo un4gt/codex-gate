@@ -225,7 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_api_key_time
 }
 
 pub async fn migrate_postgres(pool: &PgPool) -> Result<(), DbError> {
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS notification_channels (
   id BIGSERIAL PRIMARY KEY,
@@ -321,7 +321,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_api_key_time
     )
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS last_http_status INTEGER;
 ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS last_request_body TEXT;

@@ -39,18 +39,20 @@ const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const ASIA_SHANGHAI_OFFSET_MS: i64 = 8 * MILLIS_PER_HOUR;
-const DEFAULT_LOG_VISIBLE_COLUMNS: [&str; 7] = [
+const DEFAULT_LOG_VISIBLE_COLUMNS: [&str; 8] = [
     "time",
     "model",
+    "service_tier",
     "request_path",
     "status",
     "duration",
     "total_tokens",
     "api_key",
 ];
-const LOG_COLUMN_IDS: [&str; 15] = [
+const LOG_COLUMN_IDS: [&str; 16] = [
     "time",
     "model",
+    "service_tier",
     "request_path",
     "status",
     "duration",
@@ -2041,7 +2043,7 @@ async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResp
                 now_ms,
             );
             let runtime = state.provider_runtime.snapshot(provider, now_ms);
-            provider_to_json(
+            let mut value = provider_to_json(
                 provider,
                 snap.groups_by_provider
                     .get(&provider.id)
@@ -2053,7 +2055,11 @@ async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResp
                     .get(&provider.id)
                     .copied()
                     .unwrap_or_default(),
-            )
+            );
+            value["routing_availability"] = serde_json::json!(
+                crate::routing_availability::provider(&state, &snap, provider)
+            );
+            value
         })
         .collect::<Vec<_>>();
 
@@ -2871,6 +2877,15 @@ async fn list_provider_keys(req: Request<Incoming>, state: SharedState) -> HttpR
             return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
         }
     };
+    let snap = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(snap) => snap,
+        Err(error) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    };
     let is_codex_oauth = providers.iter().any(|provider| {
         provider.id == provider_id && provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
     });
@@ -2879,13 +2894,35 @@ async fn list_provider_keys(req: Request<Incoming>, state: SharedState) -> HttpR
         let out = items
             .iter()
             .map(|key| {
-                upstream_key_to_json(
+                let mut value = upstream_key_to_json(
                     key,
                     state.upstream_key_health.snapshot(key.id, now_ms),
                     state.quota.snapshot(key.id, now_ms),
                     is_codex_oauth,
                     codex_accounts.get(&key.id),
-                )
+                );
+                if let (Some(provider), Some(routing_key)) = (
+                    snap.providers
+                        .iter()
+                        .find(|provider| provider.id == provider_id),
+                    snap.keys_by_provider
+                        .get(&provider_id)
+                        .and_then(|keys| keys.iter().find(|item| item.id == key.id)),
+                ) {
+                    value["routing_availability"] =
+                        serde_json::json!(crate::routing_availability::account(
+                            &state,
+                            &snap,
+                            provider,
+                            routing_key,
+                            None,
+                            false
+                        ));
+                } else {
+                    value["routing_availability"] =
+                        serde_json::json!({"available": false, "reason": "account_removed"});
+                }
+                value
             })
             .collect::<Vec<_>>();
         http::json(StatusCode::OK, &out)

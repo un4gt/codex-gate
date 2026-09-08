@@ -1004,7 +1004,7 @@ CREATE INDEX IF NOT EXISTS idx_codex_oauth_accounts_refresh_lease ON codex_oauth
 }
 
 pub(crate) async fn migrate_postgres(pool: &PgPool) -> Result<(), DbError> {
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS codex_oauth_accounts (
   upstream_key_id BIGINT PRIMARY KEY REFERENCES upstream_keys(id) ON DELETE CASCADE,
@@ -2987,12 +2987,14 @@ fn normalize_responses_object(root: &mut Map<String, Value>, upstream_model: &st
     ] {
         root.remove(field);
     }
-    if root
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .is_some_and(|tier| tier != "priority")
-    {
-        root.remove("service_tier");
+    match root.get("service_tier").and_then(Value::as_str) {
+        Some("fast" | "priority") => {
+            root.insert("service_tier".into(), Value::String("priority".into()));
+        }
+        Some(_) => {
+            root.remove("service_tier");
+        }
+        None => {}
     }
     normalize_tool_aliases(root.get_mut("tools"));
     if let Some(tool_choice) = root.get_mut("tool_choice")
@@ -3028,38 +3030,20 @@ fn normalize_tool_type(value: Option<&mut Value>) {
 }
 
 pub fn collect_completed_response_from_sse(body: &[u8]) -> Result<Bytes, String> {
-    let text = std::str::from_utf8(body).map_err(|_| "upstream SSE was not UTF-8".to_string())?;
-    let mut data_lines = Vec::new();
-    let mut completed = None;
-    for line in text.lines().chain(std::iter::once("")) {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() {
-            if !data_lines.is_empty() {
-                let data = data_lines.join("\n");
-                data_lines.clear();
-                if data == "[DONE]" {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                    if value.get("type").and_then(Value::as_str) == Some("error") {
-                        return Err("Codex stream returned an error event".to_string());
-                    }
-                    if value.get("type").and_then(Value::as_str) == Some("response.completed")
-                        && let Some(response) = value.get("response")
-                    {
-                        completed = Some(response.clone());
-                    }
-                }
-            }
-            continue;
-        }
-        if let Some(data) = line.strip_prefix("data:") {
-            data_lines.push(data.trim_start());
-        }
-    }
-    let response = completed
-        .ok_or_else(|| "Codex stream ended without a response.completed event".to_string())?;
-    serde_json::to_vec(&response)
+    let mut decoder = crate::response_events::SseDecoder::default();
+    let mut events = decoder.push_bytes(body);
+    events.extend(decoder.finish());
+    let response = events
+        .iter()
+        .rev()
+        .filter(|event| crate::response_events::is_terminal_response_event(event))
+        .find_map(|event| event.get("response"))
+        .ok_or_else(|| {
+            decoder
+                .error
+                .unwrap_or_else(|| "Codex stream ended without a terminal response event".into())
+        })?;
+    serde_json::to_vec(response)
         .map(Bytes::from)
         .map_err(|error| error.to_string())
 }
@@ -3351,6 +3335,38 @@ fn encode_component(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_tier_normalizes_for_http_and_websocket_and_done_aggregates() {
+        for tier in ["fast", "priority"] {
+            let value =
+                serde_json::json!({"model":"gpt-6-astra","service_tier":tier,"input":"hello"});
+            let (body, _) =
+                normalize_responses_request(value.to_string().as_bytes(), "gpt-6-astra").unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["service_tier"],
+                "priority"
+            );
+            let mut ws = value;
+            normalize_response_create_value(&mut ws, "gpt-6-astra");
+            assert_eq!(ws["service_tier"], "priority");
+        }
+        for event in [
+            "response.done",
+            "response.failed",
+            "response.incomplete",
+            "response.cancelled",
+        ] {
+            let frame = format!(
+                "event: {event}\ndata: {{\"response\":{{\"model\":\"gpt-6-astra\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":0}},\"service_tier\":\"default\"}}}}"
+            );
+            let body = collect_completed_response_from_sse(frame.as_bytes()).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["usage"]["input_tokens"],
+                1
+            );
+        }
+    }
 
     async fn sqlite_codex_provider() -> (Database, i64) {
         let db = Database::connect("sqlite::memory:", 1)
@@ -3806,6 +3822,24 @@ mod tests {
         .await
         .expect("customize key");
 
+        db.upsert_upstream_key_models(first.key_id, &["gpt-6-astra".into()], 2_000)
+            .await
+            .expect("add model");
+        let model = db
+            .list_upstream_key_models_by_key(first.key_id)
+            .await
+            .expect("models")
+            .remove(0);
+        db.update_upstream_key_model(model.id, false, 2_001)
+            .await
+            .expect("disable model");
+        db.upsert_upstream_key_models(
+            first.key_id,
+            &["gpt-6-astra".into(), "gpt-4.1".into()],
+            2_002,
+        )
+        .await
+        .expect("sync models");
         let second = db
             .save_codex_oauth_login(
                 master_key,
@@ -3825,6 +3859,25 @@ mod tests {
             )
             .await
             .expect("save repeated login");
+        let models = db
+            .list_upstream_key_models_by_key(second.key_id)
+            .await
+            .expect("models after relogin");
+        assert_eq!(models.len(), 2);
+        assert!(
+            !models
+                .iter()
+                .find(|model| model.model_name == "gpt-6-astra")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            models
+                .iter()
+                .find(|model| model.model_name == "gpt-4.1")
+                .unwrap()
+                .enabled
+        );
         assert_eq!(second.key_id, first.key_id);
         assert_eq!(second.operation, CodexLoginOperation::Updated);
 

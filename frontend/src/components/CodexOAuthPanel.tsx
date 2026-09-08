@@ -1,3 +1,5 @@
+import { UpstreamKeyModels } from './UpstreamKeyModels';
+import { routingAvailabilityLabel } from '@/lib/routingAvailability';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { ChevronRight, Copy, ExternalLink, Globe2, KeyRound, LogIn, MoreHorizontal, Power, RefreshCw, Send, Trash2 } from 'lucide-react';
 import Alert from '@mui/material/Alert';
@@ -22,7 +24,7 @@ import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Typography from '@mui/material/Typography';
 import { QuotaBar, quotaTextClass } from '@/components/console/QuotaBar';
-import { StatusBadge, type StatusTone } from '@/components/console/StatusBadge';
+import { StatusBadge } from '@/components/console/StatusBadge';
 import {
   cancelCodexOAuthSession,
   deleteProviderKey,
@@ -406,6 +408,7 @@ interface LoginTarget {
 export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [loginTarget, setLoginTarget] = useState<LoginTarget | null>(null);
+  const [modelAccount, setModelAccount] = useState<UpstreamKeyMeta | null>(null);
   const [pendingDelete, setPendingDelete] = useState<UpstreamKeyMeta | null>(null);
   const [expandOverrides, setExpandOverrides] = useState<Record<number, boolean>>({});
   const loginSequenceRef = useRef(0);
@@ -413,10 +416,7 @@ export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
   // 单账号时详情默认摊开；多账号默认收起，让整页保持可扫描的行密度。
   const expandedByDefault = accounts.length === 1;
   const summary = useMemo(() => {
-    const routable = accounts.filter(key => {
-      const oauth = key.codex_oauth;
-      return key.enabled && oauth?.auth_status === 'active' && oauth.quota?.allowed !== false;
-    }).length;
+    const routable = accounts.filter(key => key.routing_availability?.available).length;
     return { total: accounts.length, routable };
   }, [accounts]);
 
@@ -491,6 +491,7 @@ export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
         </Button>
       </Box>
 
+      {!props.item.provider.routing_availability?.available ? <Alert severity="warning">{routingAvailabilityLabel(props.item.provider.routing_availability)}</Alert> : null}
       {accounts.length === 0 ? (
         <Alert severity="info">
           <AlertTitle>{t('尚未登录 Codex 账号')}</AlertTitle>
@@ -508,11 +509,18 @@ export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
               onRefresh={() => void refreshQuota(key)}
               onRelogin={() => openLogin(key.id)}
               onToggle={() => void toggleAccount(key)}
+              onModels={() => setModelAccount(key)}
               onDelete={() => setPendingDelete(key)}
             />
           ))}
         </Box>
       )}
+
+      <Dialog open={modelAccount !== null} onClose={() => setModelAccount(null)} maxWidth="sm" fullWidth aria-labelledby="account-models-title">
+        <DialogTitle id="account-models-title">{t('模型限制')} · {modelAccount?.name}</DialogTitle>
+        <DialogContent>{modelAccount ? <UpstreamKeyModels key={modelAccount.id} settings={props.settings} keyId={modelAccount.id} onChanged={() => props.onRefresh()} /> : null}</DialogContent>
+        <DialogActions><Button onClick={() => setModelAccount(null)}>{t('关闭')}</Button></DialogActions>
+      </Dialog>
 
       <Dialog
         open={pendingDelete !== null}
@@ -572,11 +580,12 @@ function CodexAccountRow(props: {
   onRefresh: () => void;
   onRelogin: () => void;
   onToggle: () => void;
+  onModels: () => void;
   onDelete: () => void;
 }) {
   const account = props.item.codex_oauth;
   const status = account?.auth_status ?? 'reauth_required';
-  const statusView = authStatusView(status);
+
   const quota = account?.quota;
   const quotaBlocked = quota?.allowed === false;
   const detailId = `codex-account-detail-${props.item.id}`;
@@ -632,10 +641,8 @@ function CodexAccountRow(props: {
           </Box>
         )}
 
-        <Box className="flex shrink-0 items-center gap-1.5">
-          {quotaBlocked ? <StatusBadge tone="warning">额度不可用</StatusBadge> : null}
-          {status === 'active' ? null : <StatusBadge tone={statusView.tone}>{statusView.label}</StatusBadge>}
-          {props.item.enabled ? null : <StatusBadge tone="disabled">已禁用</StatusBadge>}
+        <Box className="flex shrink-0 flex-wrap items-center gap-1.5">
+          <StatusBadge tone={props.item.routing_availability?.available ? 'normal' : 'warning'}>{routingAvailabilityLabel(props.item.routing_availability)}</StatusBadge>
           <AccountActions
             enabled={props.item.enabled}
             busy={props.busy}
@@ -643,6 +650,7 @@ function CodexAccountRow(props: {
             onRefresh={props.onRefresh}
             onRelogin={props.onRelogin}
             onToggle={props.onToggle}
+            onModels={props.onModels}
             onDelete={props.onDelete}
           />
         </Box>
@@ -694,6 +702,7 @@ function AccountActions(props: {
   onRefresh: () => void;
   onRelogin: () => void;
   onToggle: () => void;
+  onModels: () => void;
   onDelete: () => void;
 }) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -727,6 +736,7 @@ function AccountActions(props: {
           </ListItemIcon>
           {t('刷新余量')}
         </MenuItem>
+        <MenuItem onClick={run(props.onModels)}>{t("模型限制")}</MenuItem>
         <MenuItem onClick={run(props.onRelogin)}>
           <ListItemIcon>
             <LogIn className="size-3.5" aria-hidden="true" />
@@ -832,6 +842,7 @@ type AccountHealth = 'ok' | 'attention' | 'error' | 'off';
 
 function accountHealth(item: UpstreamKeyMeta, status: string, quotaBlocked: boolean): AccountHealth {
   if (!item.enabled) return 'off';
+  if (item.routing_availability) return item.routing_availability.available ? 'ok' : 'attention';
   if (status === 'forbidden') return 'error';
   if (status !== 'active') return 'attention';
   return quotaBlocked ? 'attention' : 'ok';
@@ -872,10 +883,4 @@ function windowLabel(window: CodexQuotaWindow | null, fallback: string) {
 
 function formatOptionalDate(value: number | null | undefined) {
   return value ? formatDateTime(value) : '—';
-}
-
-function authStatusView(status: string): { label: string; tone: StatusTone } {
-  if (status === 'active') return { label: t('认证正常'), tone: 'normal' };
-  if (status === 'forbidden') return { label: t('无权限'), tone: 'error' };
-  return { label: t('需要重新登录'), tone: 'warning' };
 }

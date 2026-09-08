@@ -697,6 +697,9 @@ def archive_summary():
         monetary_columns[table] = [row[1] for row in cur.fetchall() if row[1].startswith('cost_')]
     conn.close()
     archive_record = json.loads(preview) if preview else {}
+    for field in ('requested_service_tier', 'upstream_service_tier', 'service_tier'):
+        if field not in archive_record or archive_record[field] is not None:
+            raise RuntimeError(f'legacy archive tier must exist and remain null: {field}')
     return {
         'archive_files': [str(p.relative_to(ROOT)) for p in files],
         'archive_preview': preview,

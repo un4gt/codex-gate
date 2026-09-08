@@ -25,7 +25,7 @@ const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
   request_logs.price_version_id, request_logs.price_tier_index,
   request_logs.t_stream_ms, request_logs.t_first_byte_ms, request_logs.t_first_token_ms, request_logs.duration_ms,
   request_logs.span_kind, request_logs.transport, request_logs.parent_id, request_logs.ws_session_id,
-  request_logs.routing_trace_json,
+  request_logs.routing_trace_json, request_logs.requested_service_tier, request_logs.upstream_service_tier, request_logs.service_tier,
   request_logs.created_at_ms
 "#;
 
@@ -3350,6 +3350,7 @@ INSERT INTO request_logs (
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
+  requested_service_tier, upstream_service_tier, service_tier,
   created_at_ms
 ) VALUES (
   ?, ?, ?, ?, ?, ?,
@@ -3359,6 +3360,7 @@ INSERT INTO request_logs (
   ?, ?,
   ?, ?, ?, ?,
   ?, ?, ?, ?, ?,
+  ?, ?, ?,
   ?
 )
 "#,
@@ -3396,6 +3398,9 @@ INSERT INTO request_logs (
                 .as_ref()
                 .and_then(|value| serde_json::to_string(value).ok()),
         )
+        .bind(&r.requested_service_tier)
+        .bind(&r.upstream_service_tier)
+        .bind(&r.service_tier)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -3423,6 +3428,7 @@ INSERT INTO request_logs (
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
+  requested_service_tier, upstream_service_tier, service_tier,
   created_at_ms
 ) VALUES (
   $1, $2, $3, $4, $5, $6,
@@ -3432,7 +3438,8 @@ INSERT INTO request_logs (
   $19, $20,
   $21, $22, $23, $24,
   $25, $26, $27, $28, $29,
-  $30
+  $30, $31, $32,
+  $33
 )
 "#,
         )
@@ -3469,6 +3476,9 @@ INSERT INTO request_logs (
                 .as_ref()
                 .and_then(|value| serde_json::to_string(value).ok()),
         )
+        .bind(&r.requested_service_tier)
+        .bind(&r.upstream_service_tier)
+        .bind(&r.service_tier)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -4121,6 +4131,7 @@ SELECT
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
+  requested_service_tier, upstream_service_tier, service_tier,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < ?
@@ -4196,6 +4207,7 @@ SELECT
   price_version_id, price_tier_index,
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
+  requested_service_tier, upstream_service_tier, service_tier,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < $1
@@ -4739,6 +4751,9 @@ fn row_to_request_log_sqlite(row: sqlx::sqlite::SqliteRow) -> RequestLogRow {
         transport: row.get::<String, _>("transport"),
         parent_id: row.get::<Option<String>, _>("parent_id"),
         ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
+        requested_service_tier: row.get::<Option<String>, _>("requested_service_tier"),
+        upstream_service_tier: row.get::<Option<String>, _>("upstream_service_tier"),
+        service_tier: row.get::<Option<String>, _>("service_tier"),
         routing_trace: row
             .get::<Option<String>, _>("routing_trace_json")
             .and_then(|value| serde_json::from_str(&value).ok()),
@@ -4776,6 +4791,9 @@ fn row_to_request_log_postgres(row: sqlx::postgres::PgRow) -> RequestLogRow {
         transport: row.get::<String, _>("transport"),
         parent_id: row.get::<Option<String>, _>("parent_id"),
         ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
+        requested_service_tier: row.get::<Option<String>, _>("requested_service_tier"),
+        upstream_service_tier: row.get::<Option<String>, _>("upstream_service_tier"),
+        service_tier: row.get::<Option<String>, _>("service_tier"),
         routing_trace: row
             .get::<Option<String>, _>("routing_trace_json")
             .and_then(|value| serde_json::from_str(&value).ok()),
@@ -5541,11 +5559,27 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_sqlite_model_prices_active(pool).await?;
     ensure_sqlite_responses_via_chat_columns(pool).await?;
     crate::notification::migrate_sqlite(pool).await?;
+    if !sqlite_column_exists(pool, "request_logs", "requested_service_tier").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN requested_service_tier TEXT")
+            .execute(pool)
+            .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "upstream_service_tier").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN upstream_service_tier TEXT")
+            .execute(pool)
+            .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "service_tier").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN service_tier TEXT")
+            .execute(pool)
+            .await?;
+    }
+
     Ok(())
 }
 
 async fn migrate_postgres(pool: &PgPool) -> Result<(), DbError> {
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS api_keys (
   id BIGSERIAL PRIMARY KEY,
@@ -5563,7 +5597,7 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS upstream_providers (
   id BIGSERIAL PRIMARY KEY,
@@ -5591,7 +5625,7 @@ CREATE TABLE IF NOT EXISTS upstream_providers (
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS provider_groups (
   id BIGSERIAL PRIMARY KEY,
@@ -5622,7 +5656,7 @@ CREATE INDEX IF NOT EXISTS idx_provider_group_api_keys_api_key ON provider_group
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS upstream_endpoints (
   id BIGSERIAL PRIMARY KEY,
@@ -5641,7 +5675,7 @@ CREATE INDEX IF NOT EXISTS idx_upstream_endpoints_provider ON upstream_endpoints
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS upstream_keys (
   id BIGSERIAL PRIMARY KEY,
@@ -5660,7 +5694,7 @@ CREATE INDEX IF NOT EXISTS idx_upstream_keys_provider ON upstream_keys(provider_
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS provider_models (
   id BIGSERIAL PRIMARY KEY,
@@ -5683,7 +5717,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_models_alias_unique
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS upstream_key_models (
   id BIGSERIAL PRIMARY KEY,
@@ -5700,7 +5734,7 @@ CREATE INDEX IF NOT EXISTS idx_upstream_key_models_key ON upstream_key_models(up
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS gateway_model_policies (
   model_name TEXT PRIMARY KEY,
@@ -5713,7 +5747,7 @@ CREATE TABLE IF NOT EXISTS gateway_model_policies (
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS model_routes (
   id BIGSERIAL PRIMARY KEY,
@@ -5733,7 +5767,7 @@ CREATE INDEX IF NOT EXISTS idx_model_route_providers_route ON model_route_provid
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS model_aliases (
   id BIGSERIAL PRIMARY KEY,
@@ -5761,7 +5795,7 @@ CREATE INDEX IF NOT EXISTS idx_model_alias_targets_provider ON model_alias_targe
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS model_prices (
   id BIGSERIAL PRIMARY KEY,
@@ -5779,7 +5813,7 @@ CREATE INDEX IF NOT EXISTS idx_model_prices_provider_model_created ON model_pric
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS stats_daily (
   date TEXT NOT NULL,
@@ -5801,7 +5835,7 @@ CREATE TABLE IF NOT EXISTS stats_daily (
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS stats_hourly (
   bucket_ms BIGINT NOT NULL,
@@ -5838,7 +5872,7 @@ CREATE INDEX IF NOT EXISTS idx_stats_hourly_model_bucket ON stats_hourly(model, 
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS runtime_settings (
   key TEXT PRIMARY KEY,
@@ -5850,7 +5884,7 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS console_preferences (
   key TEXT PRIMARY KEY,
@@ -5862,7 +5896,7 @@ CREATE TABLE IF NOT EXISTS console_preferences (
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS request_logs (
   id TEXT PRIMARY KEY,
@@ -5903,7 +5937,7 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_time ON request_logs(api_key
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 CREATE TABLE IF NOT EXISTS stats_events (
   id TEXT PRIMARY KEY,
@@ -5948,6 +5982,16 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     migrate_postgres_pricing_storage(pool).await?;
     ensure_postgres_model_prices_active(pool).await?;
     crate::notification::migrate_postgres(pool).await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS requested_service_tier TEXT")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS upstream_service_tier TEXT")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS service_tier TEXT")
+        .execute(pool)
+        .await?;
+
     Ok(())
 }
 
@@ -6410,7 +6454,7 @@ async fn ensure_postgres_upstream_providers_key_selection_strategy(
 }
 
 async fn ensure_postgres_upstream_providers_resilience(pool: &PgPool) -> Result<(), DbError> {
-    sqlx::query(
+    sqlx::raw_sql(
         r#"
 ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 2;
 ALTER TABLE upstream_providers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER;
@@ -8072,6 +8116,62 @@ CREATE TABLE stats_events (
     }
 
     #[tokio::test]
+    #[ignore = "requires an isolated TEST_POSTGRES_DSN database"]
+    async fn postgres_service_tiers_migrate_legacy_rows_and_round_trip() {
+        let dsn = std::env::var("TEST_POSTGRES_DSN").expect("isolated PostgreSQL DSN");
+        let db = Database::connect(&dsn, 2)
+            .await
+            .expect("connect PostgreSQL");
+        db.migrate().await.expect("initialize PostgreSQL");
+        let Database::Postgres(pool) = &db else {
+            panic!("expected PostgreSQL");
+        };
+        for field in [
+            "requested_service_tier",
+            "upstream_service_tier",
+            "service_tier",
+        ] {
+            sqlx::query(&format!("ALTER TABLE request_logs DROP COLUMN {field}"))
+                .execute(pool)
+                .await
+                .expect("simulate legacy schema");
+        }
+        sqlx::query("INSERT INTO request_logs (id,time_ms,api_key_id,api_format,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,created_at_ms) VALUES ('legacy-tier',1,1,'responses',0,0,0,0,1)")
+            .execute(pool).await.expect("legacy log");
+        db.migrate().await.expect("upgrade legacy PostgreSQL");
+        db.migrate().await.expect("idempotent PostgreSQL upgrade");
+        let mut row = db
+            .list_request_logs_before(2, 10)
+            .await
+            .expect("legacy query")
+            .remove(0);
+        assert!(
+            row.requested_service_tier.is_none()
+                && row.upstream_service_tier.is_none()
+                && row.service_tier.is_none()
+        );
+        row.id = "new-tier".into();
+        row.requested_service_tier = Some("fast".into());
+        row.upstream_service_tier = Some("priority".into());
+        row.service_tier = Some("default".into());
+        db.insert_request_logs(&[row])
+            .await
+            .expect("insert tier log");
+        let rows = db
+            .list_request_logs(1, 20, &RequestLogFilter::default())
+            .await
+            .expect("query logs");
+        let row = rows
+            .iter()
+            .find(|row| row.id == "new-tier")
+            .expect("new log");
+        assert_eq!(row.service_tier.as_deref(), Some("default"));
+        let archive = serde_json::to_value(row).expect("archive JSON");
+        assert_eq!(archive["requested_service_tier"], "fast");
+        assert_eq!(archive["upstream_service_tier"], "priority");
+    }
+
+    #[tokio::test]
     async fn request_logs_should_round_trip_routing_trace() {
         let db = sqlite_memory_db().await;
         let trace = serde_json::json!({
@@ -8107,6 +8207,9 @@ CREATE TABLE stats_events (
             transport: "http".to_string(),
             parent_id: None,
             ws_session_id: None,
+            requested_service_tier: Some("fast".into()),
+            upstream_service_tier: Some("priority".into()),
+            service_tier: Some("default".into()),
             routing_trace: Some(trace.clone()),
             created_at_ms: 1,
         }])
@@ -8118,6 +8221,17 @@ CREATE TABLE stats_events (
             .await
             .expect("list request logs");
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].requested_service_tier.as_deref(), Some("fast"));
+        assert_eq!(rows[0].upstream_service_tier.as_deref(), Some("priority"));
+        assert_eq!(rows[0].service_tier.as_deref(), Some("default"));
+        db.migrate().await.expect("repeat migration");
+        let queried = db
+            .list_request_logs(1, 20, &RequestLogFilter::default())
+            .await
+            .expect("query logs");
+        assert_eq!(queried[0].service_tier.as_deref(), Some("default"));
+        let archive = serde_json::to_value(&queried[0]).expect("archive serialization");
+        assert_eq!(archive["requested_service_tier"], "fast");
         assert_eq!(rows[0].routing_trace, Some(trace));
         assert_eq!(
             rows[0].upstream_api_format.as_deref(),

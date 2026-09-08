@@ -45,6 +45,9 @@ pub struct TelemetryEvent {
     pub transport: &'static str,
     pub parent_id: Option<String>,
     pub ws_session_id: Option<String>,
+    pub requested_service_tier: Option<String>,
+    pub upstream_service_tier: Option<String>,
+    pub service_tier: Option<String>,
     pub routing_trace: Option<Value>,
 }
 
@@ -412,6 +415,9 @@ impl TelemetryWorker {
                 transport,
                 parent_id,
                 ws_session_id,
+                requested_service_tier,
+                upstream_service_tier,
+                service_tier,
                 routing_trace,
             } = event;
             let id = id.unwrap_or_else(util::new_ulid);
@@ -451,6 +457,9 @@ impl TelemetryWorker {
                 transport: transport.to_string(),
                 parent_id,
                 ws_session_id,
+                requested_service_tier,
+                upstream_service_tier,
+                service_tier,
                 routing_trace,
                 created_at_ms: util::now_ms(),
             };

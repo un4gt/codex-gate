@@ -1,3 +1,4 @@
+import { routingAvailabilityLabel } from '@/lib/routingAvailability';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus } from 'lucide-react';
 import { useSearchParams } from 'react-router';
@@ -155,8 +156,8 @@ export function OAuthPage(props: OAuthPageProps) {
               <Typography className="truncate text-base font-semibold text-foreground" component="h2">
                 {selected.provider.name}
               </Typography>
-              <StatusBadge tone={selected.provider.enabled ? 'normal' : 'disabled'}>
-                {t(selected.provider.enabled ? '已启用' : '已禁用')}
+              <StatusBadge tone={selected.provider.routing_availability?.available ? 'normal' : 'disabled'}>
+                {routingAvailabilityLabel(selected.provider.routing_availability)}
               </StatusBadge>
             </Box>
             {codexProviders.length > 1 ? (

@@ -327,6 +327,9 @@ pub struct RequestLogRow {
     pub transport: String,
     pub parent_id: Option<String>,
     pub ws_session_id: Option<String>,
+    pub requested_service_tier: Option<String>,
+    pub upstream_service_tier: Option<String>,
+    pub service_tier: Option<String>,
     pub routing_trace: Option<Value>,
     pub created_at_ms: i64,
 }

@@ -12,7 +12,6 @@ use hyper::header::{
 };
 use hyper::http::HeaderMap;
 use hyper::{Method, Request, Response, StatusCode, Uri};
-use memchr::memchr;
 use pin_project_lite::pin_project;
 use serde::Serialize;
 use serde_json::Value;
@@ -209,6 +208,7 @@ async fn proxy_openai(
         let _ = permit.send(event);
     }
 
+    let request_tiers = parking_lot::Mutex::new((None::<String>, None::<String>, None::<String>));
     let submit_err = |permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
                       status: StatusCode,
                       error_type: &'static str,
@@ -222,6 +222,8 @@ async fn proxy_openai(
             "error_type": error_type,
             "message": error_message.clone(),
         }));
+        let (requested_service_tier, upstream_service_tier, service_tier) =
+            request_tiers.lock().clone();
         submit_with_permit(
             permit,
             TelemetryEvent {
@@ -253,6 +255,9 @@ async fn proxy_openai(
                 transport: "http",
                 parent_id: None,
                 ws_session_id: None,
+                requested_service_tier,
+                upstream_service_tier,
+                service_tier,
                 routing_trace: Some(routing_trace_value(&routing_trace)),
             },
         );
@@ -280,6 +285,10 @@ async fn proxy_openai(
             }
         };
 
+    request_tiers.lock().0 = serde_json::from_slice::<Value>(&body_bytes)
+        .ok()
+        .as_ref()
+        .and_then(crate::response_events::service_tier);
     let info = parse_request_info(&body_bytes);
     let Some(model_name) = info.model.clone() else {
         submit_err(
@@ -569,6 +578,24 @@ async fn proxy_openai(
             }
         };
 
+        if is_codex_oauth
+            && let Ok(mut value) = serde_json::from_slice::<Value>(&out_body)
+            && value.get("service_tier").and_then(Value::as_str) == Some("fast")
+        {
+            value["service_tier"] = Value::String("priority".into());
+            if let Ok(encoded) = serde_json::to_vec(&value) {
+                out_body = Bytes::from(encoded);
+            }
+        }
+        let upstream_service_tier = serde_json::from_slice::<Value>(&out_body)
+            .ok()
+            .as_ref()
+            .and_then(crate::response_events::service_tier);
+        {
+            let mut tiers = request_tiers.lock();
+            tiers.1 = upstream_service_tier.clone();
+            tiers.2 = None;
+        }
         let upstream_path_and_query =
             upstream_path_and_query(request_path_and_query.as_ref(), resolved.protocol);
         let upstream_uri = match build_upstream_uri(
@@ -847,6 +874,7 @@ async fn proxy_openai(
             }
         };
 
+        let mut upstream_resp = upstream_resp.map(ReplayIncomingBody::new);
         let t_stream_ms = start.elapsed().as_millis() as i64;
         let status_code = upstream_resp.status();
         let status_i32 = status_code.as_u16() as i32;
@@ -869,7 +897,23 @@ async fn proxy_openai(
                 .await;
             state.caches.upstream.invalidate();
         }
-        if should_retry_response_status(status_i32) {
+        let response_has_usage = if should_retry_response_status(status_i32) {
+            let is_sse = upstream_resp
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.contains("text/event-stream"));
+            retry_body_has_usage(
+                upstream_resp.body_mut(),
+                api_format_name(resolved.protocol.upstream_api_format),
+                is_sse,
+                state.config.upstream_request_timeout,
+            )
+            .await
+        } else {
+            false
+        };
+        if should_retry_response_status(status_i32) && !response_has_usage {
             trace_attempt(
                 &routing_trace,
                 resolved,
@@ -942,7 +986,7 @@ async fn proxy_openai(
             .map(|ct| ct.contains("text/event-stream"))
             .unwrap_or(false);
         let upstream_api_format_str = api_format_name(resolved.protocol.upstream_api_format);
-        let mut tap_config = TapConfig {
+        let tap_config = TapConfig {
             api_key_id: api_key.id,
             log_enabled: api_key.log_enabled,
             provider_id: Some(resolved.provider.id),
@@ -971,6 +1015,15 @@ async fn proxy_openai(
             }),
             routing_trace: routing_trace.clone(),
             codex_state: is_codex_oauth.then(|| state.clone()),
+            read_timeout: state.config.upstream_request_timeout,
+            client_duration_ms: None,
+            terminal_observed: false,
+            requested_service_tier: serde_json::from_slice::<Value>(&body_bytes)
+                .ok()
+                .as_ref()
+                .and_then(crate::response_events::service_tier),
+            upstream_service_tier,
+            service_tier: None,
         };
         if !status_code.is_success() {
             let tap = ProxyTapBody::new(body, tap_config, telemetry_permit.take(), reservation);
@@ -992,42 +1045,23 @@ async fn proxy_openai(
                     "Codex returned an unexpected non-streaming response",
                 );
             }
-            let collected = match Limited::new(body, CODEX_NON_STREAM_MAX_BYTES)
+            let tap = ProxyTapBody::new(body, tap_config, telemetry_permit.take(), reservation);
+            let collected = match Limited::new(tap, CODEX_NON_STREAM_MAX_BYTES)
                 .collect()
                 .await
             {
                 Ok(collected) => collected.to_bytes(),
-                Err(_) => {
-                    reservation.finish(
-                        AttemptOutcome::local_provider(
-                            Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                            "codex_response_too_large",
-                            "Codex streaming response exceeded the non-stream buffer limit",
-                            Some(t_stream_ms),
-                        ),
-                        &state.metrics,
-                    );
+                Err(error) => {
                     return http::json_error(
                         StatusCode::BAD_GATEWAY,
-                        "Codex response exceeded the non-stream buffer limit",
+                        format!("Codex response aggregation failed: {error}"),
                     );
                 }
             };
             let completed =
                 match crate::codex_oauth::collect_completed_response_from_sse(&collected) {
                     Ok(completed) => completed,
-                    Err(error) => {
-                        reservation.finish(
-                            AttemptOutcome::local_provider(
-                                Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                                "codex_response_aggregation_failed",
-                                &error,
-                                Some(t_stream_ms),
-                            ),
-                            &state.metrics,
-                        );
-                        return http::json_error(StatusCode::BAD_GATEWAY, error);
-                    }
+                    Err(error) => return http::json_error(StatusCode::BAD_GATEWAY, error),
                 };
             resp_parts.headers.insert(
                 CONTENT_TYPE,
@@ -1036,26 +1070,22 @@ async fn proxy_openai(
             if let Ok(length) = HeaderValue::from_str(&completed.len().to_string()) {
                 resp_parts.headers.insert(CONTENT_LENGTH, length);
             }
-            tap_config.is_sse = false;
-            let tap = ProxyTapBody::new(
-                Full::new(completed),
-                tap_config,
-                telemetry_permit.take(),
-                reservation,
-            );
-            return Response::from_parts(resp_parts, http::boxed(tap));
+            return Response::from_parts(resp_parts, http::boxed(Full::new(completed)));
         }
         let body = if is_sse {
+            let mut observed_service_tier = None;
             match preflight_sse(
                 body,
                 upstream_api_format_str,
                 state.config.stream_preflight_timeout,
                 state.config.stream_preflight_max_bytes,
+                &mut observed_service_tier,
             )
             .await
             {
                 Ok(body) => body,
                 Err(error) => {
+                    request_tiers.lock().2 = observed_service_tier;
                     trace_attempt(
                         &routing_trace,
                         resolved,
@@ -1116,7 +1146,7 @@ async fn proxy_openai(
                 }
             }
         } else {
-            ReplayIncomingBody::new(body)
+            body
         };
 
         if resolved.protocol.is_responses_via_chat() {
@@ -1973,19 +2003,18 @@ pub(crate) async fn build_upstream_plan(
         let keys = enabled_model_keys
             .into_iter()
             .filter(|key| {
-                if provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
-                    && !snap
-                        .codex_oauth_by_key
-                        .get(&key.id)
-                        .is_some_and(|account| account.is_routable(now_ms))
-                {
-                    return false;
-                }
-                let available = state.quota.is_available(key.id, now_ms);
-                if !available {
+                let availability = crate::routing_availability::account(
+                    state,
+                    &snap,
+                    provider,
+                    key,
+                    Some(&route.upstream_model),
+                    false,
+                );
+                if availability.reason == Some("quota_unavailable") {
                     state.metrics.record_quota_cooldown_skip();
                 }
-                available
+                availability.available
             })
             .collect::<Vec<_>>();
         if keys.is_empty() {
@@ -3247,11 +3276,51 @@ impl hyper::body::Body for ReplayIncomingBody {
     }
 }
 
+/// Preserve retryable error bodies and avoid issuing another request after observed usage.
+async fn retry_body_has_usage(
+    body: &mut ReplayIncomingBody,
+    api_format: &'static str,
+    is_sse: bool,
+    timeout: std::time::Duration,
+) -> bool {
+    let mut capture = UsageCaptureBuffer::new(crate::response_events::MAX_EVENT_BYTES, 32 * 1024);
+    let mut parser = SseParser::new(api_format);
+    let read = async {
+        loop {
+            match body.inner.frame().await {
+                Some(Ok(frame)) => {
+                    if let Some(data) = frame.data_ref() {
+                        capture.push(data);
+                        if is_sse {
+                            parser.push_bytes(data);
+                        }
+                    }
+                    body.buffered.push_back(frame);
+                    // Stop examining oversized responses, leaving the rest for the reader task.
+                    if capture.is_truncated() {
+                        return true;
+                    }
+                }
+                Some(Err(_)) => return true,
+                None => {
+                    if is_sse {
+                        parser.finish();
+                        return parser.observation.usage.is_some();
+                    }
+                    return extract_usage_from_capture(api_format, &capture).is_some();
+                }
+            }
+        }
+    };
+    time::timeout(timeout, read).await.unwrap_or(true)
+}
+
 async fn preflight_sse(
-    mut inner: Incoming,
+    mut inner: ReplayIncomingBody,
     api_format: &'static str,
     timeout: std::time::Duration,
     max_bytes: usize,
+    observed_service_tier: &mut Option<String>,
 ) -> Result<ReplayIncomingBody, String> {
     let preflight = async {
         let mut parser = SseParser::new(api_format);
@@ -3259,6 +3328,18 @@ async fn preflight_sse(
         let mut buffered_bytes = 0usize;
         loop {
             let Some(frame) = inner.frame().await else {
+                let parsed = parser.finish();
+                *observed_service_tier = parser.observation.service_tier.clone();
+                if parsed.saw_valid_event
+                    || parsed.usage.is_some()
+                    || parser.non_retryable_terminal()
+                {
+                    buffered.append(&mut inner.buffered);
+                    return Ok(ReplayIncomingBody {
+                        buffered,
+                        inner: inner.inner,
+                    });
+                }
                 return Err("upstream SSE ended before its first valid event".to_string());
             };
             let frame = frame.map_err(|error| {
@@ -3267,19 +3348,33 @@ async fn preflight_sse(
             if let Some(data) = frame.data_ref() {
                 buffered_bytes = buffered_bytes.saturating_add(data.len());
                 if buffered_bytes > max_bytes {
-                    return Err(format!(
-                        "upstream SSE exceeded the {max_bytes}-byte first-event buffer"
-                    ));
+                    buffered.push_back(frame);
+                    buffered.append(&mut inner.buffered);
+                    return Ok(ReplayIncomingBody {
+                        buffered,
+                        inner: inner.inner,
+                    });
                 }
                 let parsed = parser.push_bytes(data);
-                if parsed.saw_error_event {
+                *observed_service_tier = parser.observation.service_tier.clone();
+                if parsed.saw_error_event
+                    && parsed.usage.is_none()
+                    && !parser.non_retryable_terminal()
+                {
                     return Err(
                         "upstream SSE returned an error before its first valid event".to_string(),
                     );
                 }
                 buffered.push_back(frame);
-                if parsed.saw_valid_event {
-                    return Ok(ReplayIncomingBody { buffered, inner });
+                if parsed.saw_valid_event
+                    || parsed.usage.is_some()
+                    || parser.non_retryable_terminal()
+                {
+                    buffered.append(&mut inner.buffered);
+                    return Ok(ReplayIncomingBody {
+                        buffered,
+                        inner: inner.inner,
+                    });
                 }
             } else {
                 buffered.push_back(frame);
@@ -3320,6 +3415,12 @@ struct TapConfig {
     affinity_should_migrate: bool,
     routing_trace: SharedRoutingTrace,
     codex_state: Option<SharedState>,
+    read_timeout: std::time::Duration,
+    client_duration_ms: Option<i64>,
+    terminal_observed: bool,
+    requested_service_tier: Option<String>,
+    upstream_service_tier: Option<String>,
+    service_tier: Option<String>,
 }
 
 struct TapFinalizeInputs<'a> {
@@ -3332,171 +3433,178 @@ struct TapFinalizeInputs<'a> {
     capture: &'a UsageCaptureBuffer,
 }
 
-pin_project! {
-    struct ProxyTapBody<B> {
-        #[pin]
-        inner: B,
-        cfg: TapConfig,
-        telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
-        reservation: Option<UpstreamAttemptReservation>,
-
-        finalized: bool,
-        first_byte_ms: Option<i64>,
-        first_token_ms: Option<i64>,
-        usage: Usage,
-        usage_observed: bool,
-        error_type: Option<String>,
-        error_message: Option<String>,
-
-        capture: UsageCaptureBuffer,
-        sse: Option<SseParser>,
-    }
-
-    impl<B> PinnedDrop for ProxyTapBody<B> {
-        fn drop(this: Pin<&mut Self>) {
-            let this = this.project();
-            finalize_tap(
-                this.cfg,
-                this.telemetry_permit,
-                this.reservation,
-                this.finalized,
-                TapFinalizeInputs {
-                    first_byte_ms: *this.first_byte_ms,
-                    first_token_ms: *this.first_token_ms,
-                    usage: this.usage,
-                    usage_observed: this.usage_observed,
-                    error_type: this.error_type,
-                    error_message: this.error_message,
-                    capture: this.capture,
-                },
-            );
-        }
-    }
+struct ProxyTapBody {
+    receiver: mpsc::Receiver<Result<Frame<Bytes>, std::io::Error>>,
 }
 
-impl<B> ProxyTapBody<B> {
-    fn new(
+impl ProxyTapBody {
+    fn new<B>(
         inner: B,
-        cfg: TapConfig,
-        telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
+        mut cfg: TapConfig,
+        mut telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
         reservation: UpstreamAttemptReservation,
-    ) -> Self {
-        let sse = if cfg.is_sse {
-            Some(SseParser::new(cfg.api_format))
-        } else {
-            None
-        };
-        let capture =
-            UsageCaptureBuffer::new(cfg.usage_capture_bytes, cfg.usage_capture_tail_bytes);
-        Self {
-            inner,
-            cfg,
-            telemetry_permit,
-            reservation: Some(reservation),
-            finalized: false,
-            first_byte_ms: None,
-            first_token_ms: None,
-            usage: Usage::default(),
-            usage_observed: false,
-            error_type: None,
-            error_message: None,
-            capture,
-            sse,
-        }
-    }
-}
-
-impl<B> hyper::body::Body for ProxyTapBody<B>
-where
-    B: hyper::body::Body<Data = Bytes>,
-    B::Error: std::fmt::Display,
-{
-    type Data = Bytes;
-    type Error = B::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let mut this = self.project();
-
-        let polled = this.inner.as_mut().poll_frame(cx);
-        match polled {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => {
-                finalize_tap(
-                    this.cfg,
-                    this.telemetry_permit,
-                    this.reservation,
-                    this.finalized,
-                    TapFinalizeInputs {
-                        first_byte_ms: *this.first_byte_ms,
-                        first_token_ms: *this.first_token_ms,
-                        usage: this.usage,
-                        usage_observed: this.usage_observed,
-                        error_type: this.error_type,
-                        error_message: this.error_message,
-                        capture: this.capture,
-                    },
-                );
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref() {
-                    if this.first_byte_ms.is_none() {
-                        *this.first_byte_ms = Some(this.cfg.start.elapsed().as_millis() as i64);
+    ) -> Self
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: std::fmt::Display + Send,
+    {
+        // The reader owns settlement and survives dropping the downstream response body.
+        let (sender, receiver) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let mut inner = Box::pin(inner);
+            let mut reservation = Some(reservation);
+            let mut first_byte_ms = None;
+            let mut first_token_ms = None;
+            let mut usage = Usage::default();
+            let mut usage_observed = false;
+            let mut error_type = None;
+            let mut error_message = None;
+            let mut capture = UsageCaptureBuffer::new(
+                cfg.usage_capture_bytes
+                    .max(crate::response_events::MAX_EVENT_BYTES),
+                cfg.usage_capture_tail_bytes,
+            );
+            let mut sse = cfg.is_sse.then(|| SseParser::new(cfg.api_format));
+            let mut disconnected_at: Option<time::Instant> = None;
+            let mut read_deadline = time::Instant::now() + cfg.read_timeout;
+            loop {
+                let deadline = disconnected_at
+                    .map(|at| (at + crate::response_events::DISCONNECT_GRACE).min(read_deadline))
+                    .unwrap_or(read_deadline);
+                let frame = tokio::select! {
+                    biased;
+                    _ = sender.closed(), if disconnected_at.is_none() => {
+                        disconnected_at = Some(time::Instant::now());
+                        cfg.client_duration_ms = Some(cfg.start.elapsed().as_millis() as i64);
+                        if sse.as_ref().is_some_and(|parser| parser.observation.terminal) {
+                            break;
+                        }
+                        continue;
                     }
-
-                    if let Some(parser) = this.sse.as_mut().as_mut() {
-                        let out = parser.push_bytes(data);
-                        if out.saw_first_token && this.first_token_ms.is_none() {
-                            *this.first_token_ms =
-                                Some(this.cfg.start.elapsed().as_millis() as i64);
+                    result = time::timeout_at(deadline, inner.frame()) => result,
+                };
+                match frame {
+                    Ok(Some(Ok(frame))) => {
+                        read_deadline = time::Instant::now() + cfg.read_timeout;
+                        if let Some(data) = frame.data_ref() {
+                            first_byte_ms
+                                .get_or_insert_with(|| cfg.start.elapsed().as_millis() as i64);
+                            if let Some(parser) = sse.as_mut() {
+                                let out = parser.push_bytes(data);
+                                if out.saw_first_token {
+                                    first_token_ms.get_or_insert_with(|| {
+                                        cfg.start.elapsed().as_millis() as i64
+                                    });
+                                }
+                                if out.saw_error_event {
+                                    error_type = Some("upstream_stream_error".into());
+                                    error_message = Some("upstream returned a failed, incomplete or cancelled response".into());
+                                }
+                            } else {
+                                capture.push(data);
+                            }
                         }
-                        if let Some(u) = out.usage {
-                            *this.usage = u;
-                            *this.usage_observed = true;
+                        if disconnected_at.is_none() && sender.send(Ok(frame)).await.is_err() {
+                            disconnected_at = Some(time::Instant::now());
+                            cfg.client_duration_ms = Some(cfg.start.elapsed().as_millis() as i64);
                         }
-                        if out.saw_error_event {
-                            *this.error_type = Some("upstream_stream_error".to_string());
-                            *this.error_message =
-                                Some("upstream stream failed before completion".to_string());
+                        if sse
+                            .as_ref()
+                            .is_some_and(|parser| parser.observation.terminal)
+                            && disconnected_at.is_some()
+                        {
+                            break;
                         }
-                    } else {
-                        this.capture.push(data);
+                    }
+                    Ok(None) => break,
+                    Ok(Some(Err(error))) => {
+                        error_type = Some("upstream_body_error".into());
+                        error_message = Some(error.to_string());
+                        let _ = sender
+                            .send(Err(std::io::Error::other(error.to_string())))
+                            .await;
+                        break;
+                    }
+                    Err(_) => {
+                        error_type = Some("upstream_timeout".into());
+                        error_message = Some("upstream body read deadline exceeded".into());
+                        let _ = sender
+                            .send(Err(std::io::Error::other(
+                                "upstream body read deadline exceeded",
+                            )))
+                            .await;
+                        break;
                     }
                 }
-                Poll::Ready(Some(Ok(frame)))
             }
-            Poll::Ready(Some(Err(e))) => {
-                *this.error_type = Some("upstream_body_error".to_string());
-                *this.error_message = Some(e.to_string());
-                finalize_tap(
-                    this.cfg,
-                    this.telemetry_permit,
-                    this.reservation,
-                    this.finalized,
-                    TapFinalizeInputs {
-                        first_byte_ms: *this.first_byte_ms,
-                        first_token_ms: *this.first_token_ms,
-                        usage: this.usage,
-                        usage_observed: this.usage_observed,
-                        error_type: this.error_type,
-                        error_message: this.error_message,
-                        capture: this.capture,
-                    },
-                );
-                Poll::Ready(Some(Err(e)))
+            if let Some(parser) = sse.as_mut() {
+                let out = parser.finish();
+                if out.saw_error_event {
+                    error_type = Some("upstream_stream_error".into());
+                    error_message =
+                        Some("upstream returned a failed, incomplete or cancelled response".into());
+                }
+                if let Some(observed) = parser.observation.usage {
+                    usage = observed;
+                    usage_observed = true;
+                }
+                cfg.service_tier = parser.observation.service_tier.clone();
+                if let Some((status, kind, message)) = &parser.terminal_result {
+                    cfg.http_status = Some(status.as_u16() as i32);
+                    error_type = kind.clone();
+                    error_message = message.clone();
+                    cfg.terminal_observed = true;
+                }
+                if let Some(reason) = &parser.decoder.error {
+                    cfg.routing_trace
+                        .lock()
+                        .attempts
+                        .push(serde_json::json!({"parsing_error": reason}));
+                }
+            } else if let Ok(value) = serde_json::from_slice::<Value>(&capture.to_vec()) {
+                cfg.service_tier = crate::response_events::service_tier(&value);
+                if cfg.api_format == "responses"
+                    && crate::response_events::is_terminal_response_event(&value)
+                {
+                    let (status, kind, message) = crate::response_events::terminal_status(&value);
+                    cfg.http_status = Some(status.as_u16() as i32);
+                    error_type = kind;
+                    error_message = message;
+                    cfg.terminal_observed = true;
+                }
             }
-        }
+            if disconnected_at.is_some() {
+                error_type = Some("client_disconnected".into());
+                error_message =
+                    Some("client disconnected; upstream metering collection finished".into());
+            }
+            finalize_tap(
+                &cfg,
+                &mut telemetry_permit,
+                &mut reservation,
+                &mut false,
+                TapFinalizeInputs {
+                    first_byte_ms,
+                    first_token_ms,
+                    usage: &mut usage,
+                    usage_observed: &mut usage_observed,
+                    error_type: &error_type,
+                    error_message: &error_message,
+                    capture: &capture,
+                },
+            );
+        });
+        Self { receiver }
     }
-
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
+}
+impl hyper::body::Body for ProxyTapBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        self.receiver.poll_recv(cx)
     }
 }
 
@@ -3522,7 +3630,12 @@ fn finalize_tap(
 
     let pricing = evaluate_price(inputs.usage, *inputs.usage_observed, cfg.price.as_ref());
     let now_ms = util::now_ms();
-    let origin = if inputs.error_type.is_some() {
+    let disconnected = inputs.error_type.as_deref() == Some("client_disconnected");
+    let origin = if disconnected {
+        OutcomeOrigin::Gateway
+    } else if cfg.terminal_observed {
+        OutcomeOrigin::UpstreamEvent
+    } else if inputs.error_type.is_some() {
         OutcomeOrigin::LocalTransport
     } else {
         OutcomeOrigin::UpstreamResponse
@@ -3581,17 +3694,21 @@ fn finalize_tap(
         .or_else(|| Some(cfg.start.elapsed().as_millis() as i64));
     if let Some(reservation) = reservation.take() {
         let mut reservation = reservation;
-        reservation.finish_with_scope(
-            AttemptOutcome {
-                status: cfg.http_status,
-                origin,
-                error_type: error_type.as_deref(),
-                error_message: error_message.as_deref(),
-                observed_latency_ms,
-            },
-            scope,
-            &cfg.metrics,
-        );
+        if disconnected {
+            reservation.neutral();
+        } else {
+            reservation.finish_with_scope(
+                AttemptOutcome {
+                    status: cfg.http_status,
+                    origin,
+                    error_type: error_type.as_deref(),
+                    error_message: error_message.as_deref(),
+                    observed_latency_ms,
+                },
+                scope,
+                &cfg.metrics,
+            );
+        }
     }
     if scope == FailureScope::Success {
         if let (Some(identity), Some(binding)) =
@@ -3634,7 +3751,9 @@ fn finalize_tap(
             std::time::Duration::from_millis(cfg.provider.circuit_breaker_open_ms.max(1) as u64),
         );
     }
-    let duration_ms = Some(cfg.start.elapsed().as_millis() as i64);
+    let duration_ms = cfg
+        .client_duration_ms
+        .or_else(|| Some(cfg.start.elapsed().as_millis() as i64));
     {
         let mut trace = cfg.routing_trace.lock();
         if trace.attempts.len() < 40 {
@@ -3682,7 +3801,7 @@ fn finalize_tap(
         t_stream_ms: cfg.t_stream_ms,
         t_first_byte_ms: inputs.first_byte_ms,
         t_first_token_ms: inputs.first_token_ms,
-        duration_ms: Some(cfg.start.elapsed().as_millis() as i64),
+        duration_ms,
         usage: *inputs.usage,
         usage_observed: *inputs.usage_observed,
         price_version_id: cfg.price.as_ref().map(|price| price.id),
@@ -3692,6 +3811,9 @@ fn finalize_tap(
         transport: "http",
         parent_id: None,
         ws_session_id: None,
+        requested_service_tier: cfg.requested_service_tier.clone(),
+        upstream_service_tier: cfg.upstream_service_tier.clone(),
+        service_tier: cfg.service_tier.clone(),
         routing_trace: Some(routing_trace_value(&cfg.routing_trace)),
     };
 
@@ -3966,125 +4088,62 @@ struct SsePushOut {
 
 struct SseParser {
     api_format: &'static str,
-    buf: BytesMut,
-    event: Option<String>,
-    done_usage: bool,
+    decoder: crate::response_events::SseDecoder,
+    observation: crate::response_events::Observation,
     done_first_token: bool,
+    terminal_result: Option<(StatusCode, Option<String>, Option<String>)>,
 }
-
 impl SseParser {
     fn new(api_format: &'static str) -> Self {
         Self {
             api_format,
-            buf: BytesMut::with_capacity(8 * 1024),
-            event: None,
-            done_usage: false,
+            decoder: Default::default(),
+            observation: Default::default(),
             done_first_token: false,
+            terminal_result: None,
         }
     }
-
     fn push_bytes(&mut self, data: &Bytes) -> SsePushOut {
+        let events = self.decoder.push_bytes(data);
+        self.observe(events)
+    }
+    fn non_retryable_terminal(&self) -> bool {
+        self.terminal_result
+            .as_ref()
+            .is_some_and(|(status, _, _)| !should_retry_response_status(status.as_u16() as i32))
+    }
+    fn finish(&mut self) -> SsePushOut {
+        let events = self.decoder.finish();
+        self.observe(events)
+    }
+    fn observe(&mut self, events: Vec<Value>) -> SsePushOut {
         let mut out = SsePushOut::default();
-        if self.done_usage && self.done_first_token {
-            return out;
-        }
-
-        self.buf.extend_from_slice(data);
-
-        while let Some(pos) = memchr(b'\n', &self.buf) {
-            let mut line = self.buf.split_to(pos + 1);
-            if line.ends_with(b"\n") {
-                line.truncate(line.len() - 1);
-            }
-            if line.ends_with(b"\r") {
-                line.truncate(line.len() - 1);
-            }
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Some(after) = line.strip_prefix(b"event: ") {
-                self.event = Some(String::from_utf8_lossy(after).trim().to_string());
-                continue;
-            }
-
-            if let Some(after) = line
-                .strip_prefix(b"data: ")
-                .or_else(|| line.strip_prefix(b"data:"))
+        for value in events {
+            self.observation.observe(&value);
+            let event_type = value.get("type").and_then(Value::as_str);
+            let failed = if crate::response_events::is_terminal_response_event(&value) {
+                let result = crate::response_events::terminal_status(&value);
+                let failed = result.1.is_some();
+                self.terminal_result = Some(result);
+                failed
+            } else {
+                event_type.is_some_and(|kind| {
+                    kind == "error" || kind.ends_with(".error") || kind.ends_with("_error")
+                }) || value.get("error").is_some_and(|error| !error.is_null())
+            };
+            out.saw_error_event |= failed;
+            out.saw_valid_event |= !failed;
+            if !self.done_first_token
+                && ((self.api_format == "chat_completions" && chat_has_output_delta(&value))
+                    || (self.api_format == "responses"
+                        && event_type.is_some_and(|kind| kind.ends_with(".delta"))
+                        && responses_has_delta(&value)))
             {
-                if after == b"[DONE]" {
-                    continue;
-                }
-
-                if self.done_usage && self.done_first_token {
-                    continue;
-                }
-
-                let Ok(v) = serde_json::from_slice::<Value>(after) else {
-                    continue;
-                };
-                let event_type = self
-                    .event
-                    .as_deref()
-                    .or_else(|| v.get("type").and_then(Value::as_str));
-                if event_type.is_some_and(|value| {
-                    value == "error"
-                        || value.ends_with(".error")
-                        || value.ends_with(".failed")
-                        || value.ends_with("_error")
-                }) || v.get("error").is_some_and(|error| !error.is_null())
-                {
-                    out.saw_error_event = true;
-                    continue;
-                }
-                out.saw_valid_event = true;
-
-                if !self.done_first_token {
-                    if self.api_format == "chat_completions" && chat_has_output_delta(&v) {
-                        out.saw_first_token = true;
-                        self.done_first_token = true;
-                    } else if self.api_format == "responses"
-                        && let Some(ev) = self.event.as_deref()
-                        && ev.ends_with(".delta")
-                        && responses_has_delta(&v)
-                    {
-                        out.saw_first_token = true;
-                        self.done_first_token = true;
-                    }
-                }
-
-                if !self.done_usage {
-                    let usage = if self.api_format == "chat_completions" {
-                        v.get("usage").and_then(parse_chat_usage)
-                    } else if self.api_format == "responses" {
-                        if self.event.as_deref() == Some("response.completed") {
-                            v.get("response")
-                                .and_then(|r| r.get("usage"))
-                                .and_then(parse_responses_usage)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-
-                    if let Some(u) = usage {
-                        out.usage = Some(u);
-                        self.done_usage = true;
-                    }
-                }
+                self.done_first_token = true;
+                out.saw_first_token = true;
             }
         }
-
-        // Cap buffer to avoid unbounded growth.
-        const MAX_BUF: usize = 128 * 1024;
-        if self.buf.len() > MAX_BUF {
-            let keep = MAX_BUF / 2;
-            let start = self.buf.len().saturating_sub(keep);
-            let tail = self.buf.split_off(start);
-            self.buf = tail;
-        }
-
+        out.usage = self.observation.usage;
         out
     }
 }
@@ -4092,74 +4151,16 @@ impl SseParser {
 fn extract_usage(api_format: &'static str, root: &Value) -> Option<Usage> {
     match api_format {
         "chat_completions" => root.get("usage").and_then(parse_chat_usage),
-        "responses" => root.get("usage").and_then(parse_responses_usage),
+        "responses" => crate::response_events::event_usage(root),
         _ => None,
     }
 }
 
-fn parse_chat_usage(v: &Value) -> Option<Usage> {
-    let prompt = v.get("prompt_tokens")?.as_i64()?;
-    let completion = v.get("completion_tokens")?.as_i64()?;
-    let cached = v
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|x| x.as_i64())
-        .or_else(|| v.get("cached_tokens").and_then(Value::as_i64))
-        .unwrap_or(0);
-    let cache_created = v
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cache_creation_tokens"))
-        .and_then(|x| x.as_i64())
-        .or_else(|| {
-            v.get("prompt_tokens_details")
-                .and_then(|details| details.get("cache_write_tokens"))
-                .and_then(Value::as_i64)
-        })
-        .or_else(|| v.get("cache_creation_tokens").and_then(Value::as_i64))
-        .or_else(|| v.get("cached_creation_tokens").and_then(Value::as_i64))
-        .or_else(|| v.get("cache_write_tokens").and_then(Value::as_i64))
-        .unwrap_or(0);
-    let reasoning = v
-        .get("completion_tokens_details")
-        .and_then(|d| d.get("reasoning_tokens"))
-        .and_then(|x| x.as_i64())
-        .unwrap_or(0);
-
-    Some(Usage {
-        input_tokens: (prompt - cached - cache_created).max(0),
-        output_tokens: completion.max(0),
-        cache_read_input_tokens: cached.max(0),
-        cache_creation_input_tokens: cache_created.max(0),
-        reasoning_output_tokens: reasoning.max(0),
-    })
+fn parse_chat_usage(value: &Value) -> Option<Usage> {
+    crate::response_events::parse_usage(value)
 }
-
-pub(crate) fn parse_responses_usage(v: &Value) -> Option<Usage> {
-    let input = v.get("input_tokens")?.as_i64()?;
-    let output = v.get("output_tokens")?.as_i64()?;
-    let cached = v
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|x| x.as_i64())
-        .unwrap_or(0);
-    let cache_created = v
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cache_creation_tokens"))
-        .and_then(|x| x.as_i64())
-        .unwrap_or(0);
-    let reasoning = v
-        .get("output_tokens_details")
-        .and_then(|d| d.get("reasoning_tokens"))
-        .and_then(|x| x.as_i64())
-        .unwrap_or(0);
-
-    Some(Usage {
-        input_tokens: (input - cached - cache_created).max(0),
-        output_tokens: output.max(0),
-        cache_read_input_tokens: cached.max(0),
-        cache_creation_input_tokens: cache_created.max(0),
-        reasoning_output_tokens: reasoning.max(0),
-    })
+pub(crate) fn parse_responses_usage(value: &Value) -> Option<Usage> {
+    crate::response_events::parse_usage(value)
 }
 
 fn chat_has_output_delta(v: &Value) -> bool {
@@ -4199,6 +4200,31 @@ pub(crate) fn responses_has_delta(v: &Value) -> bool {
         .and_then(|x| x.as_str())
         .map(|s| !s.is_empty())
         .unwrap_or(false)
+}
+
+/// Revalidate an existing WebSocket target without touching concurrency or request quotas.
+pub(crate) fn ws_target_still_routed(
+    snap: &UpstreamSnapshot,
+    api_key: &ApiKeyAuth,
+    model: &str,
+    provider_id: i64,
+    upstream_model: &str,
+) -> bool {
+    let groups = api_key
+        .provider_groups
+        .iter()
+        .map(|group| group.id)
+        .collect::<HashSet<_>>();
+    provider_matching_groups(snap, provider_id, &groups)
+        .next()
+        .is_some()
+        && collect_provider_routes(snap, ApiFormat::Responses, model, false).is_ok_and(
+            |(routes, _)| {
+                routes.iter().any(|route| {
+                    route.provider.id == provider_id && route.upstream_model == upstream_model
+                })
+            },
+        )
 }
 
 #[cfg(test)]

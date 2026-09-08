@@ -112,6 +112,7 @@ function codexProviderWorkspace(): ProviderWorkspace {
       ...providerWorkspace().provider,
       id: 17,
       name: 'Codex Accounts',
+      routing_availability: { available: true, reason: null },
       provider_type: 'openai_codex_oauth',
       websocket_enabled: true,
       beta_features: ['responses-http-to-ws'],
@@ -129,6 +130,7 @@ function codexProviderWorkspace(): ProviderWorkspace {
       id: 172,
       provider_id: 17,
       name: 'Primary account',
+      routing_availability: { available: true, reason: null },
       enabled: true,
       priority: 100,
       weight: 1,
@@ -173,6 +175,7 @@ function codexProviderWorkspace(): ProviderWorkspace {
       id: 173,
       provider_id: 17,
       name: 'Secondary account',
+      routing_availability: { available: false, reason: 'account_disabled' },
       enabled: false,
       priority: 110,
       weight: 1,
@@ -857,8 +860,7 @@ describe('admin console smoke test', () => {
     expect(screen.queryByText(/select all/i)).toBeNull();
 
     // 多账号默认折叠：异常状态留在行内，明细要展开才出现
-    expect(screen.getByText('Forbidden')).toBeTruthy();
-    expect(screen.getByText('Disabled')).toBeTruthy();
+    expect(screen.getByText('Account disabled')).toBeTruthy();
     expect(screen.queryByText('Credits Balance')).toBeNull();
 
     const primaryToggle = screen.getByText('o***@example.com').closest('button') as HTMLElement;
@@ -881,6 +883,17 @@ describe('admin console smoke test', () => {
     fireEvent.click(within(secondaryRow).getByRole('button', { name: 'Account actions' }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Enable' }));
     await waitFor(() => expect(requests).toContain('PATCH /api/v1/keys/173'));
+
+    fireEvent.click(within(primaryRow).getByRole('button', { name: 'Account actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Model restrictions' }));
+    const modelsDialog = await screen.findByRole('dialog', { name: /Model restrictions/ });
+    expect(await within(modelsDialog).findByText('No model restrictions configured')).toBeTruthy();
+    expect(within(modelsDialog).getByText(/Deleting all entries removes the restriction/)).toBeTruthy();
+    fireEvent.change(within(modelsDialog).getByRole('textbox'), { target: { value: 'gpt-6-astra' } });
+    fireEvent.click(within(modelsDialog).getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(requests).toContain('POST /api/v1/keys/172/models'));
+    fireEvent.click(within(modelsDialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /Model restrictions/ })).toBeNull());
 
     // 删除走应用内确认框，不再是原生 window.confirm
     fireEvent.click(within(primaryRow).getByRole('button', { name: 'Account actions' }));

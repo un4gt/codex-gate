@@ -126,7 +126,10 @@ impl UpstreamSnapshot {
 
     pub fn key_allows_model(&self, key_id: i64, upstream_model: &str) -> bool {
         match self.key_models_by_key.get(&key_id) {
-            Some(models) => models.get(upstream_model).copied().unwrap_or(false),
+            Some(models) if !models.is_empty() => {
+                models.get(upstream_model).copied().unwrap_or(false)
+            }
+            Some(_) => true,
             None => true,
         }
     }

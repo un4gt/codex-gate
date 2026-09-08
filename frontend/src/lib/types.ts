@@ -1,3 +1,8 @@
+export interface RoutingAvailability {
+  available: boolean;
+  reason: string | null;
+}
+
 export interface StatsDailyRow {
   date: string;
   api_key_id: number;
@@ -41,6 +46,9 @@ export interface RequestLogRow {
   transport: 'http' | 'ws' | 'ws_native' | 'ws_http_bridge' | 'ws_setup' | string;
   parent_id: string | null;
   ws_session_id: string | null;
+  requested_service_tier?: string | null;
+  upstream_service_tier?: string | null;
+  service_tier?: string | null;
   routing_trace: RoutingTrace | null;
   created_at_ms: number;
 }
@@ -438,6 +446,7 @@ export interface RequestOverrides {
 }
 
 export interface ProviderSummary {
+  routing_availability?: RoutingAvailability;
   id: number;
   name: string;
   provider_type: string;
@@ -494,6 +503,7 @@ export interface UpstreamEndpointSummary {
 }
 
 export interface UpstreamKeyMeta {
+  routing_availability?: RoutingAvailability;
   id: number;
   provider_id: number;
   name: string;

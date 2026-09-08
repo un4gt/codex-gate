@@ -148,3 +148,41 @@ Docker 宿主机端口冲突时，可以删除这一行后重新启动：
 ### 登录成功但额度或模型同步出现警告
 
 凭据保存成功后，额度刷新和模型同步失败会作为 warning 显示，不会回滚已登录账号。可以在 OAuth 账号列表中重新刷新额度，或在 Provider 页面重新同步模型。
+
+## 模型限制与路由状态
+
+在 OAuth 账户的“账号操作 → 模型限制”中管理账户白名单。OAuth 页面与上游详情共用同一组件和密钥模型 API；未配置条目时允许所有符合上游规则的模型，配置后仅允许列表中启用的模型。**删除全部条目会恢复不限**，禁用全部条目则不允许任何模型。限制匹配别名路由解析后的真实模型名。
+
+同步保留已有条目的启停状态，新发现的模型默认启用。重新登录同一账户保留名称、启用开关、调度权重、优先级及模型限制。模型发现继续使用上游模型接口；事件兼容与模型名称无关。
+
+上游列表及账户 API 返回 `routing_availability: { available, reason }`。该状态综合上游开关、账户开关、OAuth 授权、额度、模型限制、连接目标和运行时容量。全部账户不可路由时显示“无可用账户”，具体原因见账户行；这不会自动关闭上游总开关。手动关闭上游显示“上游已禁用”，重新启用有效账户后恢复可用。
+
+配置修改对新 HTTP 请求和既有 WebSocket 的下一轮 `response.create` 生效。复用连接每轮刷新账户、模型、上游配置，并复核别名与授权；原目标失效时返回 `upstream_target_changed` 并关闭连接，客户端需要重连。原生 WebSocket 复用已有并发槽位。已经开始输出的请求允许完成。
+
+## 用量与客户端断开
+
+HTTP SSE、Responses JSON、OAuth SSE 转 JSON、原生 WebSocket 及 HTTP 桥接共用 Responses 事件和用量解析逻辑。支持 `response.completed`、`response.done`、`response.failed`、`response.incomplete`、`response.cancelled`/`response.canceled`；终态结果同时参考响应的 `status`。JSON `type` 优先于当前 SSE 帧的 `event:`。
+
+解析支持仅有 `data:` 的事件、跨分块、多行 data、CRLF 和末尾没有空行的帧。单个完整 SSE 帧解析上限为 4 MiB，超过时跳过该帧并记录解析原因，HTTP 原始数据继续透传。首事件预读达到 `UPSTREAM_FIRST_EVENT_MAX_BYTES` 后交给计量读取任务继续转发，不因预读缓冲阈值拒绝大事件。JSON 计量至少保留 4 MiB 的有界窗口，超过窗口仍使用原有首尾用量捕获兜底。
+
+用量读取 `response.usage` 或顶层 `usage`，支持 Responses 和 Chat Completions 的输入、输出、缓存及推理字段别名。有效终态用量优先，重复事件不累加；没有终态用量时保留之前有效观测。输入或输出 token 缺失时不推算消耗：`usage_observed=false` 表示未返回完整有效用量，真实零用量为 `usage_observed=true` 且计数为零。
+
+客户端断开后，网关继续读取上游最多 **30 秒**，收到终态、上游关闭或更早的读取超时即结束。HTTP 使用独立读取任务和有界通道；WebSocket 独立观察客户端断开。日志记为 `client_disconnected`，耗时停在客户端断开时，后续收集到的用量仍结算。断开不触发上游重试，也不计为上游健康故障；日志及配额只结算一次。
+
+## Fast / Standard 档位日志
+
+OAuth 请求中的 `service_tier: "fast"` 和 `"priority"` 均转换为 `"priority"`，HTTP 和 WebSocket 行为一致。普通 OpenAI 上游继续按照既有规则透传及应用参数覆盖。
+
+请求日志、管理 API 和 JSONL 归档包含三个可空字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `requested_service_tier` | 客户端原始请求档位 |
+| `upstream_service_tier` | 转换和上游覆盖后实际发送的档位 |
+| `service_tier` | 上游实际返回的档位 |
+
+返回 `fast` 或 `priority` 显示 **Fast**，返回 `default` 显示 **Standard**，其他返回值原样显示。未返回实际档位时显示“未确认”。[OpenAI Fast mode 文档](https://developers.openai.com/api/docs/guides/fast-mode#rate-limits-and-ramp-rate)明确说明，Fast 请求可能降至 Standard 并返回 `service_tier: "default"`，所以不能用请求档位代替实际档位。
+
+SQLite 和 PostgreSQL 启动时幂等添加这些字段，历史行保持空值。默认日志布局增加“服务档位”，已经保存的自定义列及列顺序保持不变，日志详情始终展示三个字段。本次仅记录档位，不引入差异化计费规则。没有原始响应的历史请求保持原用量状态，不追溯推算。
+
+离线回归可运行 `python3 scripts/run_oauth_metering_regression.py`，使用临时数据库和本地 HTTP/WebSocket 模拟上游，覆盖 `gpt-6-astra`、失败终态、白名单、档位、断连计量及 30 秒截止时间；不会调用真实 OAuth 服务。常规路由及归档回归仍为 `python3 scripts/run_regression.py --archive-compress`。
