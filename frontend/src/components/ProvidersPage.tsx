@@ -1,3 +1,4 @@
+import { Link, useSearchParams } from 'react-router';
 import { UpstreamKeyModels } from './UpstreamKeyModels';
 import { routingAvailabilityLabel } from '@/lib/routingAvailability';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
@@ -47,6 +48,7 @@ import Typography from "@mui/material/Typography";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import { useTheme } from "@mui/material/styles";
 interface ProvidersPageProps {
+  loading?: boolean;
   settings: ConnectionSettings;
   items: ProviderWorkspace[];
   groups?: ProviderGroup[];
@@ -156,7 +158,14 @@ export function ProvidersPage(props: ProvidersPageProps) {
     attemptId: number;
   } | null>(null);
   const createdCodexLoginSequenceRef = useRef(0);
-  const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedProviderId = searchParams.has('provider_id') ? Number(searchParams.get('provider_id')) : null;
+  const setSelectedProviderId = (id: number | null) => setSearchParams(current => {
+    const next = new URLSearchParams(current);
+    if (id === null) next.delete('provider_id');
+    else next.set('provider_id', String(id));
+    return next;
+  }, { replace: id === null });
   const [providerTypeDraft, setProviderTypeDraft] = useState('');
   const [providerPriorityDraft, setProviderPriorityDraft] = useState('');
   const [providerWeightDraft, setProviderWeightDraft] = useState('');
@@ -1433,6 +1442,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         </Box>
       </DetailDrawer>
 
+      {selectedProviderId !== null && !selected && !props.loading ? <Alert severity="warning" action={<Button onClick={() => setSelectedProviderId(null)}>{t('关闭')}</Button>}>{t('未找到该上游。')}</Alert> : null}
       <DetailDrawer open={!!selected} title={selected?.provider.name ?? '上游详情'} description={selected ? '连接目标、健康状态与编辑入口。' : undefined} onClose={() => {
       setSelectedProviderId(null);
       setTestResult(null);
@@ -1791,8 +1801,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
                           {t('同步模型')}
                         </Button>
                         <Button
-                          component="a"
-                          href={`/models?provider_id=${item.provider.id}`}
+                          component={Link}
+                          to={`/models?provider_id=${item.provider.id}`}
                           size="sm"
                           disabled={!isLive()}
                           className="text-xs tracking-wider"

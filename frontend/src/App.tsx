@@ -17,21 +17,22 @@ import { OAuthPage } from '@/components/OAuthPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
-import { ApiRequestError, loadApiKeyWorkspace, loadPrices, loadModelAliases, loadProviderGroups, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
+import { ApiRequestError, subscribeAuthenticationFailures, loadApiKeyWorkspace, loadProviderGroups, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
 import { formatBytes, formatCommitShort, formatCompactInteger, formatMs, formatVersionLabel } from '@/lib/format';
 import { calculateOverviewPricing, formatUsd } from '@/lib/pricing';
-import type { ApiKeyWorkspace, ConnectionSettings, ModelPrice, ModelAlias, ProviderGroup, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingsResponse, StatsOverviewResponse, StatsPeriod, SystemConfigResponse } from '@/lib/types';
+import type { ApiKeyWorkspace, ConnectionSettings, ProviderGroup, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingsResponse, StatsOverviewResponse, StatsPeriod, SystemConfigResponse } from '@/lib/types';
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
+import CircularProgress from '@mui/material/CircularProgress';
 import InputBase from "@mui/material/InputBase";
 import Typography from "@mui/material/Typography";
 import useMediaQuery from '@mui/material/useMediaQuery';
 type LoadState = 'idle' | 'loading' | 'ready';
-type ConsoleMode = 'connect' | 'console';
+type ConsoleMode = 'connect' | 'checking' | 'console' | 'error';
 type ConnectionIssue = 'apiBase' | 'adminToken' | 'general' | null;
 interface ConnectionFailure {
   issue: Exclude<ConnectionIssue, null>;
@@ -40,10 +41,9 @@ interface ConnectionFailure {
 interface AppDataContext {
   settings: ConnectionSettings;
   providers: ProviderWorkspace[];
-  modelAliases: ModelAlias[];
+  providersLoaded: boolean;
   providerGroups: ProviderGroup[];
   apiKeys: ApiKeyWorkspace[];
-  prices: ModelPrice[];
   systemConfig: SystemConfigResponse | null;
   runtimeSettings: RuntimeSettingsResponse | null;
   runtimeEnvPreview: RuntimeEnvPreviewResponse | null;
@@ -53,9 +53,8 @@ interface AppDataContext {
   message: string;
   refreshKey: number;
   loadProviders: (successMessage?: string) => Promise<void>;
-  loadModelAliases: (successMessage?: string) => Promise<void>;
   loadApiKeys: (successMessage?: string) => Promise<void>;
-  loadPricesAndConfig: (successMessage?: string) => Promise<void>;
+  loadSettings: (successMessage?: string) => Promise<void>;
   onApiBaseChange: (value: string) => void;
   onAdminTokenChange: (value: string) => void;
   onRefresh: (successMessage?: string) => Promise<void>;
@@ -350,7 +349,7 @@ function pageDescription(pathname: string) {
   if (pathname.startsWith('/overview')) return '查看请求、用量与响应表现。';
   if (pathname.startsWith('/keys')) return '创建和管理访问密钥。';
   if (pathname.startsWith('/logs')) return '筛选并排查最近请求。';
-  if (pathname.startsWith('/models')) return '管理模型库存、别名与协议能力。';
+  if (pathname.startsWith('/models')) return '管理模型库存、路由别名与价格。';
   if (pathname.startsWith('/upstreams')) return '查看连接目标与健康状态。';
   if (pathname.startsWith('/oauth')) return '登录并管理 OpenAI Codex OAuth 账号。';
   if (pathname.startsWith('/notifications')) return '配置定时报表、阈值告警与投递通道。';
@@ -806,12 +805,10 @@ function UpstreamsPage(props: {
   data: AppDataContext;
 }) {
   useEffect(() => {
-    if (props.data.providers.length === 0) {
-      void props.data.loadProviders();
-    }
-  }, [props.data.loadProviders, props.data.providers.length]);
+    if (!props.data.providersLoaded) void props.data.loadProviders();
+  }, [props.data.loadProviders]);
   return <Box className="section-stack">
-      <ProvidersPage settings={props.data.settings} items={props.data.providers} groups={props.data.providerGroups} onRefresh={props.data.loadProviders} onMessage={props.data.onMessage} />
+      <ProvidersPage loading={!props.data.providersLoaded} settings={props.data.settings} items={props.data.providers} groups={props.data.providerGroups} onRefresh={props.data.loadProviders} onMessage={props.data.onMessage} />
     </Box>;
 }
 function OAuthRoutePage(props: {
@@ -851,33 +848,13 @@ function LogsRoutePage(props: {
   }, [props.data.apiKeys.length, props.data.loadApiKeys, props.data.loadProviders, props.data.providers.length]);
   return <LogsPage settings={props.data.settings} providers={props.data.providers} apiKeys={props.data.apiKeys} refreshKey={props.data.refreshKey} onMessage={props.data.onMessage} />;
 }
-function ModelsRoutePage(props: {
-  data: AppDataContext;
-}) {
-  useEffect(() => {
-    const tasks: Promise<void>[] = [];
-    if (props.data.providers.length === 0) tasks.push(props.data.loadProviders());
-    if (props.data.modelAliases.length === 0) tasks.push(props.data.loadModelAliases());
-    if (tasks.length > 0) void Promise.all(tasks);
-  }, [props.data.loadModelAliases, props.data.loadProviders, props.data.modelAliases.length, props.data.providers.length]);
-  return <ModelsPage
-    settings={props.data.settings}
-    providers={props.data.providers}
-    aliases={props.data.modelAliases}
-    onAliasesRefresh={props.data.loadModelAliases}
-    onMessage={props.data.onMessage}
-  />;
+function ModelsRoutePage({ data }: { data: AppDataContext }) {
+  useEffect(() => { if (!data.providersLoaded) void data.loadProviders(); }, [data.loadProviders]);
+  return <ModelsPage settings={data.settings} providers={data.providers} refreshKey={data.refreshKey} onMessage={data.onMessage} />;
 }
-function SettingsRoutePage(props: {
-  data: AppDataContext;
-}) {
-  useEffect(() => {
-    void props.data.loadPricesAndConfig();
-    if (props.data.providers.length === 0) {
-      void props.data.loadProviders();
-    }
-  }, [props.data.loadPricesAndConfig, props.data.loadProviders, props.data.providers.length]);
-  return <SettingsPage settings={props.data.settings} systemConfig={props.data.systemConfig} runtimeSettings={props.data.runtimeSettings} runtimeEnvPreview={props.data.runtimeEnvPreview} prices={props.data.prices} providers={props.data.providers} onApiBaseChange={props.data.onApiBaseChange} onAdminTokenChange={props.data.onAdminTokenChange} onRefresh={props.data.loadPricesAndConfig} onMessage={props.data.onMessage} />;
+function SettingsRoutePage({ data }: { data: AppDataContext }) {
+  useEffect(() => { void data.loadSettings(); }, [data.loadSettings]);
+  return <SettingsPage settings={data.settings} systemConfig={data.systemConfig} runtimeSettings={data.runtimeSettings} runtimeEnvPreview={data.runtimeEnvPreview} onApiBaseChange={data.onApiBaseChange} onAdminTokenChange={data.onAdminTokenChange} onRefresh={data.loadSettings} onMessage={data.onMessage} />;
 }
 function NotificationsRoutePage(props: {
   data: AppDataContext;
@@ -890,14 +867,13 @@ function NotificationsRoutePage(props: {
   }, [props.data.apiKeys.length, props.data.loadApiKeys, props.data.loadProviders, props.data.providers.length]);
   return <NotificationsPage settings={props.data.settings} providers={props.data.providers} apiKeys={props.data.apiKeys} onMessage={props.data.onMessage} />;
 }
-function Root() {
+function ConsoleRoot() {
   useI18n();
   const [settings, setSettings] = useState<ConnectionSettings>(readSettings);
   const [providers, setProviders] = useState<ProviderWorkspace[]>([]);
-  const [modelAliases, setModelAliases] = useState<ModelAlias[]>([]);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
   const [providerGroups, setProviderGroups] = useState<ProviderGroup[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKeyWorkspace[]>([]);
-  const [prices, setPrices] = useState<ModelPrice[]>([]);
   const [systemConfig, setSystemConfig] = useState<SystemConfigResponse | null>(null);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettingsResponse | null>(null);
   const [runtimeEnvPreview, setRuntimeEnvPreview] = useState<RuntimeEnvPreviewResponse | null>(null);
@@ -905,65 +881,53 @@ function Root() {
   const [linkOk, setLinkOk] = useState(true);
   const [message, setMessage] = useState(t('未连接后台。'));
   const [refreshKey, setRefreshKey] = useState(0);
-  const [consoleMode, setConsoleMode] = useState<ConsoleMode>('connect');
+  const [consoleMode, setConsoleMode] = useState<ConsoleMode>(() => settings.adminToken.trim() ? 'checking' : 'connect');
   const [connectionIssue, setConnectionIssue] = useState<ConnectionIssue>(null);
+  const workspaceVersion = useRef(0);
+  const authVersion = useRef(0);
+  const authenticationRequest = useRef<{ settings: ConnectionSettings; promise: Promise<SystemConfigResponse> } | null>(null);
   const clearWorkspace = useCallback(() => {
+    workspaceVersion.current += 1;
     setProviders([]);
-    setModelAliases([]);
+    setProvidersLoaded(false);
     setProviderGroups([]);
     setApiKeys([]);
-    setPrices([]);
     setSystemConfig(null);
     setRuntimeSettings(null);
     setRuntimeEnvPreview(null);
   }, []);
   const loadProviders = useCallback(async (successMessage?: string) => {
     const current = settings;
+    const generation = workspaceVersion.current;
     if (!current.adminToken.trim()) {
       setProviders([]);
       return;
     }
     setStatus('loading');
+    setProvidersLoaded(false);
     try {
       const [providerWorkspace, groups] = await Promise.all([
         loadProviderWorkspace(current),
         loadProviderGroups(current),
       ]);
+      if (generation !== workspaceVersion.current) return;
       setProviders(providerWorkspace);
       setProviderGroups(groups);
       setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
+      if (generation !== workspaceVersion.current) return;
       setProviders([]);
       setProviderGroups([]);
       setLinkOk(false);
       setMessage(error instanceof Error ? error.message : '读取上游失败。');
     } finally {
-      setStatus('ready');
-    }
-  }, [settings]);
-  const loadModelAliasesForState = useCallback(async (successMessage?: string) => {
-    const current = settings;
-    if (!current.adminToken.trim()) {
-      setModelAliases([]);
-      return;
-    }
-    setStatus('loading');
-    try {
-      const aliases = await loadModelAliases(current);
-      setModelAliases(aliases);
-      setLinkOk(true);
-      if (successMessage) setMessage(t(successMessage));
-    } catch (error) {
-      setModelAliases([]);
-      setLinkOk(false);
-      setMessage(error instanceof Error ? error.message : '读取模型别名失败。');
-    } finally {
-      setStatus('ready');
+      if (generation === workspaceVersion.current) { setStatus('ready'); setProvidersLoaded(true); }
     }
   }, [settings]);
   const loadApiKeys = useCallback(async (successMessage?: string) => {
     const current = settings;
+    const generation = workspaceVersion.current;
     if (!current.adminToken.trim()) {
       setApiKeys([]);
       return;
@@ -974,23 +938,25 @@ function Root() {
         loadApiKeyWorkspace(current),
         loadProviderGroups(current),
       ]);
+      if (generation !== workspaceVersion.current) return;
       setApiKeys(apiKeyWorkspace);
       setProviderGroups(groups);
       setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
+      if (generation !== workspaceVersion.current) return;
       setApiKeys([]);
       setProviderGroups([]);
       setLinkOk(false);
       setMessage(error instanceof Error ? error.message : '读取密钥失败。');
     } finally {
-      setStatus('ready');
+      if (generation === workspaceVersion.current) setStatus('ready');
     }
   }, [settings]);
-  const loadPricesAndConfig = useCallback(async (successMessage?: string) => {
+  const loadSettings = useCallback(async (successMessage?: string) => {
     const current = settings;
+    const generation = workspaceVersion.current;
     if (!current.adminToken.trim()) {
-      setPrices([]);
       setSystemConfig(null);
       setRuntimeSettings(null);
       setRuntimeEnvPreview(null);
@@ -998,26 +964,28 @@ function Root() {
     }
     setStatus('loading');
     try {
-      const [priceItems, config, runtime, envPreview] = await Promise.all([loadPrices(current), loadSystemConfig(current).catch(() => null), loadRuntimeSettings(current).catch(() => null), previewRuntimeEnv(current).catch(() => null)]);
-      setPrices(priceItems);
+      const [config, runtime, envPreview] = await Promise.all([loadSystemConfig(current), loadRuntimeSettings(current), previewRuntimeEnv(current)]);
+      if (generation !== workspaceVersion.current) return;
       setSystemConfig(config);
       setRuntimeSettings(runtime);
       setRuntimeEnvPreview(envPreview);
       setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
-      setPrices([]);
+      if (generation !== workspaceVersion.current) return;
       setSystemConfig(null);
       setRuntimeSettings(null);
       setRuntimeEnvPreview(null);
       setLinkOk(false);
       setMessage(error instanceof Error ? error.message : '读取设置失败。');
     } finally {
-      setStatus('ready');
+      if (generation === workspaceVersion.current) setStatus('ready');
     }
   }, [settings]);
   const refreshData = useCallback(async (successMessage?: string) => {
     const current = settings;
+    const generation = ++authVersion.current;
+    if (consoleMode === 'error') setConsoleMode('checking');
     persistSettings(current);
     setStatus('loading');
     if (!current.adminToken.trim()) {
@@ -1031,8 +999,13 @@ function Root() {
     }
     setConnectionIssue(null);
     setMessage(t('正在验证管理员口令…'));
+    const request = authenticationRequest.current?.settings === current
+      ? authenticationRequest.current
+      : { settings: current, promise: loadSystemConfig(current) };
+    authenticationRequest.current = request;
     try {
-      const config = await loadSystemConfig(current);
+      const config = await request.promise;
+      if (generation !== authVersion.current) return;
       setSystemConfig(config);
       setRefreshKey(value => value + 1);
       setMessage(successMessage ? t(successMessage) : t('已连接。'));
@@ -1040,18 +1013,20 @@ function Root() {
       setLinkOk(true);
       setConsoleMode('console');
     } catch (error) {
-      console.error('Failed to load admin console data', error);
+      if (generation !== authVersion.current) return;
       clearWorkspace();
       const failure = describeConnectionFailure(error);
       setMessage(failure.message);
       setConnectionIssue(failure.issue);
       setLinkOk(false);
-      setConsoleMode('connect');
+      setConsoleMode(failure.issue === 'adminToken' ? 'connect' : 'error');
     } finally {
-      setStatus('ready');
+      if (authenticationRequest.current === request) authenticationRequest.current = null;
+      if (generation === authVersion.current) setStatus('ready');
     }
-  }, [clearWorkspace, settings]);
+  }, [clearWorkspace, consoleMode, settings]);
   const logout = useCallback(() => {
+    authVersion.current += 1;
     const nextSettings = {
       ...settings,
       adminToken: ''
@@ -1060,40 +1035,73 @@ function Root() {
     persistSettings(nextSettings);
     clearWorkspace();
     setMessage(t('已退出。'));
+    setStatus('ready');
     setConnectionIssue(null);
     setConsoleMode('connect');
     setRefreshKey(value => value + 1);
   }, [clearWorkspace, settings]);
   const clearConnectionFeedback = useCallback(() => {
     if (consoleMode !== 'connect') return;
+    setStatus('ready');
     setConnectionIssue(null);
     setMessage(t('未连接后台。'));
   }, [consoleMode]);
   const onApiBaseChange = useCallback((value: string) => {
+    authVersion.current += 1;
+    clearWorkspace();
     setSettings(current => ({
       ...current,
       apiBase: value
     }));
     clearConnectionFeedback();
-  }, [clearConnectionFeedback]);
+  }, [clearConnectionFeedback, clearWorkspace]);
   const onAdminTokenChange = useCallback((value: string) => {
+    authVersion.current += 1;
+    clearWorkspace();
     setSettings(current => ({
       ...current,
       adminToken: value
     }));
     clearConnectionFeedback();
-  }, [clearConnectionFeedback]);
+  }, [clearConnectionFeedback, clearWorkspace]);
   const onMessage = useCallback((nextMessage: string) => setMessage(t(nextMessage)), []);
   useEffect(() => {
+    if (consoleMode !== 'console') return;
+    let cancelled = false;
+    let verifying = false;
+    const invalidate = () => {
+      authVersion.current += 1;
+      clearWorkspace();
+      setConsoleMode('connect');
+      setConnectionIssue('adminToken');
+      setMessage(t('管理员口令不正确，请重新输入。'));
+      setLinkOk(false);
+      setStatus('ready');
+    };
+    const unsubscribe = subscribeAuthenticationFailures(failure => {
+      if (cancelled || failure.apiBase !== settings.apiBase.trim().replace(/\/$/, '') || failure.adminToken !== settings.adminToken.trim()) return;
+      if (failure.path === '/api/v1/system/config') { invalidate(); return; }
+      // Upstream probes can return 401 too; verify the admin session before expiring it.
+      if (verifying) return;
+      verifying = true;
+      const generation = authVersion.current;
+      void loadSystemConfig(settings).catch(error => {
+        if (!cancelled && generation === authVersion.current && error instanceof ApiRequestError && (error.status === 401 || error.status === 403)) invalidate();
+      }).finally(() => { verifying = false; });
+    });
+    return () => { cancelled = true; unsubscribe(); };
+  }, [clearWorkspace, consoleMode, settings]);
+
+  useEffect(() => {
     if (settings.adminToken.trim()) void refreshData();
+    return () => { authVersion.current += 1; workspaceVersion.current += 1; };
   }, []);
   const data = useMemo<AppDataContext>(() => ({
     settings,
     providers,
-    modelAliases,
+    providersLoaded,
     providerGroups,
     apiKeys,
-    prices,
     systemConfig,
     runtimeSettings,
     runtimeEnvPreview,
@@ -1102,9 +1110,8 @@ function Root() {
     message,
     refreshKey,
     loadProviders,
-    loadModelAliases: loadModelAliasesForState,
     loadApiKeys,
-    loadPricesAndConfig,
+    loadSettings,
     onApiBaseChange,
     onAdminTokenChange,
     onRefresh: refreshData,
@@ -1114,18 +1121,16 @@ function Root() {
     apiKeys,
     linkOk,
     loadApiKeys,
-    loadModelAliasesForState,
-    loadPricesAndConfig,
+    loadSettings,
     loadProviders,
     logout,
     message,
-    modelAliases,
     providerGroups,
     onAdminTokenChange,
     onApiBaseChange,
     onMessage,
-    prices,
     providers,
+    providersLoaded,
     refreshData,
     refreshKey,
     runtimeEnvPreview,
@@ -1134,8 +1139,16 @@ function Root() {
     status,
     systemConfig
   ]);
+  if (consoleMode === 'checking' || consoleMode === 'error') return <Box sx={{ minHeight: '100dvh', display: 'grid', placeItems: 'center', p: 3 }}>
+    <Box sx={{ display: 'grid', gap: 2, justifyItems: 'center', maxWidth: 480 }} role="status">
+      {consoleMode === 'checking' ? <><CircularProgress size={28} /><Typography>{t('正在恢复连接…')}</Typography></> : <>
+        <Alert severity="error">{message}</Alert>
+        <Button onClick={() => void refreshData()}>{t('重试')}</Button>
+        <Button variant="outline" onClick={() => setConsoleMode('connect')}>{t('修改连接')}</Button>
+      </>}
+    </Box>
+  </Box>;
   return consoleMode === 'console' ? (
-    <BrowserRouter>
       <TopShell data={data}>
         <Routes>
           <Route path="/" element={<Navigate to="/overview" replace />} />
@@ -1144,15 +1157,14 @@ function Root() {
           <Route path="/logs" element={<LogsRoutePage data={data} />} />
           <Route path="/upstreams" element={<UpstreamsPage data={data} />} />
           <Route path="/oauth" element={<OAuthRoutePage data={data} />} />
-          <Route path="/models" element={<ModelsRoutePage data={data} />} />
+          <Route path="/models/*" element={<ModelsRoutePage data={data} />} />
           <Route path="/notifications" element={<NotificationsRoutePage data={data} />} />
           <Route path="/settings" element={<SettingsRoutePage data={data} />} />
           <Route path="/usage" element={<Navigate to="/overview" replace />} />
-          <Route path="/prices" element={<Navigate to="/overview" replace />} />
+          <Route path="/prices" element={<LegacyPricesRedirect />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
       </TopShell>
-    </BrowserRouter>
   ) : (
     <ConnectionGate
       settings={settings}
@@ -1165,4 +1177,10 @@ function Root() {
     />
   );
 }
-export default Root;
+function LegacyPricesRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={`/models/prices${search}`} replace />;
+}
+export default function Root() {
+  return <BrowserRouter><ConsoleRoot /></BrowserRouter>;
+}

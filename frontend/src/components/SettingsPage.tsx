@@ -1,11 +1,11 @@
 import { useState, type FormEvent } from 'react';
 import { ChevronDown } from "lucide-react";
 import { StatusBadge } from '@/components/console/StatusBadge';
-import { PricesPage } from '@/components/PricesPage';
+import { Link } from 'react-router';
 import { t } from '@/lib/i18n';
 import { updateRuntimeSetting } from '../lib/api';
 import { formatBytes, formatCommitShort, formatMs, formatRoutingStrategy, formatVersionLabel } from '../lib/format';
-import type { ConnectionSettings, ModelPrice, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingView, RuntimeSettingsResponse, SystemConfigResponse } from '../lib/types';
+import type { ConnectionSettings, RuntimeEnvPreviewResponse, RuntimeSettingView, RuntimeSettingsResponse, SystemConfigResponse } from '../lib/types';
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -23,8 +23,6 @@ interface SettingsPageProps {
   systemConfig: SystemConfigResponse | null;
   runtimeSettings: RuntimeSettingsResponse | null;
   runtimeEnvPreview: RuntimeEnvPreviewResponse | null;
-  prices: ModelPrice[];
-  providers: ProviderWorkspace[];
   onApiBaseChange: (value: string) => void;
   onAdminTokenChange: (value: string) => void;
   onRefresh: (successMessage?: string) => Promise<void>;
@@ -184,7 +182,8 @@ export function SettingsPage(props: SettingsPageProps) {
       </SettingsSection>
 
       <SettingsSection title="价格与成本" description="管理模型单价与成本统计。" open={openSection === 'pricing'} onToggle={() => toggleSection('pricing')}>
-        <PricesPage settings={props.settings} providers={props.providers} items={props.prices} onRefresh={props.onRefresh} onMessage={props.onMessage} />
+        <Typography color="text.secondary">{t('价格管理已移至模型中心。')}</Typography>
+        <Button component={Link} to="/models/prices" variant="outline">{t('前往价格管理')}</Button>
       </SettingsSection>
     </Box>;
 }

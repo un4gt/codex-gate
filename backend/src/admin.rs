@@ -74,7 +74,7 @@ const LEGACY_LOG_USAGE_COLUMN_IDS: [&str; 5] = [
     "cache_write",
     "reasoning",
 ];
-const MODEL_COLUMN_IDS: [&str; 9] = [
+const MODEL_COLUMN_IDS: [&str; 12] = [
     "provider",
     "model",
     "alias",
@@ -84,6 +84,9 @@ const MODEL_COLUMN_IDS: [&str; 9] = [
     "global",
     "conversion",
     "actions",
+    "provider_count",
+    "input_price",
+    "output_price",
 ];
 const LOG_VISIBLE_COLUMNS_PREFERENCE: &str = "log_visible_columns";
 const LOG_COLUMN_WIDTHS_PREFERENCE: &str = "log_column_widths";
@@ -4320,6 +4323,27 @@ mod tests {
                 "total_tokens".to_string(),
                 "model".to_string(),
             ])
+        );
+    }
+
+    #[test]
+    fn model_columns_should_accept_catalog_prices_and_legacy_widths() {
+        let widths = HashMap::from([
+            ("provider".to_string(), 128),
+            ("alias".to_string(), 190),
+            ("provider_count".to_string(), 104),
+            ("input_price".to_string(), 152),
+            ("output_price".to_string(), 152),
+        ]);
+        assert_eq!(validate_column_widths(&widths, &MODEL_COLUMN_IDS), Ok(()));
+    }
+
+    #[test]
+    fn model_columns_should_reject_unknown_width_keys() {
+        let widths = HashMap::from([("future_column".to_string(), 120)]);
+        assert_eq!(
+            validate_column_widths(&widths, &MODEL_COLUMN_IDS),
+            Err("column widths contain an unknown column")
         );
     }
 

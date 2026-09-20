@@ -27,6 +27,9 @@ export function DetailDrawer(props: DetailDrawerProps) {
           className: 'fixed inset-0 z-50 bg-background/80 backdrop-blur-sm',
         },
         paper: {
+          role: 'dialog',
+          'aria-modal': true,
+          'aria-labelledby': titleId,
           className: 'flex h-full w-full max-w-3xl flex-col border-l border-border bg-card shadow-none outline-none',
         },
       }}

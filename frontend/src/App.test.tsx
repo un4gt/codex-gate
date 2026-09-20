@@ -1,7 +1,7 @@
-import { StrictMode, type ReactNode } from 'react';
+import { isValidElement, StrictMode, type ReactNode } from 'react';
 import GlobalStyles from '@mui/material/GlobalStyles';
 import { StyledEngineProvider, ThemeProvider } from '@mui/material/styles';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
 import { MemoryRouter } from 'react-router';
 import Root from '@/App';
@@ -10,6 +10,7 @@ import { LogsPage } from '@/components/LogsPage';
 import { OAuthPage } from '@/components/OAuthPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { ModelsPage } from '@/components/ModelsPage';
+import { ModelAliasesPage } from '@/components/ModelAliasesPage';
 import { PricesPage } from '@/components/PricesPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { initializeI18n } from '@/lib/i18n';
@@ -17,11 +18,12 @@ import type { ModelPrice, ProviderWorkspace } from '@/lib/types';
 import { theme } from '@/theme';
 
 function renderWithTheme(children: ReactNode) {
+  const routed = isValidElement(children) && (children.type === Root || children.type === MemoryRouter) ? children : <MemoryRouter initialEntries={[window.location.pathname + window.location.search]}>{children}</MemoryRouter>;
   return render(
     <StrictMode>
       <StyledEngineProvider enableCssLayer>
         <GlobalStyles styles="@layer theme, base, mui, components, utilities;" />
-        <ThemeProvider theme={theme}>{children}</ThemeProvider>
+        <ThemeProvider theme={theme}>{routed}</ThemeProvider>
       </StyledEngineProvider>
     </StrictMode>,
   );
@@ -269,8 +271,6 @@ describe('admin console smoke test', () => {
         systemConfig={null}
         runtimeSettings={null}
         runtimeEnvPreview={null}
-        prices={[]}
-        providers={[]}
         onApiBaseChange={() => undefined}
         onAdminTokenChange={() => undefined}
         onRefresh={async () => undefined}
@@ -280,7 +280,7 @@ describe('admin console smoke test', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /pricing & cost/i }));
 
-    expect(await screen.findByText('Base Pricing')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Go to Price Management' }).getAttribute('href')).toBe('/models/prices');
     expect(consoleError).not.toHaveBeenCalled();
   });
 
@@ -320,7 +320,7 @@ describe('admin console smoke test', () => {
     expect(model.closest('td')?.className).toContain('whitespace-nowrap');
     expect(table.className).toContain('table-fixed');
     expect(Array.from(table.querySelectorAll('th')).every(cell => cell.className.includes('whitespace-nowrap'))).toBe(true);
-    expect(table.closest('.grid')?.className).not.toContain('grid-cols');
+    expect(table.closest('.MuiTableContainer-root')).toBeTruthy();
     expect(consoleError).not.toHaveBeenCalled();
   });
 
@@ -362,7 +362,7 @@ describe('admin console smoke test', () => {
     expect(refreshMessages).toEqual([
       'Price model-a updated. Repriced 90 historical requests with the current price.',
     ]);
-    expect(screen.queryByRole('dialog', { name: 'Edit Model Price' })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit Model Price' })).toBeNull());
     expect(consoleError).not.toHaveBeenCalled();
   });
 
@@ -421,6 +421,7 @@ describe('admin console smoke test', () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole('button', { name: 'Add Price' }));
     expect((screen.getByPlaceholderText('2.50') as HTMLInputElement).required).toBe(true);
     expect((screen.getByPlaceholderText('15.00') as HTMLInputElement).required).toBe(true);
     expect((screen.getByPlaceholderText('0.25') as HTMLInputElement).required).toBe(true);
@@ -1145,7 +1146,7 @@ describe('admin console smoke test', () => {
 
     await waitFor(() => expect(deleteCount).toBe(1));
     expect(refreshMessages).toEqual(['Provider Provider A deleted.']);
-    expect(screen.queryByRole('dialog', { name: 'Delete provider “Provider A”?' })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete provider “Provider A”?' })).toBeNull());
     expect(consoleError).not.toHaveBeenCalled();
   });
 
@@ -1221,6 +1222,212 @@ describe('admin console smoke test', () => {
       .toEqual(['/logs', '/overview', '/upstreams', '/oauth', '/models', '/keys', '/settings', '/notifications']);
   });
 
+  const catalogResponse = (input: RequestInfo | URL) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/api/v1/system/config') return jsonResponse({});
+    if (path === '/api/v1/providers') return jsonResponse([providerWorkspace().provider]);
+    if (path === '/api/v1/provider-models') return jsonResponse([{
+      id: 11, provider_id: 7, provider_name: 'Provider A', provider_type: 'openai_compatible',
+      upstream_model: 'model-a', alias: null, enabled: true, available: true,
+      responses_via_chat_enabled: false, native_api_formats: ['chat_completions'], created_at_ms: 1, updated_at_ms: 1,
+    }]);
+    if (path === '/api/v1/prices') return jsonResponse([modelPrice()]);
+    if (path === '/api/v1/console-preferences') return jsonResponse({ model_column_widths: {}, log_column_widths: {}, log_visible_columns: ['time'] });
+    return jsonResponse([]);
+  };
+
+  it('restores a saved session directly into a deep link without showing the connection gate', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/models?provider_id=7&model=model-a');
+    const pending: Array<(response: Response) => void> = [];
+    fetchRequest.mockImplementation(input => String(input).endsWith('/system/config')
+      ? new Promise<Response>(resolve => pending.push(resolve)) : Promise.resolve(catalogResponse(input)));
+    renderWithTheme(<Root />);
+    expect(screen.getByText('Restoring connection…')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /enter console/i })).toBeNull();
+    expect(window.location.pathname).toBe('/models');
+    await act(async () => { pending.forEach(resolve => resolve(jsonResponse({}))); });
+    expect(await screen.findByRole('dialog', { name: 'model-a' })).toBeTruthy();
+    expect(window.location.search).toBe('?provider_id=7&model=model-a');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('navigates from an upstream detail to its models without validating the session again and restores the detail on back', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/upstreams?provider_id=7');
+    fetchRequest.mockImplementation(async input => catalogResponse(input));
+    renderWithTheme(<Root />);
+    const provider = await screen.findByRole('dialog', { name: 'Provider A' });
+    const validations = fetchRequest.mock.calls.filter(([input]) => String(input).endsWith('/system/config')).length;
+    fireEvent.click(within(provider).getByRole('link', { name: 'Manage in Models' }));
+    expect(await screen.findByRole('table', { name: 'Model Inventory' })).toBeTruthy();
+    expect(window.location.pathname + window.location.search).toBe('/models?provider_id=7');
+    expect(fetchRequest.mock.calls.filter(([input]) => String(input).endsWith('/system/config'))).toHaveLength(validations);
+    await act(async () => { window.history.back(); });
+    expect(await screen.findByRole('dialog', { name: 'Provider A' })).toBeTruthy();
+    expect(window.location.pathname + window.location.search).toBe('/upstreams?provider_id=7');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the old prices address and filters compatible', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/prices?q=model-a&scope=global');
+    fetchRequest.mockImplementation(async input => catalogResponse(input));
+    renderWithTheme(<Root />);
+    expect(await screen.findByRole('table', { name: 'Currently Available Price Items' })).toBeTruthy();
+    expect(window.location.pathname + window.location.search).toBe('/models/prices?q=model-a&scope=global');
+    expect(screen.getByRole('tab', { name: 'Price Management' }).getAttribute('aria-selected')).toBe('true');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('retries a connection failure at the original deep link', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/models?provider_id=7');
+    fetchRequest.mockResolvedValue(jsonResponse({ error: 'offline' }, 503));
+    renderWithTheme(<Root />);
+    const retry = await screen.findByRole('button', { name: 'Retry' });
+    expect(screen.queryByRole('button', { name: /enter console/i })).toBeNull();
+    fetchRequest.mockImplementation(async input => catalogResponse(input));
+    fireEvent.click(retry);
+    expect(await screen.findByRole('table', { name: 'Model Inventory' })).toBeTruthy();
+    expect(window.location.pathname + window.location.search).toBe('/models?provider_id=7');
+  });
+
+  it('ignores a pending session refresh after logout', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/models');
+    fetchRequest.mockImplementation(async input => catalogResponse(input));
+    renderWithTheme(<Root />);
+    await screen.findByRole('table', { name: 'Model Inventory' });
+    let completeRefresh: ((value: Response) => void) | undefined;
+    fetchRequest.mockImplementation(input => String(input).endsWith('/system/config')
+      ? new Promise<Response>(resolve => { completeRefresh = resolve; }) : Promise.resolve(catalogResponse(input)));
+    fireEvent.click(screen.getByRole('button', { name: 'Sync' }));
+    await waitFor(() => expect(completeRefresh).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
+    await act(async () => { completeRefresh?.(jsonResponse({})); });
+    expect(screen.getByRole('button', { name: /enter console/i })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+    expect(window.sessionStorage.getItem('little_gate_admin_token')).toBe('');
+  });
+
+  it('prefills a provider price without editing the inherited global price and refreshes the detail after saving', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/models?provider_id=7&model=model-a');
+    let created: Record<string, any> | null = null;
+    let priceItems = [modelPrice()];
+    fetchRequest.mockImplementation(async (input, init) => {
+      if (String(input).endsWith('/prices')) {
+        if (init?.method === 'POST') {
+          created = JSON.parse(String(init.body));
+          priceItems = [...priceItems, { ...modelPrice(), ...created, id: 12 }];
+          return jsonResponse({ id: 12, backfilled_requests: 3, history_recalculation_pending: false });
+        }
+        return jsonResponse(priceItems);
+      }
+      return catalogResponse(input);
+    });
+    renderWithTheme(<Root />);
+    const detail = await screen.findByRole('dialog', { name: 'model-a' });
+    fireEvent.click(await within(detail).findByRole('button', { name: 'Set Provider Price' }));
+    const editor = await screen.findByRole('dialog', { name: 'Add Price' });
+    expect(within(editor).getByDisplayValue('model-a')).toBeTruthy();
+    for (const [placeholder, value] of [['2.50', '6'], ['15.00', '30'], ['0.25', '0'], ['3.125', '0']]) {
+      fireEvent.change(within(editor).getByPlaceholderText(placeholder), { target: { value } });
+    }
+    fireEvent.click(within(editor).getByRole('button', { name: 'Add Price' }));
+    await waitFor(() => expect(created).toMatchObject({ provider_id: 7, model_name: 'model-a' }));
+    const restored = await screen.findByRole('dialog', { name: 'model-a' });
+    expect(await within(restored).findByText('$6 / MToken')).toBeTruthy();
+    expect(priceItems[0].provider_id).toBeNull();
+    expect(priceItems[0].price_data.base.input).toBe('5');
+  });
+
+  it('expires an invalid admin session without losing the requested model filters', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/models?provider_id=7');
+    let expired = false;
+    fetchRequest.mockImplementation(async input => expired ? jsonResponse({ error: 'invalid token' }, 401) : catalogResponse(input));
+    renderWithTheme(<Root />);
+    await screen.findByRole('table', { name: 'Model Inventory' });
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false));
+    expired = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByRole('button', { name: /enter console/i });
+    expect(window.location.pathname + window.location.search).toBe('/models?provider_id=7');
+    expired = false;
+    fireEvent.change(screen.getByPlaceholderText('Enter admin token'), { target: { value: 'new-token' } });
+    fireEvent.click(screen.getByRole('button', { name: /enter console/i }));
+    expect(await screen.findByRole('table', { name: 'Model Inventory' })).toBeTruthy();
+    expect(window.location.pathname + window.location.search).toBe('/models?provider_id=7');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps inventory usable and global controls disabled when policy loading fails', async () => {
+    window.history.replaceState({}, '', '/models');
+    fetchRequest.mockImplementation(async input => String(input).endsWith('/gateway-models')
+      ? jsonResponse({ error: 'policy service unavailable' }, 500) : catalogResponse(input));
+    renderWithTheme(<ModelsPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} providers={[providerWorkspace()]} onMessage={() => undefined} />);
+    expect(await screen.findByRole('table', { name: 'Model Inventory' })).toBeTruthy();
+    expect((screen.getByRole('checkbox', { name: 'Toggle global state for model-a' }) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain('policy service unavailable');
+    fireEvent.click(screen.getByRole('button', { name: 'model-a' }));
+    const dialog = await screen.findByRole('dialog', { name: 'model-a' });
+    expect((within(dialog).getByRole('checkbox', { name: 'Enable' }) as HTMLInputElement).disabled).toBe(false);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('tracks provider query changes during browser back and forward', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/models?provider_id=7');
+    window.history.pushState({}, '', '/models?provider_id=8');
+    fetchRequest.mockImplementation(async input => {
+      if (String(input).endsWith('/provider-models')) return jsonResponse([7, 8].map(id => ({
+        id, provider_id: id, provider_name: `Provider ${id}`, provider_type: 'openai_compatible', upstream_model: `model-${id}`, alias: null,
+        enabled: true, available: true, responses_via_chat_enabled: false, native_api_formats: ['chat_completions'], created_at_ms: 1, updated_at_ms: 1,
+      })));
+      return catalogResponse(input);
+    });
+    renderWithTheme(<Root />);
+    expect(await screen.findByRole('button', { name: 'model-8' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'model-7' })).toBeNull();
+    await act(async () => { window.history.back(); });
+    expect(await screen.findByRole('button', { name: 'model-7' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'model-8' })).toBeNull();
+    await act(async () => { window.history.forward(); });
+    expect(await screen.findByRole('button', { name: 'model-8' })).toBeTruthy();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps an edited price draft when saving fails and allows retry', async () => {
+    let fail = true;
+    let refreshes = 0;
+    fetchRequest.mockImplementation(async () => fail ? jsonResponse({ error: 'write failed' }, 500) : jsonResponse({ id: 12, backfilled_requests: 0, history_recalculation_pending: false }));
+    renderWithTheme(<PricesPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} providers={[]} items={[modelPrice()]} onRefresh={async () => { refreshes += 1; }} onMessage={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit price model-a' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit Model Price' });
+    fireEvent.change(within(dialog).getByDisplayValue('5'), { target: { value: '7.125' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save Price' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toContain('write failed');
+    expect(within(dialog).getByDisplayValue('7.125')).toBeTruthy();
+    expect(refreshes).toBe(0);
+    fail = false;
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save Price' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit Model Price' })).toBeNull());
+    expect(refreshes).toBe(1);
+  });
+
+  it('paginates aliases and returns to the first page when searching', async () => {
+    const aliases = Array.from({ length: 60 }, (_, index) => ({ id: index + 1, name: `route-${String(index).padStart(3, '0')}`, mode: 'ordered' as const, enabled: true, created_at_ms: 1, updated_at_ms: 1, targets: [] }));
+    renderWithTheme(<ModelAliasesPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} providers={[]} aliases={aliases} onRefresh={async () => undefined} />);
+    expect(within(screen.getByRole('table', { name: 'Routing Aliases' })).getAllByRole('row')).toHaveLength(51);
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(within(screen.getByRole('table', { name: 'Routing Aliases' })).getAllByRole('row')).toHaveLength(11);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search Routing Aliases' }), { target: { value: 'route-005' } });
+    expect(screen.getByText('route-005')).toBeTruthy();
+    expect(within(screen.getByRole('table', { name: 'Routing Aliases' })).getAllByRole('row')).toHaveLength(2);
+  });
+
   it('filters the aggregated model inventory by search text', async () => {
     fetchRequest.mockImplementation(async input => {
       if (String(input).endsWith('/api/v1/gateway-models')) return jsonResponse([]);
@@ -1259,8 +1466,6 @@ describe('admin console smoke test', () => {
     renderWithTheme(<ModelsPage
       settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
       providers={[providerWorkspace()]}
-      aliases={[]}
-      onAliasesRefresh={async () => undefined}
       onMessage={() => undefined}
     />);
 
@@ -1268,7 +1473,7 @@ describe('admin console smoke test', () => {
     expect(screen.getByText('model-b')).toBeTruthy();
     const inventoryTable = screen.getByRole('table', { name: 'Model Inventory' });
     expect(inventoryTable.className).toContain('MuiTable-stickyHeader');
-    expect(inventoryTable.querySelectorAll('[data-sticky-column="provider"]').length).toBeGreaterThan(0);
+    expect(inventoryTable.querySelectorAll('[data-column-id="provider_count"]').length).toBeGreaterThan(0);
     expect(inventoryTable.querySelectorAll('[data-sticky-column="model"]').length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'Sync Provider' })).toBeNull();
     fireEvent.change(screen.getByPlaceholderText('Search models, aliases, or providers'), {
@@ -1320,19 +1525,17 @@ describe('admin console smoke test', () => {
     renderWithTheme(<ModelsPage
       settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
       providers={[providerWorkspace()]}
-      aliases={[]}
-      onAliasesRefresh={async () => undefined}
       onMessage={() => undefined}
     />);
 
     const table = await screen.findByRole('table', { name: 'Model Inventory' });
-    await waitFor(() => expect(table.querySelector('col[data-column-id="provider"]')?.getAttribute('style')).toContain('104px'));
-    expect(table.querySelector('thead [data-column-id="model"]')?.getAttribute('data-sticky-offset')).toBe('104');
+    await waitFor(() => expect(table.querySelector('col[data-column-id="model"]')?.getAttribute('style')).toContain('176px'));
+    expect(table.querySelector('thead [data-column-id="model"]')?.getAttribute('data-sticky-offset')).toBe('0');
 
-    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize Providers column' }), { key: 'ArrowRight' });
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize Model column' }), { key: 'ArrowRight' });
 
-    await waitFor(() => expect(widthPatch?.provider).toBe(112));
-    expect(table.querySelector('thead [data-column-id="model"]')?.getAttribute('data-sticky-offset')).toBe('112');
+    await waitFor(() => expect(widthPatch?.model).toBe(184));
+    expect(table.querySelector('thead [data-column-id="model"]')?.getAttribute('data-sticky-offset')).toBe('0');
   });
 
   it('creates a model alias from the Models page and refreshes aliases', async () => {
@@ -1347,16 +1550,16 @@ describe('admin console smoke test', () => {
       return jsonResponse([]);
     });
 
-    renderWithTheme(<ModelsPage
+    renderWithTheme(<ModelAliasesPage
       settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
       providers={[providerWorkspace()]}
       aliases={[]}
-      onAliasesRefresh={async () => {
+      onRefresh={async () => {
         aliasRefreshes += 1;
       }}
-      onMessage={() => undefined}
     />);
 
+    fireEvent.click(screen.getByRole('button', { name: 'Add Routing Alias' }));
     fireEvent.change(screen.getByPlaceholderText('gpt-5'), { target: { value: 'codex-route' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add Model' }));
 
@@ -1392,12 +1595,11 @@ describe('admin console smoke test', () => {
     renderWithTheme(<ModelsPage
       settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
       providers={[providerWorkspace()]}
-      aliases={[]}
-      onAliasesRefresh={async () => undefined}
       onMessage={message => messages.push(message)}
     />);
 
-    const checkbox = await screen.findByRole('checkbox', { name: /model-a.*Responses/i });
+    fireEvent.click(await screen.findByRole('button', { name: 'model-a' }));
+    const checkbox = await screen.findByRole('checkbox', { name: 'Toggle Responses conversion for model-a' });
     expect((checkbox as HTMLInputElement).checked).toBe(false);
     fireEvent.click(checkbox);
     await waitFor(() => expect((checkbox as HTMLInputElement).checked).toBe(false));

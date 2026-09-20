@@ -64,6 +64,14 @@ export class ApiRequestError extends Error {
   }
 }
 
+type AuthenticationFailure = ConnectionSettings & { path: string };
+const authenticationListeners = new Set<(failure: AuthenticationFailure) => void>();
+
+export function subscribeAuthenticationFailures(listener: (failure: AuthenticationFailure) => void) {
+  authenticationListeners.add(listener);
+  return () => { authenticationListeners.delete(listener); };
+}
+
 function normalizeBase(apiBase: string): string {
   return apiBase.trim().replace(/\/$/, '');
 }
@@ -94,6 +102,9 @@ async function requestJson<T>(apiBase: string, path: string, adminToken: string,
 
   if (!response.ok) {
     const body = await response.text();
+    if (response.status === 401 || response.status === 403) {
+      for (const listener of authenticationListeners) listener({ apiBase: normalizeBase(apiBase), adminToken, path });
+    }
     throw new ApiRequestError(path, response.status, body || response.statusText);
   }
 
