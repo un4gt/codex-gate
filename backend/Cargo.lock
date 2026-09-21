@@ -132,6 +132,7 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-rustls",
  "hyper-tungstenite",

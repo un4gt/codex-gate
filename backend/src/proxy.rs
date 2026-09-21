@@ -182,6 +182,7 @@ async fn proxy_openai(
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
     };
     let routing_trace = std::sync::Arc::new(parking_lot::Mutex::new(RoutingTrace {
+        attempt_limit: crate::resilience::MAX_ATTEMPTS,
         authorized_groups: api_key
             .provider_groups
             .iter()
@@ -421,6 +422,7 @@ async fn proxy_openai(
         });
     }
 
+    let mut budget = crate::resilience::AttemptBudget::new(state.config.upstream_request_timeout);
     let mut exclusions = AttemptExclusions::default();
     let mut last_failure: Option<AttemptFailure> = None;
     let mut faulted_providers = HashSet::new();
@@ -431,16 +433,39 @@ async fn proxy_openai(
             continue;
         }
 
-        let Ok(reservation) = reserve_attempt(&state, resolved, util::now_ms()) else {
-            trace_attempt(
-                &routing_trace,
-                resolved,
-                None,
-                Some("runtime_reservation_unavailable"),
-                start.elapsed().as_millis() as i64,
-            );
+        if !budget.available() {
+            break;
+        }
+        if !budget.provider_available(resolved.provider.id, resolved.provider.max_attempts) {
+            continue;
+        }
+        // Check eligibility before sleeping, then reserve atomically again after the delay.
+        if !state
+            .endpoint_health
+            .snapshot(resolved.endpoint.id, util::now_ms())
+            .available
+            || !state
+                .upstream_key_health
+                .snapshot(resolved.key.id, util::now_ms())
+                .available
+            || !state
+                .provider_runtime
+                .snapshot(&resolved.provider, util::now_ms())
+                .available
+            || !state.quota.is_available(resolved.key.id, util::now_ms())
+        {
+            continue;
+        }
+        let before_backoff = Instant::now();
+        if !budget.begin().await {
+            break;
+        }
+        routing_trace.lock().backoff_ms += before_backoff.elapsed().as_millis() as i64;
+        let Ok(mut reservation) = reserve_attempt(&state, resolved, util::now_ms()) else {
+            routing_trace.lock().rejections.push(serde_json::json!({"provider_id": resolved.provider.id, "upstream_model": resolved.upstream_model, "stage": "runtime", "code": "runtime_reservation_unavailable", "message": "target became unavailable during backoff"}));
             continue;
         };
+        let mut attempt_start = Instant::now();
         let provider_switched =
             last_attempted_provider_id.is_some_and(|id| id != resolved.provider.id);
         if provider_switched {
@@ -450,8 +475,6 @@ async fn proxy_openai(
             state.metrics.record_provider_selection(provider_switched);
         }
         last_attempted_provider_id = Some(resolved.provider.id);
-        state.metrics.record_upstream_attempt();
-
         let (mut out_body, conversion_context) = if resolved.protocol.is_responses_via_chat() {
             match responses_request_to_chat(
                 &body_bytes,
@@ -609,7 +632,7 @@ async fn proxy_openai(
                     resolved,
                     Some(StatusCode::BAD_REQUEST.as_u16() as i32),
                     Some("invalid_upstream_uri"),
-                    start.elapsed().as_millis() as i64,
+                    attempt_start.elapsed().as_millis() as i64,
                 );
                 reservation.finish(
                     AttemptOutcome::local_provider(
@@ -680,7 +703,7 @@ async fn proxy_openai(
                         resolved,
                         Some(status.as_u16() as i32),
                         Some(error.code),
-                        start.elapsed().as_millis() as i64,
+                        attempt_start.elapsed().as_millis() as i64,
                     );
                     reservation.finish(
                         AttemptOutcome::upstream_response(
@@ -754,17 +777,28 @@ async fn proxy_openai(
             return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, message);
         }
 
-        let mut upstream_response = dispatch_upstream_request(
+        if !reservation.is_current() {
+            reservation.neutral();
+            continue;
+        }
+        routing_trace.lock().attempts_sent += 1;
+        budget.note_send(resolved.provider.id);
+        state.metrics.record_upstream_attempt();
+        let mut upstream_response = dispatch_upstream_request_with_timeout(
             &state,
             &request_method,
             request_version,
             &headers,
             out_body.clone(),
             upstream_uri.clone(),
+            budget.remaining(),
         )
         .await;
 
+        let mut oauth_replayed = false;
         if is_codex_oauth
+            && budget.available()
+            && budget.provider_available(resolved.provider.id, resolved.provider.max_attempts)
             && upstream_response
                 .as_ref()
                 .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
@@ -799,13 +833,49 @@ async fn proxy_openai(
                 );
                 return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, message);
             }
-            upstream_response = dispatch_upstream_request(
+            let before_backoff = Instant::now();
+            if !budget.begin().await {
+                reservation.neutral();
+                last_failure = Some(AttemptFailure::new(
+                    resolved,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "upstream_retry_exhausted",
+                    "upstream retry deadline reached".into(),
+                ));
+                break;
+            }
+            routing_trace.lock().backoff_ms += before_backoff.elapsed().as_millis() as i64;
+            if !reservation.is_current() {
+                trace_attempt(
+                    &routing_trace,
+                    resolved,
+                    Some(401),
+                    Some("oauth_token_refresh"),
+                    attempt_start.elapsed().as_millis() as i64,
+                );
+                reservation.neutral();
+                continue;
+            }
+            routing_trace.lock().attempts_sent += 1;
+            budget.note_send(resolved.provider.id);
+            oauth_replayed = true;
+            trace_attempt(
+                &routing_trace,
+                resolved,
+                Some(401),
+                Some("oauth_token_refresh"),
+                attempt_start.elapsed().as_millis() as i64,
+            );
+            state.metrics.record_upstream_attempt();
+            attempt_start = Instant::now();
+            upstream_response = dispatch_upstream_request_with_timeout(
                 &state,
                 &request_method,
                 request_version,
                 &retry_headers,
                 out_body,
                 upstream_uri,
+                budget.remaining(),
             )
             .await;
         }
@@ -819,7 +889,7 @@ async fn proxy_openai(
                     resolved,
                     Some(status.as_u16() as i32),
                     Some(error_type),
-                    start.elapsed().as_millis() as i64,
+                    attempt_start.elapsed().as_millis() as i64,
                 );
 
                 reservation.finish(
@@ -870,7 +940,7 @@ async fn proxy_openai(
                     Some(model_name.clone()),
                 );
                 record_request_metric(Some(status.as_u16() as i32), Some(error_type));
-                return http::json_error(status, error_message);
+                return retry_error_response(status, error_message, plan_retry_at(&state, &plan));
             }
         };
 
@@ -885,7 +955,17 @@ async fn proxy_openai(
             util::now_ms(),
             state.config.rate_limit_fallback_cooldown,
         );
-        if is_codex_oauth && status_code == StatusCode::UNAUTHORIZED {
+        if matches!(status_i32, 402 | 429)
+            && let Some(until) = state
+                .quota
+                .snapshot(resolved.key.id, util::now_ms())
+                .cooldown_until_ms
+        {
+            state
+                .upstream_key_health
+                .defer_until(resolved.key.id, until);
+        }
+        if oauth_replayed && status_code == StatusCode::UNAUTHORIZED {
             let _ = state
                 .db
                 .update_codex_auth_status(
@@ -907,23 +987,27 @@ async fn proxy_openai(
                 upstream_resp.body_mut(),
                 api_format_name(resolved.protocol.upstream_api_format),
                 is_sse,
-                state.config.upstream_request_timeout,
+                budget.remaining(),
             )
             .await
         } else {
             false
         };
         if should_retry_response_status(status_i32) && !response_has_usage {
-            trace_attempt(
-                &routing_trace,
-                resolved,
-                Some(status_i32),
-                Some("upstream_retry_status"),
-                t_stream_ms,
-            );
             exclusions.note_attempt(resolved);
-            let failure_scope =
-                classify_failure_scope(Some(status_i32), OutcomeOrigin::UpstreamResponse);
+            let failure_scope = if upstream_error_is_model_scoped(
+                &upstream_resp
+                    .body()
+                    .buffered
+                    .iter()
+                    .filter_map(Frame::data_ref)
+                    .flat_map(|bytes| bytes.iter().copied())
+                    .collect::<Vec<_>>(),
+            ) {
+                FailureScope::Model
+            } else {
+                classify_failure_scope(Some(status_i32), OutcomeOrigin::UpstreamResponse)
+            };
             let failover_kind = match failure_scope {
                 FailureScope::Model => {
                     exclusions.avoid_provider(resolved.provider.id);
@@ -946,15 +1030,39 @@ async fn proxy_openai(
                 "upstream_retry_status",
                 error_message.clone(),
             ));
-            if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
-                reservation.finish(
-                    AttemptOutcome::upstream_response(
-                        status_i32,
-                        Some("upstream_retry_status"),
-                        Some(&error_message),
-                        Some(t_stream_ms),
-                    ),
-                    &state.metrics,
+            reservation.finish_with_scope(
+                AttemptOutcome::upstream_response(
+                    status_i32,
+                    Some("upstream_retry_status"),
+                    Some(&error_message),
+                    Some(t_stream_ms),
+                ),
+                failure_scope,
+                &state.metrics,
+            );
+            if failure_scope == FailureScope::Provider
+                && let Some(delay) =
+                    crate::resilience::retry_after_ms(upstream_resp.headers(), util::now_ms())
+            {
+                state
+                    .endpoint_health
+                    .defer_until(resolved.endpoint.id, util::now_ms().saturating_add(delay));
+            }
+            if budget.available()
+                && plan.attempts[index + 1..].iter().any(|candidate| {
+                    !exclusions.should_skip(candidate)
+                        && budget.provider_available(
+                            candidate.provider.id,
+                            candidate.provider.max_attempts,
+                        )
+                })
+            {
+                trace_attempt(
+                    &routing_trace,
+                    resolved,
+                    Some(status_i32),
+                    Some("upstream_retry_status"),
+                    attempt_start.elapsed().as_millis() as i64,
                 );
                 if !has_remaining_provider_candidate(
                     &plan.attempts,
@@ -998,6 +1106,7 @@ async fn proxy_openai(
             http_status: Some(resp_parts.status.as_u16() as i32),
             t_stream_ms: Some(t_stream_ms),
             start,
+            attempt_start,
             is_sse,
             price: resolved.price.clone(),
             usage_capture_bytes: plan.runtime.usage_capture_bytes,
@@ -1016,6 +1125,7 @@ async fn proxy_openai(
             routing_trace: routing_trace.clone(),
             codex_state: is_codex_oauth.then(|| state.clone()),
             read_timeout: state.config.upstream_request_timeout,
+            first_read_deadline: time::Instant::now() + budget.remaining(),
             client_duration_ms: None,
             terminal_observed: false,
             requested_service_tier: serde_json::from_slice::<Value>(&body_bytes)
@@ -1026,6 +1136,9 @@ async fn proxy_openai(
             service_tier: None,
         };
         if !status_code.is_success() {
+            if should_retry_response_status(status_i32) {
+                add_retry_after(&mut resp_parts.headers, plan_retry_at(&state, &plan));
+            }
             let tap = ProxyTapBody::new(body, tap_config, telemetry_permit.take(), reservation);
             return Response::from_parts(resp_parts, http::boxed(tap));
         }
@@ -1077,7 +1190,10 @@ async fn proxy_openai(
             match preflight_sse(
                 body,
                 upstream_api_format_str,
-                state.config.stream_preflight_timeout,
+                state
+                    .config
+                    .stream_preflight_timeout
+                    .min(budget.remaining()),
                 state.config.stream_preflight_max_bytes,
                 &mut observed_service_tier,
             )
@@ -1091,7 +1207,7 @@ async fn proxy_openai(
                         resolved,
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
                         Some("upstream_sse_preflight_failed"),
-                        start.elapsed().as_millis() as i64,
+                        attempt_start.elapsed().as_millis() as i64,
                     );
                     reservation.finish(
                         AttemptOutcome::local_provider(
@@ -1164,13 +1280,18 @@ async fn proxy_openai(
                 return Response::from_parts(resp_parts, http::boxed(tap));
             }
 
-            let collected = match Limited::new(body, state.config.max_request_bytes)
-                .collect()
-                .await
+            let collected = match time::timeout(
+                budget.remaining(),
+                Limited::new(body, state.config.max_request_bytes).collect(),
+            )
+            .await
             {
-                Ok(collected) => collected.to_bytes(),
-                Err(error) => {
-                    let message = error.to_string();
+                Ok(Ok(collected)) => collected.to_bytes(),
+                result => {
+                    let message = match result {
+                        Ok(Err(error)) => error.to_string(),
+                        _ => "upstream response deadline exceeded".into(),
+                    };
                     reservation.finish(
                         AttemptOutcome::local_provider(
                             Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
@@ -1185,7 +1306,7 @@ async fn proxy_openai(
                         resolved,
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
                         Some("responses_via_chat_response_too_large"),
-                        start.elapsed().as_millis() as i64,
+                        attempt_start.elapsed().as_millis() as i64,
                     );
                     exclusions.note_attempt(resolved);
                     exclusions.avoid_endpoint(resolved.endpoint.id);
@@ -1236,7 +1357,7 @@ async fn proxy_openai(
                         resolved,
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
                         Some("responses_via_chat_response_failed"),
-                        start.elapsed().as_millis() as i64,
+                        attempt_start.elapsed().as_millis() as i64,
                     );
                     exclusions.note_attempt(resolved);
                     exclusions.avoid_endpoint(resolved.endpoint.id);
@@ -1310,7 +1431,68 @@ async fn proxy_openai(
         Some(failure.status.as_u16() as i32),
         Some(failure.error_type),
     );
-    http::json_error(failure.status, failure.error_message)
+    retry_error_response(
+        failure.status,
+        failure.error_message,
+        plan_retry_at(&state, &plan),
+    )
+}
+
+fn plan_retry_at(state: &SharedState, plan: &UpstreamPlan) -> Option<i64> {
+    let now = util::now_ms();
+    plan.attempts
+        .iter()
+        .map(|target| {
+            let quota = state.quota.snapshot(target.key.id, now);
+            [
+                state
+                    .endpoint_health
+                    .snapshot(target.endpoint.id, now)
+                    .open_until_ms,
+                state
+                    .upstream_key_health
+                    .snapshot(target.key.id, now)
+                    .open_until_ms,
+                state
+                    .provider_runtime
+                    .snapshot(&target.provider, now)
+                    .open_until_ms,
+                quota.cooldown_until_ms,
+                quota.blocked_until_ms(),
+                Some(now),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(now)
+        })
+        .min()
+        .filter(|until| *until > now)
+}
+
+fn add_retry_after(headers: &mut HeaderMap, retry_at_ms: Option<i64>) {
+    let now = util::now_ms();
+    let seconds = retry_at_ms
+        .map(|until| until.saturating_sub(now).saturating_add(999) / 1_000)
+        .unwrap_or(1)
+        .max(1);
+    let upstream_seconds = crate::resilience::retry_after_ms(headers, now)
+        .unwrap_or(0)
+        .saturating_add(999)
+        / 1_000;
+    if let Ok(value) = HeaderValue::from_str(&seconds.max(upstream_seconds).to_string()) {
+        headers.insert(hyper::header::RETRY_AFTER, value);
+    }
+}
+
+fn retry_error_response(
+    status: StatusCode,
+    message: String,
+    retry_at_ms: Option<i64>,
+) -> HttpResponse {
+    let mut response = http::json_error(status, message);
+    add_retry_after(response.headers_mut(), retry_at_ms);
+    response
 }
 
 fn should_inject_include_usage(
@@ -1346,13 +1528,14 @@ pub(crate) enum UpstreamDispatchError {
     Timeout,
 }
 
-pub(crate) async fn dispatch_upstream_request(
+pub(crate) async fn dispatch_upstream_request_with_timeout(
     state: &SharedState,
     request_method: &Method,
     request_version: hyper::Version,
     request_headers: &hyper::HeaderMap,
     body: Bytes,
     uri: Uri,
+    timeout: std::time::Duration,
 ) -> Result<Response<Incoming>, UpstreamDispatchError> {
     let mut upstream_req = Request::new(Full::new(body));
     *upstream_req.method_mut() = request_method.clone();
@@ -1360,13 +1543,10 @@ pub(crate) async fn dispatch_upstream_request(
     *upstream_req.version_mut() = request_version;
     *upstream_req.headers_mut() = request_headers.clone();
 
-    time::timeout(
-        state.config.upstream_request_timeout,
-        state.upstream.request(upstream_req),
-    )
-    .await
-    .map_err(|_| UpstreamDispatchError::Timeout)?
-    .map_err(|e| UpstreamDispatchError::Request(e.to_string()))
+    time::timeout(timeout, state.upstream.request(upstream_req))
+        .await
+        .map_err(|_| UpstreamDispatchError::Timeout)?
+        .map_err(|e| UpstreamDispatchError::Request(e.to_string()))
 }
 
 pub(crate) fn dispatch_error_to_http(
@@ -1605,7 +1785,8 @@ pub(crate) struct RouteResolutionError {
     pub(crate) error_type: &'static str,
     pub(crate) code: &'static str,
     pub(crate) message: String,
-    diagnostics: RouteDiagnostics,
+    diagnostics: Box<RouteDiagnostics>,
+    retry_at_ms: Option<i64>,
 }
 
 impl RouteResolutionError {
@@ -1621,7 +1802,8 @@ impl RouteResolutionError {
             error_type,
             code,
             message: message.into(),
-            diagnostics,
+            diagnostics: Box::new(diagnostics),
+            retry_at_ms: None,
         }
     }
 }
@@ -1634,6 +1816,9 @@ struct RoutingTrace {
     rejections: Vec<Value>,
     attempts: Vec<Value>,
     provider_switches: usize,
+    attempt_limit: usize,
+    attempts_sent: usize,
+    backoff_ms: i64,
     conversion: Option<Value>,
     terminal: Option<Value>,
 }
@@ -1659,7 +1844,7 @@ fn route_resolution_error_response(
     model: &str,
     api_format: ApiFormat,
 ) -> HttpResponse {
-    http::json(
+    let mut response = http::json(
         error.status,
         &serde_json::json!({
             "error": {
@@ -1667,13 +1852,27 @@ fn route_resolution_error_response(
                 "type": error.error_type,
                 "code": error.code,
                 "details": {
+                    "retry_at_ms": error.retry_at_ms,
                     "model": model,
                     "client_api_format": api_format_name(api_format),
                     "reasons": error.diagnostics.public_reason_counts(error.code),
                 }
             }
         }),
-    )
+    );
+    if error.code == "all_upstreams_temporarily_unavailable" {
+        let seconds = error
+            .retry_at_ms
+            .map(|until| until.saturating_sub(util::now_ms()).saturating_add(999) / 1_000)
+            .unwrap_or(1)
+            .max(1);
+        if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+            response
+                .headers_mut()
+                .insert(hyper::header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 fn routing_trace_value(trace: &SharedRoutingTrace) -> Value {
@@ -1787,7 +1986,7 @@ pub(crate) fn apply_affinity_to_plan(
     Some(binding)
 }
 
-const MAX_PROVIDER_SWITCHES: usize = 3;
+const MAX_PROVIDER_SWITCHES: usize = crate::resilience::MAX_ATTEMPTS - 1;
 pub(crate) const MAX_DISTINCT_PROVIDERS: usize = MAX_PROVIDER_SWITCHES + 1;
 
 #[derive(Clone, Debug)]
@@ -1897,6 +2096,17 @@ pub(crate) async fn build_upstream_plan(
         ));
     }
 
+    let retry_at_ms = enabled_routes
+        .iter()
+        .filter_map(|route| {
+            crate::routing_availability::provider_retry_at(
+                state,
+                &snap,
+                &route.provider,
+                Some(&route.upstream_model),
+            )
+        })
+        .min();
     let affinity_provider_id = affinity
         .and_then(|identity| state.affinity.lookup(identity, now_ms))
         .map(|binding| binding.provider_id);
@@ -1983,6 +2193,11 @@ pub(crate) async fn build_upstream_plan(
         if !provider_runtime.available {
             let (code, message) = if provider_runtime.state == crate::health::CircuitState::Open {
                 ("provider_circuit_open", "provider circuit is open")
+            } else if provider_runtime.state == crate::health::CircuitState::HalfOpen {
+                (
+                    "recovery_probe_in_progress",
+                    "provider recovery probe is already in progress",
+                )
             } else {
                 state.metrics.record_provider_capacity_skip();
                 transient_spill_provider_ids.insert(provider.id);
@@ -2014,29 +2229,20 @@ pub(crate) async fn build_upstream_plan(
                 if availability.reason == Some("quota_unavailable") {
                     state.metrics.record_quota_cooldown_skip();
                 }
+                if !availability.available {
+                    diagnostics.reject(
+                        Some(provider.id),
+                        &route.upstream_model,
+                        "runtime",
+                        availability.reason.unwrap_or("account_unavailable"),
+                        "upstream account or its connection path is temporarily unavailable",
+                    );
+                }
                 availability.available
             })
             .collect::<Vec<_>>();
         if keys.is_empty() {
             transient_spill_provider_ids.insert(provider.id);
-            let (code, message) = if provider.provider_type == crate::codex_oauth::PROVIDER_TYPE {
-                (
-                    "codex_account_unavailable",
-                    "all Codex OAuth accounts require login, entitlement recovery, or quota reset",
-                )
-            } else {
-                (
-                    "key_quota_cooldown",
-                    "all model-capable upstream keys are in quota cooldown",
-                )
-            };
-            diagnostics.reject(
-                Some(provider.id),
-                &route.upstream_model,
-                "runtime",
-                code,
-                message,
-            );
             continue;
         }
         let ranked_keys =
@@ -2132,7 +2338,7 @@ pub(crate) async fn build_upstream_plan(
                 diagnostics,
             ));
         }
-        return Err(RouteResolutionError::new(
+        let mut error = RouteResolutionError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "upstream_unavailable",
             "all_upstreams_temporarily_unavailable",
@@ -2140,13 +2346,15 @@ pub(crate) async fn build_upstream_plan(
                 "All upstream targets for model \"{requested_model}\" are temporarily unavailable"
             ),
             diagnostics,
-        ));
+        );
+        error.retry_at_ms = retry_at_ms;
+        return Err(error);
     }
 
     let attempts = build_scheduled_attempts(schedulable, affinity_provider_id);
 
     if attempts.is_empty() {
-        return Err(RouteResolutionError::new(
+        let mut error = RouteResolutionError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "upstream_unavailable",
             "all_upstreams_temporarily_unavailable",
@@ -2154,7 +2362,9 @@ pub(crate) async fn build_upstream_plan(
                 "All upstream targets for model \"{requested_model}\" are temporarily unavailable"
             ),
             diagnostics,
-        ));
+        );
+        error.retry_at_ms = retry_at_ms;
+        return Err(error);
     }
 
     Ok(UpstreamPlan {
@@ -2174,12 +2384,14 @@ fn build_scheduled_attempts(
         .into_iter()
         .take(MAX_DISTINCT_PROVIDERS)
     {
-        let max_attempts = scheduled.route.provider.max_attempts.max(1) as usize;
-        let mut provider_attempts = 0usize;
-        'pairs: for diagonal in 0..scheduled.endpoints.len() {
-            for (key_index, key) in scheduled.keys.iter().enumerate() {
-                let endpoint =
-                    &scheduled.endpoints[(key_index + diagonal) % scheduled.endpoints.len()];
+        // Keep sibling candidates even when an earlier pair is skipped after cooling.
+        // Actual sends enforce the configured provider limit and the shared request limit.
+        for endpoint in scheduled
+            .endpoints
+            .iter()
+            .take(crate::resilience::MAX_ATTEMPTS)
+        {
+            for key in scheduled.keys.iter().take(crate::resilience::MAX_ATTEMPTS) {
                 attempts.push(ResolvedUpstream {
                     upstream_model: scheduled.route.upstream_model.clone(),
                     provider: scheduled.route.provider.clone(),
@@ -2188,10 +2400,6 @@ fn build_scheduled_attempts(
                     price: scheduled.price.clone(),
                     protocol: scheduled.route.protocol,
                 });
-                provider_attempts += 1;
-                if provider_attempts >= max_attempts {
-                    break 'pairs;
-                }
             }
         }
     }
@@ -2708,12 +2916,16 @@ fn order_keys_for_provider(
     strategy: &str,
     ranked_keys: &[&UpstreamKey],
 ) -> Vec<UpstreamKey> {
-    let keys = ranked_keys
+    let mut keys = ranked_keys
         .iter()
         .map(|key| (*key).clone())
         .collect::<Vec<_>>();
     if strategy == "round_robin" {
+        keys.sort_by_key(|key| key.id);
         state.key_rotation.rotate_provider(provider_id, &keys)
+    } else if strategy == "ordered" {
+        keys.sort_by_key(|key| (key.priority, key.id));
+        keys
     } else {
         keys
     }
@@ -2823,6 +3035,21 @@ pub(crate) struct UpstreamAttemptReservation {
 }
 
 impl UpstreamAttemptReservation {
+    /// Recheck after auth refresh or backoff: another request may have opened a breaker.
+    pub(crate) fn is_current(&self) -> bool {
+        self.provider
+            .as_ref()
+            .is_none_or(ProviderAttemptGuard::is_current)
+            && self
+                .endpoint
+                .as_ref()
+                .is_none_or(RuntimeHealthAttemptGuard::is_current)
+            && self
+                .key
+                .as_ref()
+                .is_none_or(RuntimeHealthAttemptGuard::is_current)
+    }
+
     pub(crate) fn finish(mut self, outcome: AttemptOutcome<'_>, metrics: &crate::metrics::Metrics) {
         let scope = classify_failure_scope(outcome.status, outcome.origin);
         self.finish_with_scope(outcome, scope, metrics);
@@ -3358,6 +3585,7 @@ async fn preflight_sse(
                 let parsed = parser.push_bytes(data);
                 *observed_service_tier = parser.observation.service_tier.clone();
                 if parsed.saw_error_event
+                    && !parsed.saw_valid_event
                     && parsed.usage.is_none()
                     && !parser.non_retryable_terminal()
                 {
@@ -3403,6 +3631,7 @@ struct TapConfig {
     http_status: Option<i32>,
     t_stream_ms: Option<i64>,
     start: Instant,
+    attempt_start: Instant,
     is_sse: bool,
     price: Option<PriceVersion>,
     usage_capture_bytes: usize,
@@ -3416,6 +3645,7 @@ struct TapConfig {
     routing_trace: SharedRoutingTrace,
     codex_state: Option<SharedState>,
     read_timeout: std::time::Duration,
+    first_read_deadline: time::Instant,
     client_duration_ms: Option<i64>,
     terminal_observed: bool,
     requested_service_tier: Option<String>,
@@ -3466,7 +3696,8 @@ impl ProxyTapBody {
             );
             let mut sse = cfg.is_sse.then(|| SseParser::new(cfg.api_format));
             let mut disconnected_at: Option<time::Instant> = None;
-            let mut read_deadline = time::Instant::now() + cfg.read_timeout;
+            let mut preflight_complete = !cfg.is_sse;
+            let mut read_deadline = cfg.first_read_deadline;
             loop {
                 let deadline = disconnected_at
                     .map(|at| (at + crate::response_events::DISCONNECT_GRACE).min(read_deadline))
@@ -3485,12 +3716,14 @@ impl ProxyTapBody {
                 };
                 match frame {
                     Ok(Some(Ok(frame))) => {
-                        read_deadline = time::Instant::now() + cfg.read_timeout;
                         if let Some(data) = frame.data_ref() {
                             first_byte_ms
                                 .get_or_insert_with(|| cfg.start.elapsed().as_millis() as i64);
                             if let Some(parser) = sse.as_mut() {
                                 let out = parser.push_bytes(data);
+                                preflight_complete |= out.saw_valid_event
+                                    || out.usage.is_some()
+                                    || parser.non_retryable_terminal();
                                 if out.saw_first_token {
                                     first_token_ms.get_or_insert_with(|| {
                                         cfg.start.elapsed().as_millis() as i64
@@ -3503,6 +3736,9 @@ impl ProxyTapBody {
                             } else {
                                 capture.push(data);
                             }
+                        }
+                        if preflight_complete {
+                            read_deadline = time::Instant::now() + cfg.read_timeout;
                         }
                         if disconnected_at.is_none() && sender.send(Ok(frame)).await.is_err() {
                             disconnected_at = Some(time::Instant::now());
@@ -3766,7 +4002,7 @@ fn finalize_tap(
                     .then_some("responses_via_chat"),
                 "status": cfg.http_status,
                 "error_type": error_type.as_deref(),
-                "duration_ms": duration_ms,
+                "duration_ms": cfg.attempt_start.elapsed().as_millis() as i64,
             }));
         }
         trace.terminal = Some(serde_json::json!({
@@ -5021,7 +5257,7 @@ mod tests {
     }
 
     #[test]
-    fn request_should_use_at_most_four_providers_and_each_provider_budget() {
+    fn candidate_plan_should_limit_providers_and_preserve_per_provider_settings() {
         let providers = (1..=6)
             .map(|id| schedulable_provider(id, 100))
             .collect::<Vec<_>>();
@@ -5031,8 +5267,8 @@ mod tests {
             .map(|attempt| attempt.provider.id)
             .collect::<HashSet<_>>();
 
-        assert_eq!(provider_ids.len(), 4);
-        assert_eq!(attempts.len(), 8);
+        assert_eq!(provider_ids.len(), 3);
+        assert_eq!(attempts.len(), 6);
         for provider_id in provider_ids {
             assert_eq!(
                 attempts

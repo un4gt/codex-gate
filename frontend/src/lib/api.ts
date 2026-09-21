@@ -102,7 +102,7 @@ async function requestJson<T>(apiBase: string, path: string, adminToken: string,
 
   if (!response.ok) {
     const body = await response.text();
-    if (response.status === 401 || response.status === 403) {
+    if ((response.status === 401 || response.status === 403) && response.headers.get('x-little-gate-upstream-error') !== '1') {
       for (const listener of authenticationListeners) listener({ apiBase: normalizeBase(apiBase), adminToken, path });
     }
     throw new ApiRequestError(path, response.status, body || response.statusText);
@@ -440,8 +440,8 @@ export async function loadProviderWorkspace(settings: ConnectionSettings): Promi
   return Promise.all(
     providers.map(async (provider) => {
       const [endpoints, keys] = await Promise.all([
-        fetchJson<UpstreamEndpointSummary[]>(apiBase, `/api/v1/providers/${provider.id}/endpoints`, adminToken).catch(() => [] as UpstreamEndpointSummary[]),
-        fetchJson<UpstreamKeyMeta[]>(apiBase, `/api/v1/providers/${provider.id}/keys`, adminToken).catch(() => [] as UpstreamKeyMeta[]),
+        fetchJson<UpstreamEndpointSummary[]>(apiBase, `/api/v1/providers/${provider.id}/endpoints`, adminToken),
+        fetchJson<UpstreamKeyMeta[]>(apiBase, `/api/v1/providers/${provider.id}/keys`, adminToken),
       ]);
 
       return {
@@ -543,7 +543,7 @@ export async function loadApiKeyWorkspace(settings: ConnectionSettings): Promise
 
 export async function createProvider(settings: ConnectionSettings, payload: CreateProviderInput) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return postJson<{ id: number }>(apiBase, '/api/v1/providers', adminToken, payload);
+  return postJson<{ id: number; endpoint_ids: number[]; key_ids: number[] }>(apiBase, '/api/v1/providers', adminToken, payload);
 }
 
 export async function updateProvider(settings: ConnectionSettings, providerId: number, payload: UpdateProviderInput) {
@@ -564,6 +564,13 @@ export async function resetProviderCircuit(settings: ConnectionSettings, provide
     adminToken,
     {},
   );
+}
+
+export async function reorderProviderChildren(settings: ConnectionSettings, providerId: number, kind: 'endpoints' | 'keys', ids: number[]) {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return requestJson<{ ok: boolean }>(apiBase, `/api/v1/providers/${providerId}/${kind}/order`, adminToken, {
+    method: 'PUT', body: JSON.stringify({ ids }),
+  });
 }
 
 export async function createEndpoint(settings: ConnectionSettings, providerId: number, payload: CreateEndpointInput) {

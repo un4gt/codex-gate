@@ -92,7 +92,7 @@ const NAV_ITEMS_BY_KEY = {
   },
   keys: {
     to: '/keys',
-    label: '密钥',
+    label: '访问密钥',
     icon: KeyRound
   },
   notifications: {
@@ -384,7 +384,7 @@ function TopShell(props: {
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)', {
     noSsr: true
   });
-  const navItems = useMemo<NavigationItemView[]>(() => navOrder.map(key => ({
+  const navItems = useMemo<NavigationItemView[]>(() => [...navOrder.filter(key => key !== 'notifications' && key !== 'settings'), ...navOrder.filter(key => key === 'notifications' || key === 'settings')].map(key => ({
     key,
     ...NAV_ITEMS_BY_KEY[key]
   })), [navOrder]);
@@ -404,7 +404,10 @@ function TopShell(props: {
     const targetIndex = source.index;
     if (source.initialIndex === targetIndex) return;
     setNavOrder(current => {
-      const next = moveNavKey(current, sourceKey, targetIndex);
+      const grouped = [...current.filter(key => key !== 'notifications' && key !== 'settings'), ...current.filter(key => key === 'notifications' || key === 'settings')];
+      const sameSection = (key: NavKey) => (key === 'notifications' || key === 'settings') === (sourceKey === 'notifications' || sourceKey === 'settings');
+      if (!grouped[targetIndex] || !sameSection(grouped[targetIndex])) return current;
+      const next = moveNavKey(grouped, sourceKey, targetIndex);
       if (next === current) return current;
       persistNavOrder(next);
       return next;
@@ -426,7 +429,11 @@ function TopShell(props: {
               <Box id={NAVIGATION_SORT_INSTRUCTIONS_ID} className="sr-only">
                 {t('拖动任意导航项可调整顺序。键盘操作：按空格开始，使用上下方向键移动，再按空格完成。')}
               </Box>
-              {navItems.map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} />)}
+              {navItems.slice(0, 6).map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} />)}
+              <Box component="details" open={location.pathname.startsWith('/notifications') || location.pathname.startsWith('/settings')} sx={{ mt: 2 }}>
+                <Box component="summary" sx={{ px: 2, py: 1.5, cursor: 'pointer', color: 'text.secondary', fontSize: '0.8125rem' }}>{t('更多')}</Box>
+                {navItems.slice(6).map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index + 6} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} />)}
+              </Box>
             </Box>
             <DragOverlay className="pointer-events-none z-[120]" dropAnimation={reducedMotion ? null : NAVIGATION_DROP_ANIMATION}>
               {source => {

@@ -707,7 +707,10 @@ export function LogsPage(props: LogsPageProps) {
                   </CardContent>
                 </Card>
 
-                {row.routing_trace ? <Card className="border border-border bg-background shadow-none">
+                {row.routing_trace ? <Box component="details" className="border border-border bg-background">
+                    <Box component="summary" className="cursor-pointer p-4 text-sm">
+                      {t('尝试 {{count}} 次 · 上限 {{limit}} 次 · 重试等待 {{delay}}', { count: row.routing_trace.attempts_sent ?? row.routing_trace.attempts.length, limit: row.routing_trace.attempt_limit ?? '—', delay: formatMaybeMs(row.routing_trace.backoff_ms ?? null) })}
+                    </Box>
                     <Box className="flex items-center justify-between gap-3 p-4 pb-3">
                       <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('路由决策')}</Typography>
                       <Box className="font-mono text-[0.6875rem] text-muted-foreground" component="span">
@@ -811,7 +814,7 @@ export function LogsPage(props: LogsPageProps) {
                       <Box className="flex items-center justify-between gap-3 border-y border-border/40 px-4 py-2.5">
                         <Typography className="text-sm font-medium text-foreground" component="div">{t('尝试记录')}</Typography>
                         <Typography className="font-mono text-xs text-muted-foreground" component="span">
-                          {t('{{count}} 次尝试', { count: row.routing_trace.attempts.length })}
+                          {t('{{count}} 次尝试', { count: row.routing_trace.attempts_sent ?? row.routing_trace.attempts.length })}
                         </Typography>
                       </Box>
                       <TableContainer className="max-w-full overflow-x-auto">
@@ -843,7 +846,7 @@ export function LogsPage(props: LogsPageProps) {
                         </Table>
                       </TableContainer>
                     </CardContent>
-                  </Card> : null}
+                  </Box> : null}
 
                 <Card className="border border-border bg-background shadow-none">
                   <Box className="flex flex-col gap-2 p-4 pb-3">

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
 import { MemoryRouter } from 'react-router';
 import Root from '@/App';
 import { CodexOAuthLoginDialog } from '@/components/CodexOAuthPanel';
+import { ApiKeysPage } from '@/components/ApiKeysPage';
 import { LogsPage } from '@/components/LogsPage';
 import { OAuthPage } from '@/components/OAuthPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
@@ -459,7 +460,7 @@ describe('admin console smoke test', () => {
       if (method === 'GET') return jsonResponse([]);
       if (method === 'POST' && url.endsWith('/api/v1/providers')) {
         providerPayload = JSON.parse(String(init?.body));
-        return jsonResponse({ id: 9 });
+        return jsonResponse({ id: 9, endpoint_ids: [10], key_ids: [20] });
       }
       if (method === 'POST' && url.endsWith('/models/sync')) return jsonResponse([{ id: 101 }]);
       if (method === 'POST') return jsonResponse({ id: url.endsWith('/endpoints') ? 10 : 20 });
@@ -479,6 +480,7 @@ describe('admin console smoke test', () => {
     fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider B' } });
     fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://api.example.test' } });
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByText('Advanced Settings'));
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Priority' }), { target: { value: '25' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '4' } });
     fireEvent.click(screen.getByText('Request Overrides (Optional)'));
@@ -509,8 +511,8 @@ describe('admin console smoke test', () => {
       },
     });
     expect(await screen.findByText('Model Sync Complete')).toBeTruthy();
-    expect(requests).toContain('POST /api/v1/providers/9/endpoints');
-    expect(requests).toContain('POST /api/v1/providers/9/keys');
+    expect(providerPayload).toMatchObject({ endpoints: [expect.objectContaining({ base_url: 'https://api.example.test' })], keys: [expect.objectContaining({ secret: 'sk-test' })] });
+    expect(requests.filter(request => request.startsWith('POST'))).toEqual(['POST /api/v1/providers', 'POST /api/v1/providers/9/models/sync']);
     expect(requests).toContain('POST /api/v1/providers/9/models/sync');
     expect(consoleError).not.toHaveBeenCalled();
   }, 10_000);
@@ -531,7 +533,8 @@ describe('admin console smoke test', () => {
       requests.push(`${method} ${path}`);
       if (method === 'POST' && path === '/api/v1/providers') {
         providerPayload = JSON.parse(String(init?.body));
-        return jsonResponse({ id: 19 });
+        endpointPayload = (providerPayload?.endpoints as Record<string, unknown>[])[0];
+        return jsonResponse({ id: 19, endpoint_ids: [191], key_ids: [] });
       }
       if (method === 'POST' && path === '/api/v1/providers/19/endpoints') {
         endpointPayload = JSON.parse(String(init?.body));
@@ -917,7 +920,7 @@ describe('admin console smoke test', () => {
       if (method === 'GET') return jsonResponse([]);
       if (method === 'POST' && path === '/api/v1/providers') {
         providerCreates += 1;
-        return jsonResponse({ id: 9 });
+        return jsonResponse({ id: 9, endpoint_ids: [10], key_ids: [20] });
       }
       if (method === 'POST' && path.endsWith('/endpoints')) return jsonResponse({ id: 10 });
       if (method === 'POST' && path.endsWith('/keys')) return jsonResponse({ id: 20 });
@@ -948,28 +951,23 @@ describe('admin console smoke test', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
 
     expect(await screen.findByText('Sync Failed')).toBeTruthy();
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://new.example.test' } });
-    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-new' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save and Retry Sync' }));
+    expect((screen.getByPlaceholderText('https://api.example.com/v1') as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry Sync' }));
 
     expect(await screen.findByText('Model Sync Complete')).toBeTruthy();
     expect(providerCreates).toBe(1);
     expect(syncAttempts).toBe(2);
-    expect(patches).toEqual(expect.arrayContaining([
-      '/api/v1/providers/9',
-      '/api/v1/endpoints/10',
-      '/api/v1/keys/20',
-    ]));
+    expect(patches).toEqual([]);
   });
 
-  it('rolls back a new provider when connection setup fails', async () => {
+  it('keeps the complete draft after atomic provider creation fails', async () => {
     const deleted: string[] = [];
     fetchRequest.mockImplementation(async (input, init) => {
       const url = String(input);
       const path = new URL(url).pathname;
       const method = init?.method ?? 'GET';
       if (method === 'GET') return jsonResponse([]);
-      if (method === 'POST' && path === '/api/v1/providers') return jsonResponse({ id: 9 });
+      if (method === 'POST' && path === '/api/v1/providers') return new Response('atomic save failed', { status: 500 });
       if (method === 'POST' && path.endsWith('/endpoints')) return new Response('endpoint failed', { status: 500 });
       if (method === 'POST' && path.endsWith('/keys')) return jsonResponse({ id: 20 });
       if (method === 'DELETE') {
@@ -994,9 +992,43 @@ describe('admin console smoke test', () => {
     fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
 
-    expect(await screen.findByText(/rolled back/i)).toBeTruthy();
-    expect(deleted).toEqual(['/api/v1/providers/9']);
+    expect(await screen.findByText(/atomic save failed/i)).toBeTruthy();
+    expect(deleted).toEqual([]);
+    expect((screen.getByPlaceholderText('sk-...') as HTMLInputElement).value).toBe('sk-test');
     expect(screen.getByRole('button', { name: 'Create and Sync' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('offers key ordering only in primary/backup mode and preserves hidden provider settings', async () => {
+    const workspace = providerWorkspaceWithConnection();
+    const writes: Array<{ path: string; body: any }> = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      if (init?.method === 'PATCH') writes.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init.body)) });
+      return jsonResponse(init?.method === 'PATCH' ? { ok: true } : []);
+    });
+    renderWithTheme(<ProvidersPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} items={[workspace]} onRefresh={async () => undefined} onMessage={() => undefined} />);
+    fireEvent.click(screen.getByText('Provider A'));
+    expect(screen.getByRole('combobox', { name: 'Key Selection' }).textContent).toContain('Round Robin');
+    expect(screen.queryByText('Primary Key')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Provider' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0].body).toMatchObject({ max_attempts: 2, circuit_breaker_enabled: true, circuit_breaker_open_ms: 30_000, circuit_breaker_half_open_success_threshold: 2 });
+    expect(writes[0].body).not.toHaveProperty('key_selection_strategy');
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Key Selection' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'Primary and Backup' }));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({ path: '/api/v1/providers/7', body: { key_selection_strategy: 'ordered' } });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('marks an expired access key as expired and excludes it from usable keys', () => {
+    renderWithTheme(<ApiKeysPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} groups={[]} items={[{
+      apiKey: { id: 1, name: 'expired-client', enabled: true, log_enabled: true, expires_at_ms: Date.now() - 1000, provider_groups: [] },
+      totals: { requests: 0, success: 0, failed: 0, tokens: 0, averageWaitMs: 0, activeDays: 0 }, recentModels: [],
+    }]} onRefresh={async () => undefined} onMessage={() => undefined} />);
+    const row = screen.getByText('expired-client').closest('tr')!;
+    expect(within(row).getByText('Expired')).toBeTruthy();
+    expect(within(row).queryByText('Expiring Soon')).toBeNull();
+    expect(consoleError).not.toHaveBeenCalled();
   });
 
   it('syncs models directly from the provider list', async () => {
@@ -1045,6 +1077,7 @@ describe('admin console smoke test', () => {
     );
 
     fireEvent.click(screen.getByText('Provider A'));
+    fireEvent.click(screen.getByText('Advanced Settings'));
     fireEvent.change(await screen.findByRole('spinbutton', { name: 'Priority' }), { target: { value: '50' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply Codex Client Compatibility Preset' }));
@@ -1086,6 +1119,7 @@ describe('admin console smoke test', () => {
     );
 
     fireEvent.click(screen.getByText('Provider A'));
+    fireEvent.click(screen.getByText('Advanced Settings'));
     fireEvent.change(await screen.findByRole('spinbutton', { name: 'Weight' }), { target: { value: '0' } });
 
     expect(screen.getByText('Weight must be an integer from 1 to 2147483647.')).toBeTruthy();
@@ -1328,7 +1362,7 @@ describe('admin console smoke test', () => {
       return catalogResponse(input);
     });
     renderWithTheme(<Root />);
-    const detail = await screen.findByRole('dialog', { name: 'model-a' });
+    const detail = await screen.findByRole('dialog', { name: 'model-a' }, { timeout: 3000 });
     fireEvent.click(await within(detail).findByRole('button', { name: 'Set Provider Price' }));
     const editor = await screen.findByRole('dialog', { name: 'Add Price' });
     expect(within(editor).getByDisplayValue('model-a')).toBeTruthy();
@@ -1337,7 +1371,7 @@ describe('admin console smoke test', () => {
     }
     fireEvent.click(within(editor).getByRole('button', { name: 'Add Price' }));
     await waitFor(() => expect(created).toMatchObject({ provider_id: 7, model_name: 'model-a' }));
-    const restored = await screen.findByRole('dialog', { name: 'model-a' });
+    const restored = await screen.findByRole('dialog', { name: 'model-a' }, { timeout: 3000 });
     expect(await within(restored).findByText('$6 / MToken')).toBeTruthy();
     expect(priceItems[0].provider_id).toBeNull();
     expect(priceItems[0].price_data.base.input).toBe('5');
@@ -1389,13 +1423,13 @@ describe('admin console smoke test', () => {
       return catalogResponse(input);
     });
     renderWithTheme(<Root />);
-    expect(await screen.findByRole('button', { name: 'model-8' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'model-8' }, { timeout: 3000 })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'model-7' })).toBeNull();
     await act(async () => { window.history.back(); });
-    expect(await screen.findByRole('button', { name: 'model-7' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'model-7' }, { timeout: 3000 })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'model-8' })).toBeNull();
     await act(async () => { window.history.forward(); });
-    expect(await screen.findByRole('button', { name: 'model-8' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'model-8' }, { timeout: 3000 })).toBeTruthy();
     expect(consoleError).not.toHaveBeenCalled();
   });
 

@@ -33,9 +33,9 @@ function readString(formData: FormData, key: string) {
   return String(formData.get(key) ?? '').trim();
 }
 export function SettingsPage(props: SettingsPageProps) {
-  const [openSection, setOpenSection] = useState<SectionKey>('basic');
+  const [openSection, setOpenSection] = useState<SectionKey | null>('basic');
   const [busy, setBusy] = useState(false);
-  const toggleSection = (key: SectionKey) => setOpenSection(current => current === key ? current : key);
+  const toggleSection = (key: SectionKey) => setOpenSection(current => current === key ? null : key);
   const submitRuntimeSetting = async (event: FormEvent<HTMLFormElement>, setting: RuntimeSettingView) => {
     event.preventDefault();
     if (!props.settings.adminToken.trim()) {
@@ -114,6 +114,7 @@ export function SettingsPage(props: SettingsPageProps) {
         </Box>
       </SettingsSection>
 
+      <Box component="details"><Box component="summary" sx={{ cursor: 'pointer', py: 2, fontWeight: 600 }}>{t('高级设置')}</Box><Box className="section-stack">
       <SettingsSection title="运行设置" description="常用设置可直接生效，资源类设置按建议调整后重启。" open={openSection === 'runtime'} onToggle={() => toggleSection('runtime')}>
         <Box className="grid gap-4">
           <Box className="grid gap-3 md:grid-cols-2">
@@ -163,8 +164,10 @@ export function SettingsPage(props: SettingsPageProps) {
         </Box>
       </SettingsSection>
 
-      <SettingsSection title="稳定性与保护" description="风险项默认折叠。调整前先确认影响范围。" open={openSection === 'stability'} onToggle={() => toggleSection('stability')} warning>
+      <SettingsSection title="稳定性与保护" description="查看服务故障保护的配置与实际规则。" open={openSection === 'stability'} onToggle={() => toggleSection('stability')}>
         <Box className="grid gap-4 md:grid-cols-2">
+          <InfoTile label="单次请求最多尝试" value="3 次" />
+          <InfoTile label="首次故障冷却" value="至少 30 秒，反复失败递增" />
           <InfoTile label="失败阈值" value={String(props.systemConfig?.stability.circuit_breaker_failure_threshold ?? '—')} />
           <InfoTile label="熔断时长" value={props.systemConfig ? formatMs(props.systemConfig.stability.circuit_breaker_open_ms) : '—'} />
         </Box>
@@ -185,6 +188,7 @@ export function SettingsPage(props: SettingsPageProps) {
         <Typography color="text.secondary">{t('价格管理已移至模型中心。')}</Typography>
         <Button component={Link} to="/models/prices" variant="outline">{t('前往价格管理')}</Button>
       </SettingsSection>
+      </Box></Box>
     </Box>;
 }
 function SettingsSection(props: {

@@ -383,8 +383,8 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `ENDPOINT_SELECTOR_STRATEGY` | `weighted` | endpoint 选择策略（`weighted`/`latency`）。 |
-| `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | 熔断触发失败阈值。 |
-| `CIRCUIT_BREAKER_OPEN_MS` | `30000` | 熔断打开时长。 |
+| `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | 保留的地址 / Key 熔断阈值；首次故障仍立即进入至少 30 秒冷却。 |
+| `CIRCUIT_BREAKER_OPEN_MS` | `30000` | 地址 / Key 熔断基础时长；重复失败指数递增，默认上限 5 分钟，保留更长的原配置。 |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `2000` | 上游连接超时。 |
 | `UPSTREAM_POOL_IDLE_TIMEOUT_MS` | `30000` | 上游连接池空闲连接主动回收时间；最低 1000ms。 |
 | `UPSTREAM_POOL_MAX_IDLE_PER_HOST` | `8` | 每个上游主机最多保留的空闲连接数；设为 `0` 可禁用连接复用。 |
@@ -415,7 +415,15 @@ Provider 调度先按 API Key 与 Provider 的调度组交集授权，再使用�
 
 一旦上游已经返回响应，网关不会使用上述本地错误包装它：上游状态码、正文和安全响应头直接透传；模型级 `model_not_found` 错误也不会累计 Provider 熔断。
 
-每个请求最多使用初始 Provider 加 3 次 Provider 切换，即最多 4 个不同 Provider；每个 Provider 默认尝试 2 次，可在管理界面单独调整。401/403 只影响 key，402/429 进入 key quota 冷却，404 会跨 Provider 重试但不累计 Provider 熔断，网络错误、408/409/425 和 5xx 才累计 Provider 熔断。SSE 只允许在首个有效事件发送给客户端之前故障转移，之后不会重放。
+每个请求总共最多 **3 次目标尝试**，包含 HTTP、WebSocket 建连、HTTP 桥接和 OAuth 刷新后的重放。原有每上游 `max_attempts` 配置保留，但仍受这项总上限约束。第二次尝试前等待 500–750 毫秒，第三次前等待 1000–1250 毫秒；退避与首个响应共同受 `UPSTREAM_REQUEST_TIMEOUT_MS` 截止时间约束。已开始正常输出的长流继续使用原来的读取超时。
+
+地址出现连接错误、超时或服务故障后立即冷却，默认按 **30 / 60 / 120 / 240 / 300 秒**递增。冷却结束只允许一个恢复探测，成功后恢复，失败继续延长。401/403 只冷却对应 Key；402/429 按 Key 隔离额度，支持秒数和 HTTP 日期形式的 `Retry-After`，上游要求超过 5 分钟时不会截短。404 和正文明确标识的模型错误可跨服务切换，不累计服务熔断。健康的备用地址和 Key 仍可使用。
+
+所有候选暂时不可用时立即返回 `503 all_upstreams_temporarily_unavailable`、最早可重试时间与 `Retry-After`，不排队等恢复。客户端应遵守 `Retry-After`；客户端继续请求仍会产生访问日志，但冷却中的目标不会被转发。日志中的实际尝试次数可区分这两种情况。客户端断开后不再发起新重试；已经收到输出或用量的 HTTP/SSE/WS 请求不会重放。
+
+一个上游代表一家服务，多个服务地址共享该服务的 Key。地址按优先级主备使用；Key 默认轮流使用，也可选择“主备顺序”，旧加权配置继续兼容。新建服务、分组、地址和加密 Key 在一个数据库事务中保存；模型同步失败不会留下半套配置，可独立重试同步。地址和 Key 排序也整批保存。手动“重置故障状态”会重置服务、地址和 Key 的健康状态，**仍保留上游限流 / 额度等待窗口**。
+
+离线验证：`python3 scripts/run_resilience_regression.py`（先编译后端），覆盖真实请求数量、退避间隔、冷却期间并发拦截、长 Retry-After、地址 / Key 组合切换、流开始后不重放、WebSocket、OAuth 401 重放预算和断开取消。全部使用本地模拟上游与临时数据库。
 
 会话亲和、Provider 并发、EWMA、熔断和 quota 冷却均为进程内内存状态：重启会清空，多副本之间不会自动共享。Provider/API Key 配置、调度组、路由和请求决策链日志仍持久化到 SQLite/Postgres。多副本部署如需全局一致亲和，应在网关前配置稳定的会话级负载分配。
 

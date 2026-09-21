@@ -1,4 +1,5 @@
 export interface RoutingAvailability {
+  retry_at_ms?: number | null;
   available: boolean;
   reason: string | null;
 }
@@ -54,6 +55,9 @@ export interface RequestLogRow {
 }
 
 export interface RoutingTrace {
+  attempts_sent?: number;
+  attempt_limit?: number;
+  backoff_ms?: number;
   authorized_groups: Array<{ id: number; name: string }>;
   affinity: {
     source: string;
@@ -457,7 +461,7 @@ export interface ProviderSummary {
   websocket_enabled: boolean;
   beta_features: string[];
   request_overrides: RequestOverrides;
-  key_selection_strategy: 'round_robin' | 'weighted';
+  key_selection_strategy: 'round_robin' | 'ordered' | 'weighted';
   groups: ProviderGroupMembership[];
   max_attempts: number;
   max_concurrency: number | null;
@@ -655,6 +659,8 @@ export interface ProviderWorkspace {
 }
 
 export interface CreateProviderInput {
+  endpoints?: CreateEndpointInput[];
+  keys?: CreateProviderKeyInput[];
   name: string;
   provider_type: string;
   enabled: boolean;
@@ -664,7 +670,7 @@ export interface CreateProviderInput {
   websocket_enabled: boolean;
   beta_features: string[];
   request_overrides: RequestOverrides;
-  key_selection_strategy: 'round_robin' | 'weighted';
+  key_selection_strategy: 'round_robin' | 'ordered' | 'weighted';
   groups?: Array<{ group_id: number; priority_override: number | null }>;
   max_attempts: number;
   max_concurrency: number | null;
@@ -684,7 +690,7 @@ export interface UpdateProviderInput {
   websocket_enabled?: boolean;
   beta_features?: string[];
   request_overrides?: RequestOverrides;
-  key_selection_strategy?: 'round_robin' | 'weighted';
+  key_selection_strategy?: 'round_robin' | 'ordered' | 'weighted';
   groups?: Array<{ group_id: number; priority_override: number | null }>;
   max_attempts?: number;
   max_concurrency?: number | null;

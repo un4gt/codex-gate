@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Copy, Plus, Power, Trash2 } from "lucide-react";
+import Alert from '@mui/material/Alert';
+import { ConfirmAction } from '@/components/console/ConfirmAction';
 import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
@@ -42,13 +44,14 @@ function readBool(formData: FormData, key: string): boolean {
   return formData.get(key) === 'on';
 }
 function isExpiringSoon(expiresAtMs: number | null) {
-  return typeof expiresAtMs === 'number' && expiresAtMs - Date.now() < 7 * 24 * 60 * 60 * 1000;
+  return typeof expiresAtMs === 'number' && expiresAtMs > Date.now() && expiresAtMs - Date.now() < 7 * 24 * 60 * 60 * 1000;
 }
 function keyStatus(item: ApiKeyWorkspace) {
   if (!item.apiKey.enabled) return {
     label: '停用',
     tone: 'disabled' as const
   };
+  if (item.apiKey.expires_at_ms !== null && item.apiKey.expires_at_ms <= Date.now()) return { label: '已过期', tone: 'error' as const };
   if (isExpiringSoon(item.apiKey.expires_at_ms)) return {
     label: '即将过期',
     tone: 'warning' as const
@@ -59,6 +62,8 @@ function keyStatus(item: ApiKeyWorkspace) {
   };
 }
 export function ApiKeysPage(props: ApiKeysPageProps) {
+  const [removeItem, setRemoveItem] = useState<ApiKeyWorkspace | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -68,10 +73,12 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
   const selected = props.items.find(item => item.apiKey.id === selectedId) ?? null;
   const openCreateDrawer = () => {
     setCreated(null);
+    setFormError(null);
     setCreateGroupIds(props.groups.filter(group => group.is_default).map(group => group.id));
     setCreateOpen(true);
   };
   const openDetails = (item: ApiKeyWorkspace) => {
+    setFormError(null);
     setSelectedId(item.apiKey.id);
     setEditGroupIds(item.apiKey.provider_groups.map(group => group.id));
   };
@@ -109,7 +116,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         name: payload.name
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '创建密钥失败。');
+      setFormError(error instanceof Error ? error.message : '创建访问密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -137,7 +144,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         name: payload.name
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新密钥失败。');
+      setFormError(error instanceof Error ? error.message : '更新密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -153,26 +160,23 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         name: item.apiKey.name
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新状态失败。');
+      setFormError(error instanceof Error ? error.message : '更新状态失败。');
     } finally {
       setBusy(null);
     }
   };
   const handleDelete = async (item: ApiKeyWorkspace) => {
     if (!ensureLive()) return;
-    const confirmed = window.confirm(t('删除密钥“{{name}}”？该操作不可撤销。', {
-      name: item.apiKey.name
-    }));
-    if (!confirmed) return;
     setBusy(`delete-${item.apiKey.id}`);
     try {
       await deleteApiKey(props.settings, item.apiKey.id);
+      setRemoveItem(null);
       setSelectedId(current => current === item.apiKey.id ? null : current);
       await props.onRefresh(t('密钥 {{name}} 已删除。', {
         name: item.apiKey.name
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除密钥失败。');
+      setFormError(error instanceof Error ? error.message : '删除密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -183,7 +187,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     hint: '当前已创建的访问密钥'
   }, {
     label: '启用中',
-    value: formatCompactInteger(props.items.filter(item => item.apiKey.enabled).length),
+    value: formatCompactInteger(props.items.filter(item => item.apiKey.enabled && (item.apiKey.expires_at_ms === null || item.apiKey.expires_at_ms > Date.now())).length),
     hint: '可立即发起请求'
   }, {
     label: '即将过期',
@@ -196,14 +200,14 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
   }];
   return <Box className="section-stack">
       <PageHeader actions={<Button type="button" onClick={openCreateDrawer}>
-            <Plus />{t("创建密钥")}</Button>} />
+            <Plus />{t("创建访问密钥")}</Button>} />
 
       <StatsGrid items={stats()} />
 
       <Card>
         <Box className="flex flex-col gap-2 p-4 pb-3">
-          <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("密钥列表")}</Typography>
-          <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t("优先展示正在使用的密钥。")}</Typography>
+          <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("访问密钥列表")}</Typography>
+          <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t("用于客户端连接本应用，与上游 API Key 分开管理。")}</Typography>
         </Box>
         <CardContent>
           {props.items.length > 0 ? <TableContainer><Table>
@@ -252,12 +256,13 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       </TableRow>;
             })}
               </TableBody>
-            </Table></TableContainer> : <EmptyState title="还没有密钥" description="先创建第一条访问密钥，再提供给接入方使用。" action={<Button type="button" onClick={openCreateDrawer}>{t("创建密钥")}</Button>} />}
+            </Table></TableContainer> : <EmptyState title="还没有密钥" description="先创建第一条访问密钥，再提供给接入方使用。" action={<Button type="button" onClick={openCreateDrawer}>{t("创建访问密钥")}</Button>} />}
         </CardContent>
       </Card>
 
-      <DetailDrawer open={createOpen} title="创建密钥" description="填写必要信息后立即生成。" onClose={closeCreateDrawer}>
+      <DetailDrawer open={createOpen} title="创建访问密钥" description="填写必要信息后立即生成。" onClose={closeCreateDrawer}>
         <Box className="flex flex-col gap-3" onSubmit={event => void submitCreate(event)} component="form">
+          {formError ? <Alert severity="error">{formError}</Alert> : null}
           <Box className="flex flex-col gap-4">
             <FormControl>
               <FormLabel>{t("名称")}</FormLabel>
@@ -268,7 +273,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
               <InputBase name="expires_at" type="datetime-local" />
               <FormHelperText>{t("留空表示不过期。")}</FormHelperText>
             </FormControl>
-            <FormControl>
+            <Box component="details"><Box component="summary" sx={{ cursor: 'pointer', mb: 1 }}>{t('高级：调度组权限')}</Box><FormControl>
               <FormLabel>{t('调度组')}</FormLabel>
               <Select
                 multiple
@@ -292,7 +297,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   </MenuItem>)}
               </Select>
               <FormHelperText>{t('仅路由到所选组中的上游。')}</FormHelperText>
-            </FormControl>
+            </FormControl></Box>
           </Box>
           <Box className="grid gap-3 md:grid-cols-2">
             <Box className="check-row" component="label">
@@ -304,8 +309,8 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
               <Box component="span">{t('记录请求元数据')}</Box>
             </Box>
           </Box>
-          <Button type="submit" disabled={busy === 'create'}>
-            {t(busy === 'create' ? '创建中…' : '创建密钥')}
+          <Button type="submit" disabled={busy === 'create' || created !== null}>
+            {t(busy === 'create' ? '创建中…' : '创建访问密钥')}
           </Button>
           {created ? (createdKey => <Card className="border-success-border bg-success-surface">
                 <CardContent className="flex flex-col gap-2 p-4">
@@ -343,6 +348,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 </Box>
 
                 <Box className="flex flex-col gap-3" onSubmit={event => void submitUpdate(event)} component="form">
+                  {formError ? <Alert severity="error">{formError}</Alert> : null}
                   <Box className="flex flex-col gap-4">
                     <FormControl>
                       <FormLabel>{t("名称")}</FormLabel>
@@ -352,7 +358,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       <FormLabel>{t("到期时间")}</FormLabel>
                       <InputBase name="expires_at" type="datetime-local" defaultValue={formatDateTimeLocalInput(data.apiKey.expires_at_ms)} />
                     </FormControl>
-                    <FormControl>
+                    <Box component="details"><Box component="summary" sx={{ cursor: 'pointer', mb: 1 }}>{t('高级：调度组权限')}</Box><FormControl>
                       <FormLabel>{t('调度组')}</FormLabel>
                       <Select
                         multiple
@@ -375,7 +381,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                             <ListItemText primary={group.name} />
                           </MenuItem>)}
                       </Select>
-                    </FormControl>
+                    </FormControl></Box>
                   </Box>
 
                   <Box className="grid gap-3 md:grid-cols-2">
@@ -397,12 +403,13 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       <Power />
                       {t(data.apiKey.enabled ? '停用' : '启用')}
                     </Button>
-                    <Button type="button" variant="outline" disabled={busy === `delete-${data.apiKey.id}`} onClick={() => void handleDelete(data)}>
+                    <Button type="button" variant="outline" disabled={busy === `delete-${data.apiKey.id}`} onClick={() => { setFormError(null); setRemoveItem(data); }}>
                       <Trash2 />{t("删除")}</Button>
                   </Box>
                 </Box>
               </Box>;
       })(selected) : null}
       </DetailDrawer>
+      <ConfirmAction open={removeItem !== null} title={t('删除访问密钥')} description={removeItem ? t('删除密钥“{{name}}”？该操作不可撤销。', { name: removeItem.apiKey.name }) : ''} error={formError} busy={busy !== null} onClose={() => setRemoveItem(null)} onConfirm={() => { if (removeItem) void handleDelete(removeItem); }} />
     </Box>;
 }

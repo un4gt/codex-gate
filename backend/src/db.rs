@@ -1,3 +1,6 @@
+mod provider_config;
+pub use provider_config::ProviderBundle;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
@@ -8,6 +11,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool, postgres::Pg
 
 use crate::crypto;
 use crate::pricing::{PriceCard, PriceVersion};
+#[cfg(test)]
 use crate::request_overrides::RequestOverrides;
 use crate::types::{
     ApiKeyAuth, GatewayModelPolicy, ModelAlias, ModelAliasTarget, ModelPrice, ModelRoute,
@@ -473,6 +477,7 @@ WHERE id = $1
         }
     }
 
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "insert path mirrors upstream_providers table columns for explicit SQL binding"
@@ -2956,7 +2961,8 @@ async fn upsert_model_route_sqlite(
     provider_ids: &[i64],
     now_ms: i64,
 ) -> Result<(), DbError> {
-    let mut tx = pool.begin().await?;
+    // Acquire the write lock before reading to avoid SQLITE_BUSY_SNAPSHOT during telemetry flushes.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     let existing = sqlx::query(
         r#"

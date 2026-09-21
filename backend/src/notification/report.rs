@@ -7,7 +7,6 @@ use super::store::UsageGroupRow;
 use super::{
     AlertMetric, AlertScopeKind, NotificationError, NotificationLocale, ThresholdAlertConfig,
 };
-use crate::health::{CircuitState, summarize_provider_health};
 use crate::pricing::PriceVersion;
 use crate::state::SharedState;
 use crate::types::Usage;
@@ -491,42 +490,11 @@ fn aggregate_for_scope(
 
 async fn provider_health_counts(
     state: &SharedState,
-    now_ms: i64,
+    _now_ms: i64,
 ) -> Result<(u32, u32, u32), NotificationError> {
-    let snapshot = state
-        .caches
-        .upstream
-        .get(&state.db, &state.config.master_key)
+    crate::routing_availability::health_counts(state)
         .await
-        .map_err(NotificationError::internal)?;
-    let mut healthy = 0_u32;
-    let mut warning = 0_u32;
-    let mut error = 0_u32;
-    for provider in &snapshot.providers {
-        let endpoints = snapshot
-            .endpoints_by_provider
-            .get(&provider.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let keys = snapshot
-            .keys_by_provider
-            .get(&provider.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let health = summarize_provider_health(
-            endpoints,
-            keys,
-            &state.endpoint_health,
-            &state.upstream_key_health,
-            now_ms,
-        );
-        match health.state {
-            CircuitState::Closed => healthy += 1,
-            CircuitState::HalfOpen => warning += 1,
-            CircuitState::Open => error += 1,
-        }
-    }
-    Ok((healthy, warning, error))
+        .map_err(NotificationError::internal)
 }
 
 fn sort_dimensions(items: &mut [UsageDimension]) {

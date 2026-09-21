@@ -247,14 +247,21 @@ impl ProviderRuntimeBook {
             state.half_open_successes = 0;
             return BreakerTransition::Unchanged;
         }
-        state.consecutive_failures = if previous_state == CircuitState::HalfOpen {
-            provider.circuit_breaker_failure_threshold.max(1) as u32
-        } else {
-            state.consecutive_failures.saturating_add(1)
-        };
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        if previous_state == CircuitState::HalfOpen {
+            state.consecutive_failures = state
+                .consecutive_failures
+                .max(provider.circuit_breaker_failure_threshold.max(1) as u32);
+        }
         if state.consecutive_failures >= provider.circuit_breaker_failure_threshold.max(1) as u32 {
-            state.open_until_ms =
-                Some(now_ms.saturating_add(provider.circuit_breaker_open_ms.max(1)));
+            let reopen_count = state
+                .consecutive_failures
+                .saturating_sub(provider.circuit_breaker_failure_threshold.max(1) as u32)
+                + 1;
+            state.open_until_ms = Some(now_ms.saturating_add(crate::resilience::cooldown_ms(
+                provider.circuit_breaker_open_ms,
+                reopen_count,
+            )));
             state.half_open_successes = 0;
             advance_generation(state);
             return BreakerTransition::Opened;
@@ -322,6 +329,14 @@ pub struct ProviderAttemptGuard {
 }
 
 impl ProviderAttemptGuard {
+    pub fn is_current(&self) -> bool {
+        self.book
+            .by_provider
+            .read()
+            .get(&self.provider.id)
+            .is_some_and(|state| attempt_token_matches(state, self.token))
+    }
+
     pub fn is_half_open_probe(&self) -> bool {
         self.token.probe_id.is_some()
     }
@@ -454,6 +469,15 @@ pub struct QuotaRuntimeView {
     pub updated_at_ms: Option<i64>,
 }
 
+impl QuotaRuntimeView {
+    pub fn blocked_until_ms(&self) -> Option<i64> {
+        (self.remaining_requests.is_some_and(|n| n <= 0)
+            || self.remaining_tokens.is_some_and(|n| n <= 0))
+        .then_some(self.reset_at_ms)
+        .flatten()
+    }
+}
+
 #[derive(Default)]
 struct QuotaState {
     remaining_requests: Option<i64>,
@@ -485,8 +509,8 @@ impl QuotaBook {
             .cooldown_until_ms
             .is_none_or(|until_ms| until_ms <= now_ms)
             && !matches!(
-                (state.remaining_requests, state.reset_at_ms),
-                (Some(remaining), Some(reset_at)) if remaining <= 0 && reset_at > now_ms
+                (state.remaining_requests, state.remaining_tokens, state.reset_at_ms),
+                (requests, tokens, Some(reset_at)) if reset_at > now_ms && (requests.is_some_and(|n| n <= 0) || tokens.is_some_and(|n| n <= 0))
             )
     }
 
@@ -498,8 +522,8 @@ impl QuotaBook {
             .cooldown_until_ms
             .is_none_or(|until_ms| until_ms <= now_ms)
             && !matches!(
-                (state.remaining_requests, state.reset_at_ms),
-                (Some(remaining), Some(reset_at)) if remaining <= 0 && reset_at > now_ms
+                (state.remaining_requests, state.remaining_tokens, state.reset_at_ms),
+                (requests, tokens, Some(reset_at)) if reset_at > now_ms && (requests.is_some_and(|n| n <= 0) || tokens.is_some_and(|n| n <= 0))
             );
         if !available {
             return false;
@@ -551,17 +575,25 @@ impl QuotaBook {
 
         if matches!(status, 402 | 429) {
             state.consecutive_rate_limits = state.consecutive_rate_limits.saturating_add(1);
-            let retry_after_ms = retry_after_ms(headers)
-                .or_else(|| state.reset_at_ms.map(|reset| reset.saturating_sub(now_ms)))
+            let retry_after_ms = crate::resilience::retry_after_ms(headers, now_ms)
+                .into_iter()
+                .chain(state.reset_at_ms.map(|reset| reset.saturating_sub(now_ms)))
+                .max()
                 .filter(|value| *value > 0)
                 .unwrap_or_else(|| {
-                    let base = fallback_cooldown.as_millis().min(i64::MAX as u128) as i64;
-                    let shift = state.consecutive_rate_limits.saturating_sub(1).min(4);
-                    base.saturating_mul(1_i64 << shift)
+                    crate::resilience::cooldown_ms(
+                        fallback_cooldown.as_millis().min(i64::MAX as u128) as i64,
+                        state.consecutive_rate_limits,
+                    )
                 })
-                .clamp(1_000, 5 * 60 * 1_000);
-            state.cooldown_until_ms = Some(now_ms.saturating_add(retry_after_ms));
-        } else if status < 400 {
+                .max(1_000);
+            state.cooldown_until_ms = Some(
+                state
+                    .cooldown_until_ms
+                    .unwrap_or(0)
+                    .max(now_ms.saturating_add(retry_after_ms)),
+            );
+        } else if status < 400 && state.cooldown_until_ms.is_none_or(|until| until <= now_ms) {
             state.consecutive_rate_limits = 0;
             state.cooldown_until_ms = None;
         }
@@ -586,9 +618,13 @@ impl QuotaBook {
     pub fn set_cooldown_until(&self, key_id: i64, until_ms: i64, now_ms: i64) {
         let mut guard = self.by_key.write();
         let state = guard.entry(key_id).or_default();
-        state.cooldown_until_ms = (until_ms > now_ms).then_some(until_ms);
-        state.reset_at_ms = (until_ms > now_ms).then_some(until_ms);
-        state.remaining_requests = (until_ms > now_ms).then_some(0);
+        expire_quota_state(state, now_ms);
+        if until_ms > now_ms {
+            // Error-body hints may arrive after headers with a longer Retry-After.
+            state.cooldown_until_ms = Some(state.cooldown_until_ms.unwrap_or(0).max(until_ms));
+            state.reset_at_ms = Some(state.reset_at_ms.unwrap_or(0).max(until_ms));
+            state.remaining_requests = Some(0);
+        }
         state.updated_at_ms = Some(now_ms);
     }
 
@@ -598,6 +634,7 @@ impl QuotaBook {
         state.cooldown_until_ms = None;
         state.reset_at_ms = None;
         state.remaining_requests = None;
+        state.remaining_tokens = None;
         state.updated_at_ms = Some(now_ms);
     }
 
@@ -630,33 +667,27 @@ fn first_i64_header(headers: &HeaderMap, names: &[&str]) -> Option<i64> {
 }
 
 fn first_reset_header_ms(headers: &HeaderMap, names: &[&str], now_ms: i64) -> Option<i64> {
-    names.iter().find_map(|name| {
-        let value = headers.get(*name)?.to_str().ok()?.trim();
-        if let Ok(timestamp) = value.parse::<i64>() {
-            if timestamp < 0 {
-                return None;
+    names
+        .iter()
+        .filter_map(|name| {
+            let value = headers.get(*name)?.to_str().ok()?.trim();
+            if let Ok(timestamp) = value.parse::<i64>() {
+                if timestamp < 0 {
+                    return None;
+                }
+                return if timestamp > 10_000_000_000 {
+                    Some(timestamp)
+                } else {
+                    timestamp.checked_mul(1_000)
+                };
             }
-            return if timestamp > 10_000_000_000 {
-                Some(timestamp)
-            } else {
-                timestamp.checked_mul(1_000)
-            };
-        }
-        if let Ok(timestamp) = OffsetDateTime::parse(value, &Rfc3339) {
-            let millis = timestamp.unix_timestamp_nanos() / 1_000_000;
-            return i64::try_from(millis).ok().filter(|value| *value >= 0);
-        }
-        parse_relative_duration_ms(value).and_then(|duration| now_ms.checked_add(duration))
-    })
-}
-
-fn retry_after_ms(headers: &HeaderMap) -> Option<i64> {
-    let value = headers.get("retry-after")?.to_str().ok()?.trim();
-    value
-        .parse::<i64>()
-        .ok()
-        .map(|seconds| seconds.saturating_mul(1_000))
-        .or_else(|| parse_relative_duration_ms(value))
+            if let Ok(timestamp) = OffsetDateTime::parse(value, &Rfc3339) {
+                let millis = timestamp.unix_timestamp_nanos() / 1_000_000;
+                return i64::try_from(millis).ok().filter(|value| *value >= 0);
+            }
+            parse_relative_duration_ms(value).and_then(|duration| now_ms.checked_add(duration))
+        })
+        .max()
 }
 
 fn parse_relative_duration_ms(value: &str) -> Option<i64> {
@@ -788,6 +819,7 @@ mod tests {
         let old_attempt = book
             .try_begin_attempt(&provider, 50)
             .expect("old closed attempt");
+        assert!(old_attempt.is_current());
         book.try_begin_attempt(&provider, 51)
             .expect("opening attempt")
             .failure(Some(503), "upstream_error", "failed", 51);
@@ -795,6 +827,8 @@ mod tests {
         let current_probe = book
             .try_begin_attempt(&provider, probe_at)
             .expect("current half-open probe");
+        assert!(!old_attempt.is_current());
+        assert!(current_probe.is_current());
 
         old_attempt.success(Some(200), Some(10), probe_at + 1);
 
@@ -838,6 +872,53 @@ mod tests {
 
         assert!(!book.is_available(9, 2_999));
         assert!(book.is_available(9, 3_001));
+    }
+
+    #[test]
+    fn long_retry_after_survives_late_success_and_shorter_errors() {
+        let book = QuotaBook::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            HeaderValue::from_static("Thu, 01 Jan 1970 01:00:00 GMT"),
+        );
+        book.observe_response(9, 429, &headers, 1_000, Duration::from_secs(30));
+        book.observe_response(9, 200, &HeaderMap::new(), 2_000, Duration::from_secs(30));
+        headers.insert("retry-after", HeaderValue::from_static("1"));
+        book.observe_response(9, 429, &headers, 3_000, Duration::from_secs(30));
+        assert_eq!(book.snapshot(9, 4_000).cooldown_until_ms, Some(3_600_000));
+        assert!(!book.is_available(9, 3_599_999));
+        assert!(book.is_available(9, 3_600_001));
+    }
+
+    #[test]
+    fn cooldown_hints_never_shorten_an_active_retry_after() {
+        let book = QuotaBook::new();
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("3600"));
+        book.observe_response(9, 429, &headers, 1_000, Duration::from_secs(30));
+        book.set_cooldown_until(9, 61_000, 2_000);
+        book.set_cooldown_until(9, 1_000, 3_000);
+        assert_eq!(book.snapshot(9, 4_000).cooldown_until_ms, Some(3_601_000));
+        assert!(!book.is_available(9, 61_001));
+        book.clear_cooldown(9, 61_002);
+        assert!(book.is_available(9, 61_002));
+    }
+
+    #[test]
+    fn exhausted_tokens_wait_for_the_longest_reset_window() {
+        let book = QuotaBook::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-remaining-tokens",
+            HeaderValue::from_static("0"),
+        );
+        headers.insert("x-ratelimit-reset-requests", HeaderValue::from_static("2s"));
+        headers.insert("x-ratelimit-reset-tokens", HeaderValue::from_static("60s"));
+        book.observe_response(9, 200, &headers, 1_000, Duration::from_secs(30));
+        assert!(!book.is_available(9, 3_001));
+        assert!(!book.reserve_request(9, 3_001));
+        assert!(book.is_available(9, 61_001));
     }
 
     #[test]

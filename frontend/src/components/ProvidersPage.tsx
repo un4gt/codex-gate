@@ -2,7 +2,9 @@ import { Link, useSearchParams } from 'react-router';
 import { UpstreamKeyModels } from './UpstreamKeyModels';
 import { routingAvailabilityLabel } from '@/lib/routingAvailability';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { AlertCircle, Check, ChevronRight, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from "lucide-react";
+import { ArrowUp, ArrowDown, AlertCircle, Check, ChevronRight, Copy, GripVertical, Plus, RefreshCw, Save, ShieldCheck, Stethoscope, Trash2 } from "lucide-react";
+import { ConfirmAction } from '@/components/console/ConfirmAction';
+import { RecoveryNotice } from '@/components/console/RecoveryNotice';
 import { DetailDrawer } from '@/components/console/DetailDrawer';
 import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
@@ -16,7 +18,7 @@ import {
 } from '@/components/console/RequestOverridesEditor';
 import { CodexOAuthLoginDialog, CodexOAuthPanel } from '@/components/CodexOAuthPanel';
 import { t } from '@/lib/i18n';
-import { createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, resetProviderCircuit, syncProviderModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateProviderKey } from '../lib/api';
+import { createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, resetProviderCircuit, reorderProviderChildren, syncProviderModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateProviderKey } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
 import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, ProviderGroup, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
 import Alert from "@mui/material/Alert";
@@ -59,7 +61,7 @@ interface DraftInputRow {
   id: string;
   value: string;
 }
-type ProviderCreateStage = 'editing' | 'provider' | 'connections' | 'models' | 'sync_failed' | 'complete' | 'partial';
+type ProviderCreateStage = 'editing' | 'provider' | 'models' | 'sync_failed' | 'complete';
 interface CreatedProviderResources {
   providerId: number;
   endpointIds: number[];
@@ -138,6 +140,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const showProviderTable = useMediaQuery(theme.breakpoints.up('sm'));
   const providerGroups = props.groups ?? [];
   const [busy, setBusy] = useState<string | null>(null);
+  const [removeAction, setRemoveAction] = useState<{ title: string; run: () => Promise<void> } | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
   const [createPriority, setCreatePriority] = useState('100');
@@ -178,7 +183,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const [deleteProviderError, setDeleteProviderError] = useState<string | null>(null);
   const deleteCancelButtonRef = useRef<HTMLButtonElement>(null);
   const [draggingEndpointId, setDraggingEndpointId] = useState<number | null>(null);
-  const [draggingKeyId, setDraggingKeyId] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
     status: number | null;
@@ -291,16 +295,10 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return t('模型同步完成，可以关闭并查看上游详情。');
     }
     if (createStage === 'sync_failed') {
-      return t('上游已创建。可修改连接信息后保存并重试同步，也可以稍后继续。');
-    }
-    if (createStage === 'partial') {
-      return t('上游已部分创建，请关闭后在上游详情中修复。');
+      return t('配置已完整保存。可重试同步，或完成后在详情中修改连接信息。');
     }
     if (createStage === 'provider') {
       return t('正在创建上游基本配置…');
-    }
-    if (createStage === 'connections') {
-      return t(isCreateCodex ? '正在保存 Codex 服务地址…' : '正在保存服务地址和 API 密钥…');
     }
     if (createStage === 'models') {
       return t('正在从上游同步模型…');
@@ -316,7 +314,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
   };
   const createIsBusy = ['provider', 'connections', 'models'].includes(createStage);
   const createIsPersisted = createResources !== null;
-  const createFieldsDisabled = createIsBusy || createStage === 'complete' || createStage === 'partial';
+  const createFieldsDisabled = createIsBusy || createIsPersisted;
   const [selectedUpstreamKeyId, setSelectedUpstreamKeyId] = useState<number | null>(null);
   const providerTypeDescription = (value: string) => PROVIDER_TYPE_OPTIONS.find(option => option.value === value)?.description ?? '—';
   const stats = (): StatItem[] => {
@@ -406,44 +404,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
       props.onMessage(message);
     }
   };
-  const retryCreatedProviderSync = async (payload: CreateProviderInput, resources: CreatedProviderResources) => {
-    const baseUrls = createBaseUrlValues();
-    const apiKeys = createApiKeyValues();
-    if (baseUrls.length !== resources.endpointIds.length || apiKeys.length !== resources.keyIds.length) {
-      const message = '已创建的服务地址或 API 密钥数量发生变化，请在上游详情中调整。';
-      setCreateSubmitError(message);
-      props.onMessage(message);
-      return;
-    }
-    setCreateStage('connections');
-    setCreateSubmitError(null);
-    try {
-      await Promise.all([
-        updateProvider(props.settings, resources.providerId, payload),
-        ...resources.endpointIds.map((endpointId, index) => updateEndpoint(props.settings, endpointId, {
-          name: `地址 ${index + 1}`,
-          enabled: true,
-          base_url: baseUrls[index],
-          priority: priorityForIndex(index),
-          weight: 1
-        })),
-        ...resources.keyIds.map((keyId, index) => updateProviderKey(props.settings, keyId, {
-          name: `密钥 ${index + 1}`,
-          secret: apiKeys[index],
-          enabled: true,
-          priority: priorityForIndex(index),
-          weight: 1
-        }))
-      ]);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '保存连接信息失败。';
-      setCreateStage('sync_failed');
-      setCreateSubmitError(message);
-      props.onMessage(message);
-      return;
-    }
-    await syncCreatedProvider(resources, payload.name);
-  };
   const submitProviderCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!ensureLive()) return;
@@ -472,66 +432,18 @@ export function ProvidersPage(props: ProvidersPageProps) {
       return;
     }
     if (createResources) {
-      await retryCreatedProviderSync(payload, createResources);
+      await syncCreatedProvider(createResources, payload.name);
       return;
     }
     setCreateStage('provider');
     try {
-      const created = await createProvider(props.settings, payload);
+      const created = await createProvider(props.settings, {
+        ...payload,
+        endpoints: baseUrls.map((base_url, index) => ({ name: `地址 ${index + 1}`, base_url, enabled: true, priority: priorityForIndex(index), weight: 1 })),
+        keys: (isCreateCodex ? [] : apiKeys).map((secret, index) => ({ name: `密钥 ${index + 1}`, secret, enabled: true, priority: priorityForIndex(index), weight: 1 })),
+      });
       const providerId = created.id;
-      setCreateStage('connections');
-      const [endpointResults, keyResults] = await Promise.all([
-        Promise.allSettled(baseUrls.map((baseUrl, index) => {
-          const endpointPayload: CreateEndpointInput = {
-            name: `地址 ${index + 1}`,
-            enabled: true,
-            base_url: baseUrl,
-            priority: priorityForIndex(index),
-            weight: 1
-          };
-          return createEndpoint(props.settings, providerId, endpointPayload);
-        })),
-        Promise.allSettled((isCreateCodex ? [] : apiKeys).map((apiKey, index) => {
-          const keyPayload: CreateProviderKeyInput = {
-            name: `密钥 ${index + 1}`,
-            secret: apiKey,
-            enabled: true,
-            priority: priorityForIndex(index),
-            weight: 1
-          };
-          return createProviderKey(props.settings, providerId, keyPayload);
-        }))
-      ]);
-      const endpointIds = endpointResults.flatMap(result => result.status === 'fulfilled' ? [result.value.id] : []);
-      const keyIds = keyResults.flatMap(result => result.status === 'fulfilled' ? [result.value.id] : []);
-      const failure = [...endpointResults, ...keyResults].find(result => result.status === 'rejected');
-      const resources = {
-        providerId,
-        endpointIds,
-        keyIds
-      };
-      if (failure?.status === 'rejected') {
-        const failureMessage = failure.reason instanceof Error ? failure.reason.message : '保存连接信息失败。';
-        try {
-          await deleteProvider(props.settings, providerId);
-          setCreateStage('editing');
-          const message = t('保存连接信息失败，已回滚新建上游：{{message}}', {
-            message: failureMessage
-          });
-          setCreateSubmitError(message);
-          props.onMessage(message);
-        } catch (rollbackError) {
-          setCreateResources(resources);
-          setCreateStage('partial');
-          const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : '自动回滚失败。';
-          const message = t('上游已部分创建，自动回滚失败：{{message}}', {
-            message: rollbackMessage
-          });
-          setCreateSubmitError(message);
-          props.onMessage(message);
-        }
-        return;
-      }
+      const resources = { providerId, endpointIds: created.endpoint_ids, keyIds: created.key_ids };
       setCreateBaseUrls(baseUrls.map(value => ({ id: createDraftInputRow('url').id, value })));
       setCreateApiKeys(apiKeys.map(value => ({ id: createDraftInputRow('key').id, value })));
       setCreateResources(resources);
@@ -620,7 +532,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
       websocket_enabled: readBool(formData, 'provider_websocket_enabled'),
       beta_features: readBool(formData, 'provider_responses_http_to_ws') ? [BETA_FEATURE_RESPONSES_HTTP_TO_WS] : [],
       request_overrides: parsedRequestOverrides.value,
-      key_selection_strategy: item.provider.key_selection_strategy || 'round_robin',
       groups: providerGroups.length > 0 ? groups : undefined,
       max_attempts: readInt(formData, 'provider_max_attempts', item.provider.max_attempts),
       max_concurrency: maxConcurrencyRaw
@@ -632,11 +543,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         'provider_circuit_breaker_failure_threshold',
         item.provider.circuit_breaker_failure_threshold,
       ),
-      circuit_breaker_open_ms: readInt(
-        formData,
-        'provider_circuit_breaker_open_ms',
-        item.provider.circuit_breaker_open_ms,
-      ),
+      circuit_breaker_open_ms: Math.round(Number(formData.get('provider_circuit_breaker_open_seconds') ?? item.provider.circuit_breaker_open_ms / 1000) * 1000),
       circuit_breaker_half_open_success_threshold: readInt(
         formData,
         'provider_circuit_breaker_half_open_success_threshold',
@@ -700,6 +607,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       props.onMessage('服务地址不能为空。');
       return;
     }
+    setConnectionError(null);
     setBusy(`endpoint-create-${item.provider.id}`);
     try {
       await createEndpoint(props.settings, item.provider.id, payload);
@@ -707,7 +615,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         name: payload.name
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '创建目标失败。');
+      setConnectionError(error instanceof Error ? error.message : '创建目标失败。');
     } finally {
       setBusy(null);
     }
@@ -724,6 +632,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       priority: current?.priority ?? 100,
       weight: current?.weight ?? 1
     };
+    setConnectionError(null);
     setBusy(`endpoint-${endpointId}`);
     try {
       await updateEndpoint(props.settings, endpointId, payload);
@@ -731,7 +640,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         name: payload.name ?? ''
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新目标失败。');
+      setConnectionError(error instanceof Error ? error.message : '更新目标失败。');
     } finally {
       setBusy(null);
     }
@@ -752,6 +661,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       props.onMessage('API 密钥不能为空。');
       return;
     }
+    setConnectionError(null);
     setBusy(`key-create-${item.provider.id}`);
     try {
       await createProviderKey(props.settings, item.provider.id, payload);
@@ -759,7 +669,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
         name: payload.name
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '创建上游密钥失败。');
+      setConnectionError(error instanceof Error ? error.message : '创建上游密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -776,6 +686,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       priority: current?.priority ?? 100,
       weight: current?.weight ?? 1
     };
+    setConnectionError(null);
     setBusy(`key-${keyId}`);
     try {
       await updateProviderKey(props.settings, keyId, payload);
@@ -783,13 +694,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
         name: payload.name ?? ''
       }));
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '更新上游密钥失败。');
+      setConnectionError(error instanceof Error ? error.message : '更新上游密钥失败。');
     } finally {
       setBusy(null);
     }
   };
-  const reorderEndpoints = async (item: ProviderWorkspace, targetId: number) => {
-    const sourceId = draggingEndpointId;
+  const reorderEndpoints = async (item: ProviderWorkspace, targetId: number, movingId = draggingEndpointId) => {
+    const sourceId = movingId;
     setDraggingEndpointId(null);
     if (sourceId === null || sourceId === targetId || !ensureLive()) return;
     const sourceIndex = item.endpoints.findIndex(endpoint => endpoint.id === sourceId);
@@ -800,13 +711,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     next.splice(targetIndex, 0, source);
     setBusy(`endpoint-reorder-${item.provider.id}`);
     try {
-      await Promise.all(next.map((endpoint, index) => updateEndpoint(props.settings, endpoint.id, {
-        name: endpoint.name,
-        base_url: endpoint.base_url,
-        enabled: endpoint.enabled,
-        priority: priorityForIndex(index),
-        weight: endpoint.weight
-      })));
+      await reorderProviderChildren(props.settings, item.provider.id, 'endpoints', next.map(endpoint => endpoint.id));
       await props.onRefresh('服务地址顺序已更新。');
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新服务地址顺序失败。');
@@ -814,9 +719,9 @@ export function ProvidersPage(props: ProvidersPageProps) {
       setBusy(null);
     }
   };
-  const reorderKeys = async (item: ProviderWorkspace, targetId: number) => {
-    const sourceId = draggingKeyId;
-    setDraggingKeyId(null);
+  const reorderKeys = async (item: ProviderWorkspace, targetId: number, movingId: number) => {
+    if (item.provider.key_selection_strategy !== 'ordered') return;
+    const sourceId = movingId;
     if (sourceId === null || sourceId === targetId || !ensureLive()) return;
     const sourceIndex = item.keys.findIndex(key => key.id === sourceId);
     const targetIndex = item.keys.findIndex(key => key.id === targetId);
@@ -826,12 +731,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     next.splice(targetIndex, 0, source);
     setBusy(`key-reorder-${item.provider.id}`);
     try {
-      await Promise.all(next.map((key, index) => updateProviderKey(props.settings, key.id, {
-        name: key.name,
-        enabled: key.enabled,
-        priority: priorityForIndex(index),
-        weight: key.weight
-      })));
+      await reorderProviderChildren(props.settings, item.provider.id, 'keys', next.map(key => key.id));
       await props.onRefresh('API 密钥顺序已更新。');
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '更新 API 密钥顺序失败。');
@@ -841,30 +741,26 @@ export function ProvidersPage(props: ProvidersPageProps) {
   };
   const removeEndpoint = async (endpoint: UpstreamEndpointSummary) => {
     if (!ensureLive()) return;
-    if (!window.confirm(t('确认删除服务地址 {{name}}？', {
-      name: endpoint.name
-    }))) return;
     setBusy(`endpoint-delete-${endpoint.id}`);
     try {
       await deleteEndpoint(props.settings, endpoint.id);
+      setRemoveAction(null);
       await props.onRefresh('服务地址已删除。');
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除服务地址失败。');
+      setRemoveError(error instanceof Error ? error.message : '删除服务地址失败。');
     } finally {
       setBusy(null);
     }
   };
   const removeProviderKey = async (key: UpstreamKeyMeta) => {
     if (!ensureLive()) return;
-    if (!window.confirm(t('确认删除 API 密钥 {{name}}？', {
-      name: key.name
-    }))) return;
     setBusy(`key-delete-${key.id}`);
     try {
       await deleteProviderKey(props.settings, key.id);
+      setRemoveAction(null);
       await props.onRefresh('API 密钥已删除。');
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除 API 密钥失败。');
+      setRemoveError(error instanceof Error ? error.message : '删除 API 密钥失败。');
     } finally {
       setBusy(null);
     }
@@ -875,7 +771,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     try {
       const result = await testEndpointConnection(props.settings, endpointId);
       setTestResult(result);
-      props.onMessage(result.ok ? '目标可达。' : '目标不可达。');
+      props.onMessage(result.ok ? '地址可达；请同步模型验证认证信息。' : '地址不可达。');
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '连接测试失败。');
     } finally {
@@ -894,6 +790,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
   };
   useEffect(() => {
     setSelectedUpstreamKeyId(null);
+    setConnectionError(null);
     setProviderTypeDraft('');
     setProviderPriorityDraft(selected ? String(selected.provider.priority) : '');
     setProviderWeightDraft(selected ? String(selected.provider.weight) : '');
@@ -909,13 +806,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setProviderSubmitError(null);
     setDeleteConfirmOpen(false);
     setDeleteProviderError(null);
-  }, [
-    selectedProviderId,
-    selected?.provider.priority,
-    selected?.provider.weight,
-    selected?.provider.groups,
-    selected?.provider.request_overrides,
-  ]);
+  }, [selectedProviderId, selected?.provider.id]);
   useEffect(() => {
     const item = selected;
     if (!item) return;
@@ -938,7 +829,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
   const submitGroupCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!ensureLive()) return;
-    const name = readString(new FormData(event.currentTarget), 'provider_group_name');
+    const form = event.currentTarget;
+    const name = readString(new FormData(form), 'provider_group_name');
     if (!name) {
       props.onMessage('调度组名称不能为空。');
       return;
@@ -946,7 +838,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
     setBusy('provider-group-create');
     try {
       await createProviderGroup(props.settings, name);
-      event.currentTarget.reset();
+      form.reset();
       await props.onRefresh(`调度组 ${name} 已创建。`);
     } catch (error) {
       props.onMessage(error instanceof Error ? error.message : '创建调度组失败。');
@@ -974,13 +866,13 @@ export function ProvidersPage(props: ProvidersPageProps) {
   };
   const removeGroup = async (group: ProviderGroup) => {
     if (!ensureLive() || group.is_default) return;
-    if (!window.confirm(`确认删除调度组“${group.name}”？`)) return;
     setBusy(`provider-group-${group.id}`);
     try {
       await deleteProviderGroup(props.settings, group.id);
+      setRemoveAction(null);
       await props.onRefresh(`调度组 ${group.name} 已删除。`);
     } catch (error) {
-      props.onMessage(error instanceof Error ? error.message : '删除调度组失败。');
+      setRemoveError(error instanceof Error ? error.message : '删除调度组失败。');
     } finally {
       setBusy(null);
     }
@@ -1189,7 +1081,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     <TableCell className="font-mono text-xs">{group.provider_count}</TableCell>
                     <TableCell className="font-mono text-xs">{group.api_key_count}</TableCell>
                     <TableCell className="text-right">
-                      <Button type="button" size="icon" variant="ghost" aria-label={t('删除调度组')} disabled={group.is_default || busy === `provider-group-${group.id}`} onClick={() => void removeGroup(group)}>
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('删除调度组')} disabled={group.is_default || busy === `provider-group-${group.id}`} onClick={() => { setRemoveError(null); setRemoveAction({ title: t('删除调度组'), run: () => removeGroup(group) }); }}>
                         <Trash2 className="size-3.5" />
                       </Button>
                     </TableCell>
@@ -1236,6 +1128,52 @@ export function ProvidersPage(props: ProvidersPageProps) {
               </Select>
               <FormHelperText className="mt-1">{t(providerTypeDescription(createProviderType))}</FormHelperText>
             </FormControl>
+          </Box>
+          <Box className="grid gap-4">
+            <FormControl>
+              <Box className="flex items-center justify-between gap-2.5">
+                <FormLabel>{t("服务地址")}</FormLabel>
+                <Button type="button" size="icon" variant="ghost" aria-label={t('添加服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateBaseUrl}>
+                  <Plus className="size-4" />
+                </Button>
+              </Box>
+              <Box className="grid gap-3">
+                {createBaseUrls.map((row, index) => <Box key={row.id} className="grid grid-cols-[1.25rem_minmax(0,1fr)_2.75rem] items-center gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.75rem]">
+                      <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
+                      <InputBase inputProps={{ 'aria-label': t('服务地址 {{number}}', { number: index + 1 }) }} type="url" value={row.value} disabled={createFieldsDisabled} autoComplete="off" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateBaseUrl(row.id, event.target.value)} placeholder={t("https://api.example.com/v1")} className="bg-background" />
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateBaseUrl(row.id)}>
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </Box>)}
+              </Box>
+            </FormControl>
+            {isCreateCodex ? <Alert severity="info" variant="outlined">
+                <AlertTitle>{t('使用 OAuth 账号')}</AlertTitle>
+                {t('创建后将打开 OAuth 登录，不需要在此填写 API 密钥。')}
+                <Typography className="mt-1 text-sm" component="div">
+                  {t('Codex 创建时默认启用 WebSocket 和 HTTP→WS，之后可在上游设置中修改。')}
+                </Typography>
+              </Alert> : <FormControl>
+                <Box className="flex items-center justify-between gap-3">
+                  <FormLabel>{t("API 密钥")}</FormLabel>
+                  <Button type="button" size="icon" variant="ghost" aria-label={t('添加 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateApiKey}>
+                    <Plus className="size-4" />
+                  </Button>
+                </Box>
+                <Box className="grid gap-3">
+                  {createApiKeys.map((row, index) => <Box key={row.id} className="grid grid-cols-[1.25rem_minmax(0,1fr)_2.75rem] items-center gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.75rem]">
+                        <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
+                        <InputBase inputProps={{ 'aria-label': t('上游 API Key {{number}}', { number: index + 1 }) }} type="password" value={row.value} disabled={createFieldsDisabled} autoComplete="new-password" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateApiKey(row.id, event.target.value)} placeholder={t("sk-...")} className="bg-background" />
+                        <Button type="button" size="icon" variant="ghost" aria-label={t('移除 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateApiKey(row.id)}>
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </Box>)}
+                </Box>
+              </FormControl>}
+          </Box>
+          <Box component="details" className="border border-border/40">
+            <Box component="summary" className="cursor-pointer p-4 text-sm font-medium">{t('高级设置')}</Box>
+            <Box className="grid gap-4 p-4 md:grid-cols-2">
             <FormControl error={createPriorityValue === null}>
               <FormLabel htmlFor="create-provider-priority">{t('优先级')}</FormLabel>
               <InputBase
@@ -1310,49 +1248,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </MenuItem>)}
               </Select>
             </FormControl>
-          </Box>
-          <Box className="grid gap-4">
-            <FormControl>
-              <Box className="flex items-center justify-between gap-2.5">
-                <FormLabel>{t("API Base URL")}</FormLabel>
-                <Button type="button" size="icon" variant="ghost" aria-label={t('添加服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateBaseUrl}>
-                  <Plus className="size-4" />
-                </Button>
-              </Box>
-              <Box className="grid gap-3">
-                {createBaseUrls.map((row, index) => <Box key={row.id} className="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
-                      <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
-                      <InputBase type="url" value={row.value} disabled={createFieldsDisabled} autoComplete="off" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateBaseUrl(row.id, event.target.value)} placeholder={t("https://api.example.com/v1")} className="bg-background" />
-                      <Button type="button" size="icon" variant="ghost" aria-label={t('移除服务地址')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateBaseUrl(row.id)}>
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </Box>)}
-              </Box>
-            </FormControl>
-            {isCreateCodex ? <Alert severity="info" variant="outlined">
-                <AlertTitle>{t('使用 OAuth 账号')}</AlertTitle>
-                {t('创建后将打开 OAuth 登录，不需要在此填写 API 密钥。')}
-                <Typography className="mt-1 text-sm" component="div">
-                  {t('Codex 创建时默认启用 WebSocket 和 HTTP→WS，之后可在上游设置中修改。')}
-                </Typography>
-              </Alert> : <FormControl>
-                <Box className="flex items-center justify-between gap-3">
-                  <FormLabel>{t("API 密钥")}</FormLabel>
-                  <Button type="button" size="icon" variant="ghost" aria-label={t('添加 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={addCreateApiKey}>
-                    <Plus className="size-4" />
-                  </Button>
-                </Box>
-                <Box className="grid gap-3">
-                  {createApiKeys.map((row, index) => <Box key={row.id} className="grid gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_2.5rem]">
-                        <Box className="flex h-10 items-center justify-center font-mono text-xs text-muted-foreground">{index + 1}</Box>
-                        <InputBase type="password" value={row.value} disabled={createFieldsDisabled} autoComplete="new-password" autoCapitalize="none" spellCheck={false} onChange={event => updateCreateApiKey(row.id, event.target.value)} placeholder={t("sk-...")} className="bg-background" />
-                        <Button type="button" size="icon" variant="ghost" aria-label={t('移除 API 密钥')} disabled={createIsPersisted || createFieldsDisabled} onClick={() => removeCreateApiKey(row.id)}>
-                          <Trash2 className="size-4" />
-                        </Button>
-                      </Box>)}
-                </Box>
-              </FormControl>}
-          </Box>
+            </Box>
           <Box className="grid gap-4 md:grid-cols-4">
             <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
               <Checkbox name="enabled" defaultChecked disabled={createFieldsDisabled} />
@@ -1370,6 +1266,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
               <Checkbox key={`bridge-${createProviderType}`} name="responses_http_to_ws" defaultChecked={isCreateCodex} disabled={createFieldsDisabled || isCreateCodex} />
               <Box component="span">{t('HTTP→WS Beta')}</Box>
             </Box>
+          </Box>
           </Box>
           <Box className="border border-border/40" component="details">
             <Box className="cursor-pointer px-4 py-3 text-sm font-medium" component="summary">
@@ -1390,12 +1287,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
             </Box>
           </Box>
           <Box className="grid gap-2 sm:grid-cols-3" aria-label={t('创建进度')}>
-            {[t('基本配置'), t('连接信息'), t('模型同步')].map((label, index) => {
+            {[t('保存配置'), t('模型同步')].map((label, index) => {
               const activeIndex = createStage === 'provider' ? 0
-                : createStage === 'connections' || createStage === 'partial' ? 1
-                  : createStage === 'models' || createStage === 'sync_failed' ? 2
-                    : createStage === 'complete' ? 3 : -1;
-              const failed = (createStage === 'partial' && index === 1) || (createStage === 'sync_failed' && index === 2);
+                : createStage === 'models' || createStage === 'sync_failed' ? 1
+                  : createStage === 'complete' ? 2 : -1;
+              const failed = createStage === 'sync_failed' && index === 1;
               const complete = createStage === 'complete' || index < activeIndex;
               const active = createIsBusy && index === activeIndex;
               return <Box key={label} className="flex min-h-12 items-center justify-between gap-3 border border-border/40 bg-muted/5 px-3 py-2">
@@ -1421,17 +1317,17 @@ export function ProvidersPage(props: ProvidersPageProps) {
               </Typography>
             </Alert> : null}
           {createSubmitError ? <Alert className="border-border/40 bg-muted/20" severity="error" variant="outlined">
-              <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t(createStage === 'sync_failed' ? '同步失败' : createStage === 'partial' ? '部分创建' : '创建失败')}</AlertTitle>
+              <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t(createStage === 'sync_failed' ? '同步失败' : '创建失败')}</AlertTitle>
               <Typography className="text-[0.8rem] leading-relaxed text-muted-foreground mt-1.5 opacity-80" component="div">{createSubmitError}</Typography>
             </Alert> : null}
           <Box className="flex flex-wrap justify-end gap-2 border-t border-border/40 pt-4 mt-1">
             {createIsPersisted ? <Button type="button" variant="outline" disabled={createIsBusy} onClick={() => void finishProviderCreate()}>
               {t('完成')}
             </Button> : null}
-            {createStage !== 'complete' && createStage !== 'partial' ? <Button type="submit" disabled={createIsBusy || createMissingFields().length > 0} className="font-mono text-xs tracking-widest px-5">
+            {createStage !== 'complete' ? <Button type="submit" disabled={createIsBusy || createMissingFields().length > 0} className="font-mono text-xs tracking-widest px-5">
               <RefreshCw className={`mr-1.5 size-3.5 ${createIsBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
               {t(createStage === 'sync_failed'
-                ? '保存并重试同步'
+                ? '重试同步'
                 : createIsBusy
                   ? '处理中…'
                   : isCreateCodex
@@ -1453,8 +1349,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
           item.provider.runtime?.state ?? item.provider.health?.state,
           item.provider.routing_availability?.available ?? item.provider.runtime?.available ?? item.provider.health?.available,
         );
-        return <Box className="flex flex-col gap-5">
-                <Box className="grid gap-4 md:grid-cols-4 border-b border-border/40 pb-5">
+        return <Box key={item.provider.id} className="flex flex-col gap-5">
+                <Box className="grid grid-cols-2 gap-4 md:grid-cols-4 border-b border-border/40 pb-5">
                   <Box className="flex flex-col gap-1.5 border-l border-border/40 pl-3 border-l-2 border-l-primary">
                       <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70">{t('状态')}</Box>
                       <Box className="mt-1.5">
@@ -1477,6 +1373,186 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   </Box>
                 </Box>
 
+                <Alert severity="info">{t('同一上游代表一家服务，所有地址与 Key 共享搭配。地址按主备顺序使用，Key 可选择轮流或主备。')}</Alert>
+                <RecoveryNotice until={item.provider.routing_availability?.retry_at_ms} message={item.provider.runtime?.last_error_message ?? item.provider.health?.last_error_message} />
+                {connectionError ? <Alert severity="error">{connectionError}</Alert> : null}
+                <Box className="grid gap-4" component="section">
+                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
+                    <Box className="flex items-center gap-3">
+                      <Stethoscope className="size-4 opacity-70" />
+                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('服务地址')}</Box>
+                    </Box>
+                    <StatusBadge tone="normal">{String(item.endpoints.length)}</StatusBadge>
+                  </Box>
+                  <Box className="grid gap-3">
+                    {item.endpoints.map((endpoint, index) => {
+                const endpointHealth = healthStatus(endpoint.health?.state, endpoint.health?.available);
+                return <Box key={endpoint.id} className="grid min-w-0 gap-3 border border-border/40 p-4 sm:grid-cols-2" onSubmit={event => void submitEndpointUpdate(event, endpoint.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderEndpoints(item, endpoint.id)} component="form">
+                  <Box className="flex flex-wrap items-center gap-2 sm:col-span-2">
+                    <Button type="button" size="icon" variant="ghost" aria-label={t('调整服务地址顺序')} draggable onDragStart={() => setDraggingEndpointId(endpoint.id)} onDragEnd={() => setDraggingEndpointId(null)}><GripVertical className="size-4" /></Button>
+                    <Typography variant="body2">{t(index === 0 ? '主地址' : '备用地址')}</Typography>
+                    <StatusBadge tone={endpoint.enabled ? endpointHealth.tone : 'disabled'}>{t(endpoint.enabled ? endpointHealth.label : '停用')}</StatusBadge>
+                    <Button type="button" size="icon" variant="ghost" aria-label={t('上移')} disabled={index === 0 || busy !== null} onClick={() => void reorderEndpoints(item, item.endpoints[index - 1].id, endpoint.id)}><ArrowUp className="size-4" /></Button>
+                    <Button type="button" size="icon" variant="ghost" aria-label={t('下移')} disabled={index === item.endpoints.length - 1 || busy !== null} onClick={() => void reorderEndpoints(item, item.endpoints[index + 1].id, endpoint.id)}><ArrowDown className="size-4" /></Button>
+                  </Box>
+                  <FormControl><FormLabel htmlFor={`endpoint-name-${endpoint.id}`}>{t('名称')}</FormLabel><InputBase id={`endpoint-name-${endpoint.id}`} name={`endpoint_name_${endpoint.id}`} defaultValue={endpoint.name || `地址 ${index + 1}`} autoComplete="off" /></FormControl>
+                  <FormControl><FormLabel htmlFor={`endpoint-url-${endpoint.id}`}>{t('服务地址')}</FormLabel><InputBase id={`endpoint-url-${endpoint.id}`} name={`endpoint_base_url_${endpoint.id}`} type="url" required defaultValue={endpoint.base_url} autoComplete="off" autoCapitalize="none" spellCheck={false} /></FormControl>
+                  <Box className="flex flex-wrap items-center justify-between gap-2 sm:col-span-2">
+                    <Box className="check-row" component="label"><Checkbox name={`endpoint_enabled_${endpoint.id}`} defaultChecked={endpoint.enabled} /><Box component="span">{t('启用')}</Box></Box>
+                    <Box className="flex flex-wrap gap-1">
+                      <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void handleTestEndpoint(endpoint.id)}>{t('测试地址')}</Button>
+                      <Button type="submit" disabled={busy !== null} aria-label={t('保存服务地址')}><Save className="mr-1 size-4" />{t('保存')}</Button>
+                      <Button type="button" size="icon" color="error" aria-label={t('删除服务地址')} disabled={busy !== null} onClick={() => { setRemoveError(null); setRemoveAction({ title: t('确认删除服务地址 {{name}}？', { name: endpoint.name }), run: () => removeEndpoint(endpoint) }); }}><Trash2 className="size-4" /></Button>
+                    </Box>
+                  </Box>
+                  <Box className="sm:col-span-2"><RecoveryNotice until={endpoint.health?.open_until_ms} message={endpoint.health?.last_error_message} /></Box>
+                </Box>;
+              })}
+                    <Box className="grid gap-3 border border-dashed border-border/60 p-4 sm:grid-cols-2" onSubmit={event => void submitEndpointCreate(event, item)} component="form">
+                      <FormControl><FormLabel htmlFor="new-endpoint-name">{t('名称')}</FormLabel><InputBase id="new-endpoint-name" name="endpoint_name" placeholder={t('备用地址')} autoComplete="off" /></FormControl>
+                      <FormControl><FormLabel htmlFor="new-endpoint-url">{t('服务地址')}</FormLabel><InputBase id="new-endpoint-url" name="endpoint_base_url" type="url" required placeholder="https://api.example.com/v1" autoComplete="off" /></FormControl>
+                      <Box className="check-row" component="label"><Checkbox name="endpoint_enabled" defaultChecked /><Box component="span">{t('启用')}</Box></Box>
+                      <Button type="submit" disabled={busy !== null}><Plus className="mr-1 size-4" />{t('添加服务地址')}</Button>
+                    </Box>
+                  </Box>
+                </Box>
+
+                {item.provider.provider_type === CODEX_PROVIDER_TYPE ? <Box className="mt-5">
+                    <CodexOAuthPanel
+                      settings={props.settings}
+                      item={item}
+                      onRefresh={props.onRefresh}
+                      onMessage={props.onMessage}
+                    />
+                  </Box> : <>
+                <Box className="grid gap-3 mt-5" component="section">
+                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
+                    <Box className="flex items-center gap-3">
+                      <AlertCircle className="size-4 opacity-70" />
+                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('API 密钥')}</Box>
+                    </Box>
+                    <StatusBadge tone="normal">{String(item.keys.length)}</StatusBadge>
+                  </Box>
+                  <FormControl>
+                    <FormLabel id="provider-key-strategy-label">{t('Key 使用方式')}</FormLabel>
+                    <Select labelId="provider-key-strategy-label" value={item.provider.key_selection_strategy ?? 'round_robin'} disabled={busy !== null} onChange={event => {
+                      const strategy = event.target.value as CreateProviderInput['key_selection_strategy'];
+                      setBusy(`strategy-${item.provider.id}`);
+                      setConnectionError(null);
+                      void updateProvider(props.settings, item.provider.id, { key_selection_strategy: strategy })
+                        .then(() => props.onRefresh())
+                        .catch(error => setConnectionError(error instanceof Error ? error.message : t('保存失败')))
+                        .finally(() => setBusy(null));
+                    }}>
+                      <MenuItem value="round_robin">{t('轮流使用')}</MenuItem>
+                      <MenuItem value="ordered">{t('主备顺序')}</MenuItem>
+                      {item.provider.key_selection_strategy === 'weighted' ? <MenuItem value="weighted">{t('加权分配（兼容旧配置）')}</MenuItem> : null}
+                    </Select>
+                    <FormHelperText>{t(item.provider.key_selection_strategy === 'ordered' ? '优先使用前面的可用 Key，失败后切换备用 Key。' : '在可用 Key 之间依次轮换；冷却中的 Key 会自动跳过。')}</FormHelperText>
+                  </FormControl>
+                  <Box className="grid gap-3">
+                    {item.keys.map((key, index) => {
+                const quotaCooling = (key.quota?.cooldown_until_ms ?? 0) > Date.now();
+                const keyHealth = quotaCooling
+                  ? { label: '限流冷却', tone: 'warning' as const }
+                  : healthStatus(key.health?.state, key.health?.available);
+                return <Box key={key.id} className="grid min-w-0 gap-3 border border-border/40 p-4 sm:grid-cols-2" onSubmit={event => void submitKeyUpdate(event, key.id)} component="form">
+                  <Box className="flex flex-wrap items-center gap-2 sm:col-span-2">
+                    <StatusBadge tone={key.enabled ? keyHealth.tone : 'disabled'}>{t(key.enabled ? keyHealth.label : '停用')}</StatusBadge>
+                    {item.provider.key_selection_strategy === 'ordered' ? <>
+                      <Typography variant="body2">{t(index === 0 ? '主 Key' : '备用 Key')}</Typography>
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('上移')} disabled={index === 0 || busy !== null} onClick={() => void reorderKeys(item, item.keys[index - 1].id, key.id)}><ArrowUp className="size-4" /></Button>
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('下移')} disabled={index === item.keys.length - 1 || busy !== null} onClick={() => void reorderKeys(item, item.keys[index + 1].id, key.id)}><ArrowDown className="size-4" /></Button>
+                    </> : null}
+                  </Box>
+                  <FormControl><FormLabel htmlFor={`key-name-${key.id}`}>{t('名称')}</FormLabel><InputBase id={`key-name-${key.id}`} name={`upstream_key_name_${key.id}`} defaultValue={key.name || `密钥 ${index + 1}`} autoComplete="off" /></FormControl>
+                  <FormControl><FormLabel htmlFor={`key-secret-${key.id}`}>{t('替换 API Key')}</FormLabel><InputBase id={`key-secret-${key.id}`} name={`upstream_key_secret_${key.id}`} type="password" autoComplete="new-password" placeholder={t('留空表示不修改')} /></FormControl>
+                  <Box className="flex flex-wrap items-center justify-between gap-2 sm:col-span-2">
+                    <Box className="check-row" component="label"><Checkbox name={`upstream_key_enabled_${key.id}`} defaultChecked={key.enabled} /><Box component="span">{t('启用')}</Box></Box>
+                    <Box className="flex gap-1">
+                      <Button type="submit" aria-label={t('保存 API 密钥')} disabled={busy !== null}><Save className="mr-1 size-4" />{t('保存')}</Button>
+                      <Button type="button" size="icon" color="error" aria-label={t('删除 API 密钥')} disabled={busy !== null} onClick={() => { setRemoveError(null); setRemoveAction({ title: t('确认删除 API 密钥 {{name}}？', { name: key.name }), run: () => removeProviderKey(key) }); }}><Trash2 className="size-4" /></Button>
+                    </Box>
+                  </Box>
+                  <Box className="sm:col-span-2"><RecoveryNotice until={Math.max(key.health?.open_until_ms ?? 0, key.quota?.cooldown_until_ms ?? 0) || null} message={key.health?.last_error_message} /></Box>
+                </Box>;
+              })}
+                    <Box className="grid gap-3 border border-dashed border-border/60 p-4 sm:grid-cols-2" onSubmit={event => void submitKeyCreate(event, item)} component="form">
+                      <FormControl><FormLabel htmlFor="new-key-name">{t('名称')}</FormLabel><InputBase id="new-key-name" name="upstream_key_name" placeholder={t('备用 Key')} autoComplete="off" /></FormControl>
+                      <FormControl><FormLabel htmlFor="new-key-secret">{t('上游 API Key')}</FormLabel><InputBase id="new-key-secret" name="upstream_key_secret" type="password" required placeholder="sk-..." autoComplete="new-password" /></FormControl>
+                      <Box className="check-row" component="label"><Checkbox name="upstream_key_enabled" defaultChecked /><Box component="span">{t('启用')}</Box></Box>
+                      <Button type="submit" disabled={busy !== null}><Plus className="mr-1 size-4" />{t('添加 API 密钥')}</Button>
+                    </Box>
+                  </Box>
+                </Box>
+
+                <Box component="details" sx={{ mt: 3 }}>
+                  <Box component="summary" sx={{ cursor: 'pointer', mb: 2 }}>{t('密钥模型限制')}</Box>
+                  <Select displayEmpty value={selectedUpstreamKeyId === null ? '' : String(selectedUpstreamKeyId)} onChange={event => setSelectedUpstreamKeyId(Number(event.target.value) || null)} sx={{ width: '100%', maxWidth: 320 }}>
+                    <MenuItem value="">{t('选择密钥…')}</MenuItem>
+                    {item.keys.map(key => <MenuItem key={key.id} value={String(key.id)}>{key.name}</MenuItem>)}
+                  </Select>
+                  {isLive() && selectedUpstreamKeyId !== null ? <UpstreamKeyModels key={selectedUpstreamKeyId} settings={props.settings} keyId={selectedUpstreamKeyId} onChanged={() => props.onRefresh()} /> : null}
+                </Box>
+                </>}
+
+                <Box className="grid gap-4 mt-5 pb-5" component="section">
+                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
+                    <Box className="flex items-center gap-2.5">
+                      <RefreshCw className="size-4 opacity-70" />
+                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('模型')}</Box>
+                    </Box>
+                  </Box>
+
+                  <Card className="border border-border bg-background shadow-none">
+                    <CardContent className="flex flex-col items-start justify-between gap-3 p-4 sm:flex-row sm:items-center">
+                      <Box className="grid gap-1.5">
+                        <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('可用模型')}</Typography>
+                        <Typography className="text-[0.8125rem] leading-5 text-muted-foreground" component="p">{t('模型库存、显示名称、别名目标和协议能力已集中到模型页。')}</Typography>
+                      </Box>
+                      <Box className="flex shrink-0 flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null || item.endpoints.length === 0 || item.keys.length === 0}
+                          onClick={() => void syncModelsForProvider(item.provider.id, item.provider.name)}
+                        >
+                          <RefreshCw className={`mr-1.5 size-3 ${busy === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
+                          {t('同步模型')}
+                        </Button>
+                        <Button
+                          component={Link}
+                          to={`/models?provider_id=${item.provider.id}`}
+                          size="sm"
+                          disabled={!isLive()}
+                          className="text-xs tracking-wider"
+                        >
+                          {t('在模型页管理')}
+                          <ChevronRight className="ml-1.5 size-3" aria-hidden="true" />
+                        </Button>
+                      </Box>
+                    </CardContent>
+                  </Card>
+                </Box>
+
+                {testResult ? (result => <Card className="border border-border bg-background shadow-none mb-5">
+                      <Box className="flex flex-col gap-2 p-4 pb-3">
+                        <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('地址连通测试（不验证 Key）')}</Typography>
+                      </Box>
+                      <CardContent className="grid gap-1.5 font-mono text-[0.8125rem] border-t border-border/40 pt-3">
+                        <Box>{t('地址：{{url}}', {
+                  url: result.url
+                })}</Box>
+                        <Box>{t('状态：{{status}}', {
+                  status: result.status ?? t('连接失败')
+                })}</Box>
+                        <Box>{t('消息：{{message}}', {
+                  message: result.message ?? t('无返回内容')
+                })}</Box>
+                      </CardContent>
+                    </Card>)(testResult) : null}
+
                 <Box className="flex flex-col gap-4" onSubmit={event => void submitProviderUpdate(event, item)} component="form">
                   <Box className="flex items-center gap-2.5 border-b border-border/40 pb-3">
                     <ShieldCheck className="size-4 opacity-70" />
@@ -1495,6 +1571,14 @@ export function ProvidersPage(props: ProvidersPageProps) {
                       </Select>
                       <FormHelperText>{t(providerTypeDescription(providerTypeDraft || item.provider.provider_type))}</FormHelperText>
                     </FormControl>
+                  </Box>
+                    <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
+                      <Checkbox name="provider_enabled" defaultChecked={item.provider.enabled} />
+                      <Box component="span">{t('启用上游')}</Box>
+                    </Box>
+                  <Box component="details" className="border border-border/40">
+                    <Box component="summary" className="cursor-pointer p-4 text-sm font-medium">{t('高级设置')}</Box>
+                    <Box className="grid gap-4 p-4 md:grid-cols-2">
                     <FormControl error={providerPriorityValue === null}>
                       <FormLabel htmlFor="provider-priority">{t('优先级')}</FormLabel>
                       <InputBase
@@ -1582,10 +1666,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     </Box>
                   </FormControl>
                   <Box className="grid gap-4 md:grid-cols-4">
-                    <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
-                      <Checkbox name="provider_enabled" defaultChecked={item.provider.enabled} />
-                      <Box component="span">{t('启用上游')}</Box>
-                    </Box>
+
                     <Box className="flex items-center gap-3 border border-border/40 bg-transparent px-4 py-4 text-sm font-mono uppercase tracking-widest text-muted-foreground opacity-80 cursor-pointer hover:bg-muted/10 transition-colors" component="label">
                       <Checkbox name="supports_include_usage" defaultChecked={item.provider.supports_include_usage} />
                       <Box component="span">{t('补充用量信息')}</Box>
@@ -1609,9 +1690,11 @@ export function ProvidersPage(props: ProvidersPageProps) {
                   />
                   <Box className="border border-border/40" component="details">
                     <Box className="cursor-pointer px-4 py-3 text-sm font-medium" component="summary">
-                      {t('韧性与故障转移')}
+                      {t('故障保护与重试')}
                     </Box>
                     <Box className="grid gap-4 border-t border-border/40 p-4 md:grid-cols-2">
+                      <Alert severity="info" className="md:col-span-2">{t('每次请求最多尝试 3 次（含切换与认证重放），重试前等待约 0.5–1.25 秒。地址或 Key 首次故障即冷却 30 秒，反复失败递增，默认最多 5 分钟。上游要求更长等待时以其为准；全部不可用时立即返回错误和 Retry-After。')}</Alert>
+                      <Typography variant="body2" className="md:col-span-2">{t('以下旧配置继续保留，单个上游的尝试次数仍受全请求 3 次上限约束。关闭服务级熔断不会关闭地址与 Key 的冷却保护。')}</Typography>
                       <FormControl>
                         <FormLabel>{t('每个上游尝试次数')}</FormLabel>
                         <InputBase name="provider_max_attempts" type="number" defaultValue={item.provider.max_attempts} slotProps={{ input: { min: 1, max: 10, step: 1 } }} className="bg-background font-mono" />
@@ -1625,8 +1708,8 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         <InputBase name="provider_circuit_breaker_failure_threshold" type="number" defaultValue={item.provider.circuit_breaker_failure_threshold} slotProps={{ input: { min: 1, max: 100, step: 1 } }} className="bg-background font-mono" />
                       </FormControl>
                       <FormControl>
-                        <FormLabel>{t('熔断时长（毫秒）')}</FormLabel>
-                        <InputBase name="provider_circuit_breaker_open_ms" type="number" defaultValue={item.provider.circuit_breaker_open_ms} slotProps={{ input: { min: 1000, max: 86400000, step: 1000 } }} className="bg-background font-mono" />
+                        <FormLabel>{t('服务熔断时长（秒）')}</FormLabel>
+                        <InputBase name="provider_circuit_breaker_open_seconds" type="number" defaultValue={item.provider.circuit_breaker_open_ms / 1000} slotProps={{ input: { min: 1, max: 86400, step: 0.001 } }} className="bg-background font-mono" />
                       </FormControl>
                       <FormControl>
                         <FormLabel>{t('半开恢复成功次数')}</FormLabel>
@@ -1639,10 +1722,12 @@ export function ProvidersPage(props: ProvidersPageProps) {
                         </Box>
                         <Button type="button" variant="outline" size="sm" disabled={busy === `provider-circuit-${item.provider.id}`} onClick={() => void resetCircuit(item.provider.id)}>
                           <RefreshCw className="size-3.5" />
-                          {t('重置')}
+                          {t('重置故障状态')}
                         </Button>
                       </Box>
+                      <Typography variant="caption" color="text.secondary" className="sm:col-span-2">{t('重置会清除连接故障，保留上游要求的限流等待时间。')}</Typography>
                     </Box>
+                  </Box>
                   </Box>
                   {providerSubmitError ? <Alert className="border-border/40 bg-muted/20" severity="error" variant="outlined">
                       <AlertTitle className="font-mono text-xs uppercase tracking-widest">{t('保存失败')}</AlertTitle>
@@ -1654,183 +1739,6 @@ export function ProvidersPage(props: ProvidersPageProps) {
                     </Button>
                   </Box>
                 </Box>
-
-                <Box className="grid gap-4 mt-8" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
-                    <Box className="flex items-center gap-3">
-                      <Stethoscope className="size-4 opacity-70" />
-                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('服务地址')}</Box>
-                    </Box>
-                    <StatusBadge tone="normal">{String(item.endpoints.length)}</StatusBadge>
-                  </Box>
-                  <Box className="grid gap-3">
-                    {item.endpoints.map((endpoint, index) => {
-                const endpointHealth = healthStatus(endpoint.health?.state, endpoint.health?.available);
-                return <Box key={endpoint.id} className="grid gap-2 border border-border/40 bg-muted/5 p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_12rem]" onSubmit={event => void submitEndpointUpdate(event, endpoint.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderEndpoints(item, endpoint.id)} component="form">
-                            <Button type="button" size="icon" className="flex size-8 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing" aria-label={t('调整服务地址顺序')} title={t('调整服务地址顺序')} draggable onDragStart={() => setDraggingEndpointId(endpoint.id)} onDragEnd={() => setDraggingEndpointId(null)} variant="ghost">
-                              <GripVertical className="size-4" />
-                            </Button>
-                            <InputBase name={`endpoint_name_${endpoint.id}`} defaultValue={endpoint.name || `地址 ${index + 1}`} autoComplete="off" className="bg-background" />
-                            <InputBase name={`endpoint_base_url_${endpoint.id}`} defaultValue={endpoint.base_url} autoComplete="off" autoCapitalize="none" spellCheck={false} className="bg-background font-mono text-xs" />
-                            <Box className="check-row h-8 px-2.5 py-0" component="label">
-                              <Checkbox name={`endpoint_enabled_${endpoint.id}`} defaultChecked={endpoint.enabled} />
-                              <Box component="span">{t('启用')}</Box>
-                            </Box>
-                            <Box className="flex items-center justify-end gap-2">
-                              <StatusBadge tone={endpointHealth.tone}>{endpointHealth.label}</StatusBadge>
-                              <Button type="button" size="icon" variant="ghost" className="min-w-0" aria-label={t('测试连接')} disabled={busy === `test-${endpoint.id}`} onClick={() => void handleTestEndpoint(endpoint.id)}>
-                                <Stethoscope className="size-4" />
-                              </Button>
-                              <Button type="submit" size="icon" variant="ghost" className="min-w-0" aria-label={t('保存服务地址')} disabled={busy === `endpoint-${endpoint.id}`}>
-                                <Save className="size-4" />
-                              </Button>
-                              <Button type="button" size="icon" variant="ghost" className="min-w-0" aria-label={t('删除服务地址')} disabled={busy === `endpoint-delete-${endpoint.id}`} onClick={() => void removeEndpoint(endpoint)}>
-                                <Trash2 className="size-4" />
-                              </Button>
-                            </Box>
-                          </Box>;
-              })}
-                    <Box className="grid gap-2 border border-dashed border-border/60 bg-transparent p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]" onSubmit={event => void submitEndpointCreate(event, item)} component="form">
-                      <Box className="flex size-8 items-center justify-center font-mono text-xs text-muted-foreground">{item.endpoints.length + 1}</Box>
-                      <InputBase name="endpoint_name" placeholder={`地址 ${item.endpoints.length + 1}`} autoComplete="off" />
-                      <InputBase name="endpoint_base_url" placeholder={t("https://api.example.com/v1")} autoComplete="off" autoCapitalize="none" spellCheck={false} className="font-mono text-xs" />
-                      <Box className="check-row h-8 px-2.5 py-0" component="label">
-                        <Checkbox name="endpoint_enabled" defaultChecked />
-                        <Box component="span">{t('启用')}</Box>
-                      </Box>
-                      <Button type="submit" disabled={busy === `endpoint-create-${item.provider.id}`}>
-                        <Plus className="size-4" />
-                        {t('添加')}
-                      </Button>
-                    </Box>
-                  </Box>
-                </Box>
-
-                {item.provider.provider_type === CODEX_PROVIDER_TYPE ? <Box className="mt-5">
-                    <CodexOAuthPanel
-                      settings={props.settings}
-                      item={item}
-                      onRefresh={props.onRefresh}
-                      onMessage={props.onMessage}
-                    />
-                  </Box> : <>
-                <Box className="grid gap-3 mt-5" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
-                    <Box className="flex items-center gap-3">
-                      <AlertCircle className="size-4 opacity-70" />
-                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('API 密钥')}</Box>
-                    </Box>
-                    <StatusBadge tone="normal">{String(item.keys.length)}</StatusBadge>
-                  </Box>
-                  <Box className="grid gap-3">
-                    {item.keys.map((key, index) => {
-                const quotaCooling = (key.quota?.cooldown_until_ms ?? 0) > Date.now();
-                const keyHealth = quotaCooling
-                  ? { label: '限流冷却', tone: 'warning' as const }
-                  : healthStatus(key.health?.state, key.health?.available);
-                return <Box key={key.id} className="grid gap-2 border border-border/40 bg-muted/5 p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_10rem]" onSubmit={event => void submitKeyUpdate(event, key.id)} onDragOver={event => event.preventDefault()} onDrop={() => void reorderKeys(item, key.id)} component="form">
-                            <Button type="button" className="flex size-8 cursor-grab items-center justify-center text-muted-foreground active:cursor-grabbing" aria-label={t('调整 API 密钥顺序')} title={t('调整 API 密钥顺序')} draggable onDragStart={() => setDraggingKeyId(key.id)} onDragEnd={() => setDraggingKeyId(null)} variant="ghost">
-                              <GripVertical className="size-4" />
-                            </Button>
-                            <InputBase name={`upstream_key_name_${key.id}`} defaultValue={key.name || `密钥 ${index + 1}`} autoComplete="off" className="bg-background" />
-                            <InputBase name={`upstream_key_secret_${key.id}`} type="password" autoComplete="new-password" placeholder={t("留空表示不修改")} className="bg-background font-mono text-xs" />
-                            <Box className="check-row h-8 px-2.5 py-0" component="label">
-                              <Checkbox name={`upstream_key_enabled_${key.id}`} defaultChecked={key.enabled} />
-                              <Box component="span">{t('启用')}</Box>
-                            </Box>
-                            <Box className="flex items-center justify-end gap-2">
-                              <StatusBadge tone={keyHealth.tone}>{keyHealth.label}</StatusBadge>
-                              <Button type="submit" size="icon" variant="ghost" aria-label={t('保存 API 密钥')} disabled={busy === `key-${key.id}`}>
-                                <Save className="size-4" />
-                              </Button>
-                              <Button type="button" size="icon" variant="ghost" aria-label={t('删除 API 密钥')} disabled={busy === `key-delete-${key.id}`} onClick={() => void removeProviderKey(key)}>
-                                <Trash2 className="size-4" />
-                              </Button>
-                            </Box>
-                          </Box>;
-              })}
-                    <Box className="grid gap-2 border border-dashed border-border/60 bg-transparent p-2.5 xl:grid-cols-[2rem_minmax(9rem,0.45fr)_minmax(18rem,1fr)_7rem_8rem]" onSubmit={event => void submitKeyCreate(event, item)} component="form">
-                      <Box className="flex size-8 items-center justify-center font-mono text-xs text-muted-foreground">{item.keys.length + 1}</Box>
-                      <InputBase name="upstream_key_name" placeholder={`密钥 ${item.keys.length + 1}`} autoComplete="off" />
-                      <InputBase name="upstream_key_secret" type="password" placeholder={t("sk-...")} autoComplete="new-password" className="font-mono text-xs" />
-                      <Box className="check-row h-8 px-2.5 py-0" component="label">
-                        <Checkbox name="upstream_key_enabled" defaultChecked />
-                        <Box component="span">{t('启用')}</Box>
-                      </Box>
-                      <Button type="submit" disabled={busy === `key-create-${item.provider.id}`}>
-                        <Plus className="size-4" />
-                        {t('添加')}
-                      </Button>
-                    </Box>
-                  </Box>
-                </Box>
-
-                <Box component="section" sx={{ display: 'grid', gap: 2, mt: 3 }}>
-                  <Typography component="h3">{t('密钥模型限制')}</Typography>
-                  <Select displayEmpty value={selectedUpstreamKeyId === null ? '' : String(selectedUpstreamKeyId)} onChange={event => setSelectedUpstreamKeyId(Number(event.target.value) || null)} sx={{ width: '100%', maxWidth: 320 }}>
-                    <MenuItem value="">{t('选择密钥…')}</MenuItem>
-                    {item.keys.map(key => <MenuItem key={key.id} value={String(key.id)}>{key.name}</MenuItem>)}
-                  </Select>
-                  {isLive() && selectedUpstreamKeyId !== null ? <UpstreamKeyModels key={selectedUpstreamKeyId} settings={props.settings} keyId={selectedUpstreamKeyId} onChanged={() => props.onRefresh()} /> : null}
-                </Box>
-                </>}
-
-                <Box className="grid gap-4 mt-5 pb-5" component="section">
-                  <Box className="flex items-center justify-between border-b border-border/40 pb-3">
-                    <Box className="flex items-center gap-2.5">
-                      <RefreshCw className="size-4 opacity-70" />
-                      <Box className="text-sm font-semibold tracking-normal text-foreground uppercase" component="h3">{t('模型')}</Box>
-                    </Box>
-                  </Box>
-
-                  <Card className="border border-border bg-background shadow-none">
-                    <CardContent className="flex flex-col items-start justify-between gap-3 p-4 sm:flex-row sm:items-center">
-                      <Box className="grid gap-1.5">
-                        <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t('可用模型')}</Typography>
-                        <Typography className="text-[0.8125rem] leading-5 text-muted-foreground" component="p">{t('模型库存、显示名称、别名目标和协议能力已集中到模型页。')}</Typography>
-                      </Box>
-                      <Box className="flex shrink-0 flex-wrap gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={busy !== null || item.endpoints.length === 0 || item.keys.length === 0}
-                          onClick={() => void syncModelsForProvider(item.provider.id, item.provider.name)}
-                        >
-                          <RefreshCw className={`mr-1.5 size-3 ${busy === `models-sync-${item.provider.id}` ? 'animate-spin' : ''}`} aria-hidden="true" />
-                          {t('同步模型')}
-                        </Button>
-                        <Button
-                          component={Link}
-                          to={`/models?provider_id=${item.provider.id}`}
-                          size="sm"
-                          disabled={!isLive()}
-                          className="text-xs tracking-wider"
-                        >
-                          {t('在模型页管理')}
-                          <ChevronRight className="ml-1.5 size-3" aria-hidden="true" />
-                        </Button>
-                      </Box>
-                    </CardContent>
-                  </Card>
-                </Box>
-
-                {testResult ? (result => <Card className="border border-border bg-background shadow-none mb-5">
-                      <Box className="flex flex-col gap-2 p-4 pb-3">
-                        <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("最近测试结果")}</Typography>
-                      </Box>
-                      <CardContent className="grid gap-1.5 font-mono text-[0.8125rem] border-t border-border/40 pt-3">
-                        <Box>{t('地址：{{url}}', {
-                  url: result.url
-                })}</Box>
-                        <Box>{t('状态：{{status}}', {
-                  status: result.status ?? t('连接失败')
-                })}</Box>
-                        <Box>{t('消息：{{message}}', {
-                  message: result.message ?? t('无返回内容')
-                })}</Box>
-                      </CardContent>
-                    </Card>)(testResult) : null}
 
                 <Box className="mt-5 rounded border border-destructive/40 bg-destructive/5 p-4" component="section">
                   <Box className="flex flex-col gap-3.5 sm:flex-row sm:items-center sm:justify-between">
@@ -1851,6 +1759,7 @@ export function ProvidersPage(props: ProvidersPageProps) {
       })(selected) : null}
       </DetailDrawer>
 
+      <ConfirmAction open={removeAction !== null} title={removeAction?.title ?? ''} error={removeError} busy={busy !== null} onClose={() => setRemoveAction(null)} onConfirm={() => void removeAction?.run()} />
       {createdCodexLogin ? <CodexOAuthLoginDialog
           open
           attemptId={createdCodexLogin.attemptId}

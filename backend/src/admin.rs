@@ -212,6 +212,11 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         if req.method() == Method::DELETE {
             return delete_provider(req, state).await;
         }
+        if req.method() == Method::PUT
+            && (path.ends_with("/endpoints/order") || path.ends_with("/keys/order"))
+        {
+            return reorder_provider_children(req, state).await;
+        }
         if req.method() == Method::GET && path.ends_with("/endpoints") {
             return list_provider_endpoints(req, state).await;
         }
@@ -687,6 +692,10 @@ where
 {
     let (mut parts, body) = response.into_parts();
     crate::proxy::sanitize_hop_headers(&mut parts.headers);
+    parts.headers.insert(
+        HeaderName::from_static("x-little-gate-upstream-error"),
+        hyper::header::HeaderValue::from_static("1"),
+    );
     parts.headers.remove(SET_COOKIE);
     parts.headers.remove(HeaderName::from_static("set-cookie2"));
     Response::from_parts(parts, http::boxed(body))
@@ -1923,6 +1932,10 @@ struct ProviderGroupAssignmentReq {
 
 #[derive(Debug, Deserialize)]
 struct CreateProviderReq {
+    #[serde(default)]
+    endpoints: Vec<CreateEndpointReq>,
+    #[serde(default)]
+    keys: Vec<CreateKeyReq>,
     name: String,
     #[serde(alias = "providerType")]
     provider_type: String,
@@ -2154,49 +2167,98 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         return http::json_error(StatusCode::BAD_REQUEST, message);
     }
 
-    let now_ms = util::now_ms();
-    let id = match state
-        .db
-        .insert_upstream_provider(
-            body.name.trim(),
-            body.provider_type.trim(),
-            enabled,
-            priority,
-            weight,
-            supports_include_usage,
-            websocket_enabled,
-            &beta_features,
-            &body.request_overrides,
-            key_selection_strategy,
-            max_attempts,
-            max_concurrency,
-            circuit_breaker_enabled,
-            circuit_breaker_failure_threshold,
-            circuit_breaker_open_ms,
-            circuit_breaker_half_open_success_threshold,
-            now_ms,
-        )
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
-    let group_rows = group_assignments
-        .iter()
-        .map(|assignment| (assignment.group_id, assignment.priority_override))
-        .collect::<Vec<_>>();
-    if let Err(error) = state
-        .db
-        .replace_provider_group_memberships(id, &group_rows, now_ms)
-        .await
-    {
-        let _ = state.db.delete_upstream_provider(id).await;
-        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    if body.endpoints.len() > 100 || body.keys.len() > 100 {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "at most 100 endpoints and keys per creation",
+        );
     }
-
-    state.caches.upstream.invalidate();
-    http::json(StatusCode::OK, &serde_json::json!({ "id": id }))
+    if is_codex_oauth && !body.keys.is_empty() {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "OAuth accounts must be added through OAuth login",
+        );
+    }
+    let mut endpoints = Vec::new();
+    for endpoint in body.endpoints {
+        if endpoint.name.trim().is_empty() {
+            return http::json_error(StatusCode::BAD_REQUEST, "endpoint name is empty");
+        }
+        if let Err(message) = validate_provider_routing(endpoint.priority, endpoint.weight) {
+            return http::json_error(StatusCode::BAD_REQUEST, message);
+        }
+        let base_url = match upstream_url::normalize_base_url(&endpoint.base_url) {
+            Ok(value) => value,
+            Err(message) => return http::json_error(StatusCode::BAD_REQUEST, message),
+        };
+        endpoints.push(crate::types::UpstreamEndpoint {
+            id: 0,
+            provider_id: 0,
+            name: endpoint.name.trim().into(),
+            base_url,
+            enabled: endpoint.enabled.unwrap_or(true),
+            priority: endpoint.priority.unwrap_or(100),
+            weight: endpoint.weight.unwrap_or(1),
+        });
+    }
+    let mut keys = Vec::new();
+    for key in body.keys {
+        if key.name.trim().is_empty() || key.secret.trim().is_empty() {
+            return http::json_error(StatusCode::BAD_REQUEST, "key name/secret is empty");
+        }
+        if let Err(message) = validate_provider_routing(key.priority, key.weight) {
+            return http::json_error(StatusCode::BAD_REQUEST, message);
+        }
+        keys.push(crate::types::UpstreamKey {
+            id: 0,
+            provider_id: 0,
+            name: key.name.trim().into(),
+            secret: key.secret.trim().into(),
+            enabled: key.enabled.unwrap_or(true),
+            priority: key.priority.unwrap_or(100),
+            weight: key.weight.unwrap_or(1),
+        });
+    }
+    let provider = crate::types::UpstreamProvider {
+        id: 0,
+        name: body.name.trim().into(),
+        provider_type: body.provider_type.trim().into(),
+        enabled,
+        priority,
+        weight,
+        supports_include_usage,
+        websocket_enabled,
+        beta_features,
+        request_overrides: body.request_overrides,
+        key_selection_strategy: key_selection_strategy.into(),
+        max_attempts,
+        max_concurrency,
+        circuit_breaker_enabled,
+        circuit_breaker_failure_threshold,
+        circuit_breaker_open_ms,
+        circuit_breaker_half_open_success_threshold,
+    };
+    let groups = group_assignments
+        .iter()
+        .map(|item| (item.group_id, item.priority_override))
+        .collect::<Vec<_>>();
+    let bundle = crate::db::ProviderBundle {
+        provider: &provider,
+        groups: &groups,
+        endpoints: &endpoints,
+        keys: &keys,
+    };
+    match state
+        .db
+        .insert_provider_bundle(bundle, &state.config.master_key, util::now_ms())
+        .await
+    {
+        Ok(created) => {
+            state.caches.upstream.invalidate();
+            http::json(StatusCode::OK, &created)
+        }
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2429,9 +2491,79 @@ async fn reset_provider_circuit(req: Request<Incoming>, state: SharedState) -> H
     if !providers.iter().any(|provider| provider.id == provider_id) {
         return http::json_error(StatusCode::NOT_FOUND, "provider not found");
     }
+    let snap = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(snap) => snap,
+        Err(error) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    };
     state.provider_runtime.reset(provider_id);
+    for endpoint in snap
+        .endpoints_by_provider
+        .get(&provider_id)
+        .into_iter()
+        .flatten()
+    {
+        state.endpoint_health.reset(endpoint.id);
+    }
+    for key in snap
+        .keys_by_provider
+        .get(&provider_id)
+        .into_iter()
+        .flatten()
+    {
+        state.upstream_key_health.reset(key.id);
+        let quota = state.quota.snapshot(key.id, util::now_ms());
+        if let Some(until) = quota
+            .cooldown_until_ms
+            .into_iter()
+            .chain(quota.blocked_until_ms())
+            .max()
+        {
+            state.upstream_key_health.defer_until(key.id, until);
+        }
+    }
     state.metrics.record_provider_breaker_reset();
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+}
+
+async fn reorder_provider_children(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let keys = req.uri().path().ends_with("/keys/order");
+    let suffix = if keys {
+        "/keys/order"
+    } else {
+        "/endpoints/order"
+    };
+    let Some(provider_id) = parse_provider_id_with_suffix(req.uri().path(), suffix) else {
+        return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
+    };
+    #[derive(Deserialize)]
+    struct Order {
+        ids: Vec<i64>,
+    }
+    let (_, body, _) =
+        match http::read_json_limited::<Order>(req, state.config.max_request_bytes).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+    match state
+        .db
+        .reorder_provider_children(provider_id, keys, &body.ids, util::now_ms())
+        .await
+    {
+        Ok(true) => {
+            state.caches.upstream.invalidate();
+            http::json(StatusCode::OK, &serde_json::json!({"ok": true}))
+        }
+        Ok(false) => http::json_error(
+            StatusCode::CONFLICT,
+            "configuration changed; refresh before reordering",
+        ),
+        Err(error) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2647,24 +2779,29 @@ async fn test_endpoint(req: Request<Incoming>, state: SharedState) -> HttpRespon
     {
         Ok(Ok(resp)) => {
             let status = resp.status().as_u16();
-            let body_bytes =
-                match Limited::new(resp.into_body(), ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES)
-                    .collect()
-                    .await
-                {
-                    Ok(collected) => collected.to_bytes(),
-                    Err(e) => {
-                        return http::json(
-                            StatusCode::OK,
-                            &serde_json::json!({
-                                "ok": status < 500,
-                                "status": status,
-                                "url": url,
-                                "message": e.to_string(),
-                            }),
-                        );
-                    }
-                };
+            let body_bytes = match tokio_time::timeout(
+                std::time::Duration::from_secs(5),
+                Limited::new(resp.into_body(), ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES).collect(),
+            )
+            .await
+            {
+                Ok(Ok(collected)) => collected.to_bytes(),
+                result => {
+                    let message = match result {
+                        Ok(Err(error)) => error.to_string(),
+                        _ => "address responded; body read timed out".into(),
+                    };
+                    return http::json(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "ok": status < 500,
+                            "status": status,
+                            "url": url,
+                            "message": message,
+                        }),
+                    );
+                }
+            };
             let body_text = String::from_utf8_lossy(&body_bytes).trim().to_string();
             http::json(
                 StatusCode::OK,
@@ -3608,42 +3745,10 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
     let endpoints_enabled = endpoints.iter().filter(|e| e.enabled).count();
     let keys_enabled = keys.iter().filter(|k| k.enabled).count();
 
-    let snap = match state
-        .caches
-        .upstream
-        .get(&state.db, &state.config.master_key)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    let (healthy, warning, error) = match crate::routing_availability::health_counts(&state).await {
+        Ok(counts) => counts,
+        Err(error) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
-    let mut healthy = 0_u32;
-    let mut warning = 0_u32;
-    let mut error = 0_u32;
-    for provider in &snap.providers {
-        let provider_endpoints = snap
-            .endpoints_by_provider
-            .get(&provider.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let provider_keys = snap
-            .keys_by_provider
-            .get(&provider.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let health = summarize_provider_health(
-            provider_endpoints,
-            provider_keys,
-            &state.endpoint_health,
-            &state.upstream_key_health,
-            now_ms,
-        );
-        match health.state {
-            crate::health::CircuitState::Closed => healthy += 1,
-            crate::health::CircuitState::HalfOpen => warning += 1,
-            crate::health::CircuitState::Open => error += 1,
-        }
-    }
     let server_status = state.system_status.snapshot();
 
     let payload = serde_json::json!({
@@ -3932,7 +4037,7 @@ fn is_valid_provider_type(provider_type: &str) -> bool {
 }
 
 fn is_valid_key_selection_strategy(value: &str) -> bool {
-    matches!(value, "round_robin" | "weighted")
+    matches!(value, "round_robin" | "ordered" | "weighted")
 }
 
 fn normalize_beta_features(features: Vec<String>) -> Vec<String> {

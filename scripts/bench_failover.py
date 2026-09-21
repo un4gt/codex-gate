@@ -67,6 +67,7 @@ def create_provider(base_url, admin_token, name, timeout, priority=10):
         'priority': priority,
         'weight': 1,
         'supportsIncludeUsage': True,
+        'keySelectionStrategy': 'ordered',
     }, timeout)['id']
 
 

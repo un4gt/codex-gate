@@ -1,6 +1,7 @@
 import { t } from './i18n';
 import type { RoutingAvailability } from './types';
 const reasons: Record<string, string> = {
+  recovery_probe_in_progress: '恢复探测中',
   provider_disabled: '上游已禁用', account_disabled: '账户已禁用', reauth_required: '需要重新登录',
   account_forbidden: '账户无访问权限', quota_unavailable: '额度不可用', no_allowed_models: '无允许路由的模型',
   provider_circuit_open: '上游熔断中', provider_capacity_exhausted: '上游并发已满', account_unhealthy: '账户健康检查不可用',

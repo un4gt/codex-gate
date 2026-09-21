@@ -10,18 +10,21 @@ use serde::Serialize;
 pub(crate) struct RoutingAvailability {
     pub available: bool,
     pub reason: Option<&'static str>,
+    pub retry_at_ms: Option<i64>,
 }
 impl RoutingAvailability {
     fn unavailable(reason: &'static str) -> Self {
         Self {
             available: false,
             reason: Some(reason),
+            retry_at_ms: None,
         }
     }
     fn available() -> Self {
         Self {
             available: true,
             reason: None,
+            retry_at_ms: None,
         }
     }
 }
@@ -92,7 +95,13 @@ pub(crate) fn account(
         return RoutingAvailability::unavailable("provider_circuit_open");
     }
     if !owns_capacity && !runtime.available {
-        return RoutingAvailability::unavailable("provider_capacity_exhausted");
+        return RoutingAvailability::unavailable(
+            if runtime.state == crate::health::CircuitState::HalfOpen {
+                "recovery_probe_in_progress"
+            } else {
+                "provider_capacity_exhausted"
+            },
+        );
     }
     if !state.upstream_key_health.snapshot(key.id, now).available {
         return RoutingAvailability::unavailable("account_unhealthy");
@@ -119,12 +128,103 @@ pub(crate) fn provider(
     if !provider.enabled {
         return RoutingAvailability::unavailable("provider_disabled");
     }
-    if snap.keys_by_provider.get(&provider.id).is_some_and(|keys| {
-        keys.iter()
-            .any(|key| account(state, snap, provider, key, None, false).available)
-    }) {
-        RoutingAvailability::available()
-    } else {
-        RoutingAvailability::unavailable("no_available_accounts")
+    let mut failures = Vec::new();
+    if let Some(keys) = snap.keys_by_provider.get(&provider.id) {
+        for key in keys {
+            let status = account(state, snap, provider, key, None, false);
+            if status.available {
+                return status;
+            }
+            if key.enabled {
+                failures.push(status);
+            }
+        }
     }
+    let mut result = failures
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| RoutingAvailability::unavailable("no_available_accounts"));
+    result.retry_at_ms = provider_retry_at(state, snap, provider, None);
+    result
+}
+
+/// Earliest full path through a provider; every blocking layer on that path must recover.
+pub(crate) fn provider_retry_at(
+    state: &SharedState,
+    snap: &UpstreamSnapshot,
+    provider: &UpstreamProvider,
+    model: Option<&str>,
+) -> Option<i64> {
+    let now = crate::util::now_ms();
+    let runtime = state.provider_runtime.snapshot(provider, now);
+    let endpoint_at = snap
+        .endpoints_by_provider
+        .get(&provider.id)?
+        .iter()
+        .filter(|item| item.enabled)
+        .map(|item| {
+            state
+                .endpoint_health
+                .snapshot(item.id, now)
+                .open_until_ms
+                .unwrap_or(now)
+        })
+        .min()?;
+    snap.keys_by_provider
+        .get(&provider.id)?
+        .iter()
+        .filter(|key| key.enabled && model.is_none_or(|name| snap.key_allows_model(key.id, name)))
+        .filter_map(|key| {
+            let health = state.upstream_key_health.snapshot(key.id, now);
+            let quota = state.quota.snapshot(key.id, now);
+            let until = [
+                runtime.open_until_ms,
+                health.open_until_ms,
+                quota.cooldown_until_ms,
+                quota.blocked_until_ms(),
+                snap.codex_oauth_by_key
+                    .get(&key.id)
+                    .and_then(|account| account.quota.as_ref())
+                    .and_then(|quota| quota.blocked_until_ms(now)),
+                Some(endpoint_at),
+            ]
+            .into_iter()
+            .flatten()
+            .max()?;
+            Some(until)
+        })
+        .min()
+        .filter(|until| *until > now)
+}
+
+pub(crate) async fn health_counts(state: &SharedState) -> Result<(u32, u32, u32), String> {
+    let snap = state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await?;
+    let mut counts = (0, 0, 0);
+    for item in snap.providers.iter().filter(|item| item.enabled) {
+        let status = provider(state, &snap, item);
+        if status.available {
+            if state
+                .provider_runtime
+                .snapshot(item, crate::util::now_ms())
+                .state
+                == crate::health::CircuitState::HalfOpen
+            {
+                counts.1 += 1;
+            } else {
+                counts.0 += 1;
+            }
+        } else if matches!(
+            status.reason,
+            Some("provider_capacity_exhausted" | "recovery_probe_in_progress")
+        ) {
+            counts.1 += 1;
+        } else {
+            counts.2 += 1;
+        }
+    }
+    Ok(counts)
 }

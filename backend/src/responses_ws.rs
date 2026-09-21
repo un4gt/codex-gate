@@ -58,6 +58,53 @@ struct WsContext {
     upstream_service_tier: Option<String>,
     observation: std::sync::Arc<parking_lot::Mutex<crate::response_events::Observation>>,
     pending_turn_log: std::sync::Arc<parking_lot::Mutex<Option<PendingTurnLog>>>,
+    budget: std::sync::Arc<tokio::sync::Mutex<crate::resilience::AttemptBudget>>,
+    trace: std::sync::Arc<parking_lot::Mutex<WsRoutingTrace>>,
+}
+
+#[derive(Default)]
+struct WsRoutingTrace {
+    attempts: Vec<Value>,
+    last_number: usize,
+    started: Option<Instant>,
+    backoff_ms: i64,
+}
+
+async fn note_ws_send(ctx: &WsContext, resolved: &ResolvedUpstream) {
+    let mut budget = ctx.budget.lock().await;
+    let number = budget.used();
+    let mut trace = ctx.trace.lock();
+    // A native connection and its first response.create are one target attempt.
+    if trace.last_number == number {
+        return;
+    }
+    budget.note_send(resolved.provider.id);
+    trace.last_number = number;
+    trace.started = Some(Instant::now());
+    trace.attempts.push(json!({ "provider_id": resolved.provider.id, "endpoint_id": resolved.endpoint.id,
+        "upstream_key_id": resolved.key.id, "upstream_api_format": "responses", "status": null, "error_type": null, "duration_ms": 0 }));
+    ctx.state.metrics.record_upstream_attempt();
+}
+
+fn finish_ws_trace(ctx: &WsContext, status: StatusCode, error_type: Option<&str>) {
+    let mut trace = ctx.trace.lock();
+    let duration_ms = trace
+        .started
+        .map(|start| start.elapsed().as_millis() as i64)
+        .unwrap_or_default();
+    if let Some(attempt) = trace.attempts.last_mut() {
+        attempt["status"] = json!(status.as_u16());
+        attempt["error_type"] = json!(error_type);
+        attempt["duration_ms"] = json!(duration_ms);
+    }
+}
+
+fn ws_trace_value(ctx: &WsContext) -> Value {
+    let trace = ctx.trace.lock();
+    json!({ "attempt_limit": crate::resilience::MAX_ATTEMPTS, "attempts_sent": trace.attempts.len(),
+        "backoff_ms": trace.backoff_ms, "attempts": trace.attempts, "authorized_groups": ctx.api_key.provider_groups,
+        "affinity": null, "candidates": [], "rejections": [], "terminal": null,
+        "provider_switches": trace.attempts.windows(2).filter(|pair| pair[0]["provider_id"] != pair[1]["provider_id"]).count() })
 }
 
 struct ActiveUpstream {
@@ -208,6 +255,10 @@ pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpRespo
     };
 
     let ctx = WsContext {
+        trace: Default::default(),
+        budget: std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::resilience::AttemptBudget::new(state.config.upstream_request_timeout),
+        )),
         state,
         api_key,
         request_headers,
@@ -408,6 +459,12 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                 }
 
                 let turn_start = Instant::now();
+                ctx.trace = Default::default();
+                ctx.budget = std::sync::Arc::new(tokio::sync::Mutex::new(
+                    crate::resilience::AttemptBudget::new(
+                        ctx.state.config.upstream_request_timeout,
+                    ),
+                ));
                 let Some(requested_model) = value
                     .get("model")
                     .and_then(Value::as_str)
@@ -856,6 +913,17 @@ async fn connect_selected_upstream(
     let mut last_error = None;
     let mut faulted_providers = std::collections::HashSet::new();
     for (index, resolved) in attempts.iter().cloned().enumerate() {
+        if !ctx.budget.lock().await.available() {
+            return Err(budget_error());
+        }
+        if !ctx
+            .budget
+            .lock()
+            .await
+            .provider_available(resolved.provider.id, resolved.provider.max_attempts)
+        {
+            continue;
+        }
         let already_attempted = provider_budget.contains(resolved.provider.id);
         let Some(switched) = provider_budget.try_note_attempt(resolved.provider.id) else {
             break;
@@ -1011,7 +1079,6 @@ async fn connect_or_bridge_upstream(
             scope: proxy::FailureScope::Provider,
         });
     };
-    ctx.state.metrics.record_upstream_attempt();
 
     if ctx
         .state
@@ -1131,11 +1198,26 @@ async fn connect_upstream_ws_once(
             scope: proxy::FailureScope::Provider,
         });
     }
-    let mut connected = connect_upstream_ws(&ctx.state, &ws_url, &headers).await;
+    if !reservation.is_current() {
+        reservation.neutral();
+        return NativeWsConnectOutcome::Unavailable(target_unavailable_error());
+    }
+    if !begin_ws_attempt(ctx, resolved, false).await {
+        reservation.neutral();
+        return NativeWsConnectOutcome::Unavailable(budget_error());
+    }
+    if !reservation.is_current() {
+        reservation.neutral();
+        return NativeWsConnectOutcome::Unavailable(target_unavailable_error());
+    }
+    note_ws_send(ctx, resolved).await;
+    let mut connected = connect_upstream_ws(ctx, resolved.key.id, &ws_url, &headers).await;
+    let mut oauth_replayed = false;
     if connected
         .as_ref()
         .is_err_and(|error| error.status == StatusCode::UNAUTHORIZED)
         && resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
+        && ctx.budget.lock().await.available()
         && let Ok(refreshed) = ctx
             .state
             .codex_oauth
@@ -1158,11 +1240,20 @@ async fn connect_upstream_ws_once(
                 scope: proxy::FailureScope::Provider,
             });
         }
-        connected = connect_upstream_ws(&ctx.state, &ws_url, &retry_headers).await;
+        if reservation.is_current()
+            && begin_ws_attempt(ctx, resolved, false).await
+            && reservation.is_current()
+        {
+            finish_ws_trace(ctx, StatusCode::UNAUTHORIZED, Some("oauth_token_refresh"));
+            note_ws_send(ctx, resolved).await;
+            oauth_replayed = true;
+            connected = connect_upstream_ws(ctx, resolved.key.id, &ws_url, &retry_headers).await;
+        }
     }
-    if connected
-        .as_ref()
-        .is_err_and(|error| error.status == StatusCode::UNAUTHORIZED)
+    if oauth_replayed
+        && connected
+            .as_ref()
+            .is_err_and(|error| error.status == StatusCode::UNAUTHORIZED)
         && resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE
     {
         let _ = ctx
@@ -1179,6 +1270,7 @@ async fn connect_upstream_ws_once(
     }
     match connected {
         Ok(ws) => {
+            ctx.budget.lock().await.credit_connected_setup();
             ctx.state
                 .caches
                 .transport_capability
@@ -1194,6 +1286,7 @@ async fn connect_upstream_ws_once(
             NativeWsConnectOutcome::Connected(Box::new(ws), capacity)
         }
         Err(err) => {
+            finish_ws_trace(ctx, err.status, Some(err.error_type));
             if is_deterministic_ws_unsupported(err.status) {
                 reservation.neutral();
                 ctx.state
@@ -1235,8 +1328,42 @@ fn provider_has_beta_feature(resolved: &ResolvedUpstream, feature: &str) -> bool
         .any(|item| item == feature)
 }
 
+fn budget_error() -> WsBridgeError {
+    WsBridgeError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        error_type: "upstream_retry_budget_exhausted",
+        message: "upstream attempt limit or deadline reached; retry after cooldown".into(),
+        scope: proxy::FailureScope::Client,
+    }
+}
+
+fn target_unavailable_error() -> WsBridgeError {
+    WsBridgeError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        error_type: "upstream_cooldown",
+        message: "upstream entered cooldown before this attempt could be sent".into(),
+        scope: proxy::FailureScope::Client,
+    }
+}
+
+async fn begin_ws_attempt(ctx: &WsContext, resolved: &ResolvedUpstream, turn: bool) -> bool {
+    let mut disconnected = ctx.disconnected_at.subscribe();
+    if disconnected.borrow().is_some() {
+        return false;
+    }
+    let mut budget = ctx.budget.lock().await;
+    let before = Instant::now();
+    let allowed = tokio::select! {
+        result = budget.begin_for_provider(resolved.provider.id, resolved.provider.max_attempts, turn) => result,
+        _ = disconnected.changed() => false,
+    };
+    ctx.trace.lock().backoff_ms += before.elapsed().as_millis() as i64;
+    allowed
+}
+
 async fn connect_upstream_ws(
-    state: &SharedState,
+    ctx: &WsContext,
+    key_id: i64,
     ws_url: &str,
     headers: &HeaderMap,
 ) -> Result<UpstreamWs, WsBridgeError> {
@@ -1263,8 +1390,12 @@ async fn connect_upstream_ws(
         request.headers_mut().append(name, value);
     }
 
+    let state = &ctx.state;
     let connected = tokio::time::timeout(
-        state.config.upstream_connect_timeout,
+        state
+            .config
+            .upstream_connect_timeout
+            .min(ctx.budget.lock().await.remaining()),
         connect_async(request),
     )
     .await
@@ -1278,9 +1409,24 @@ async fn connect_upstream_ws(
         scope: proxy::FailureScope::Provider,
     })?;
 
-    connected
-        .map(|(ws, _response)| ws)
-        .map_err(map_ws_connect_error)
+    connected.map(|(ws, _response)| ws).map_err(|error| {
+        if let WsError::Http(response) = &error {
+            let now = util::now_ms();
+            state.quota.observe_response(
+                key_id,
+                i32::from(response.status().as_u16()),
+                response.headers(),
+                now,
+                state.config.rate_limit_fallback_cooldown,
+            );
+            if matches!(response.status().as_u16(), 402 | 429)
+                && let Some(until) = state.quota.snapshot(key_id, now).cooldown_until_ms
+            {
+                state.upstream_key_health.defer_until(key_id, until);
+            }
+        }
+        map_ws_connect_error(error)
+    })
 }
 
 fn map_ws_connect_error(err: WsError) -> WsBridgeError {
@@ -1379,6 +1525,9 @@ where
     D: Sink<Message, Error = E> + Unpin,
     E: Display,
 {
+    if !begin_ws_attempt(ctx, resolved, true).await {
+        return ForwardResult::RetryableBeforeEvent(budget_error());
+    }
     let reservation = match proxy::reserve_ws_turn(&ctx.state, resolved, util::now_ms()) {
         Ok(reservation) => reservation,
         Err(proxy::AttemptReservationError::Quota) => {
@@ -1430,7 +1579,7 @@ where
             });
         }
     };
-    ctx.state.metrics.record_upstream_attempt();
+    note_ws_send(ctx, resolved).await;
     if let Err(err) = ws.send(Message::Text(payload.into())).await {
         let message = format!("failed to send websocket request upstream: {err}");
         let outcome = TurnOutcome::provider_error(
@@ -1461,7 +1610,7 @@ where
     let mut first_token_ms = None;
     let mut emitted_event = false;
     let (status, error_type, error_message) = loop {
-        match read_with_disconnect_grace(ctx, ws.next()).await {
+        match read_with_disconnect_grace(ctx, ws.next(), emitted_event).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 first_byte_ms.get_or_insert_with(|| turn_start.elapsed().as_millis() as i64);
                 if let Ok(event) = serde_json::from_str::<Value>(&text) {
@@ -1551,9 +1700,15 @@ where
 async fn read_with_disconnect_grace<T>(
     ctx: &WsContext,
     read: impl std::future::Future<Output = T>,
+    emitted_event: bool,
 ) -> Result<T, ()> {
     let mut disconnected = ctx.disconnected_at.subscribe();
-    let read_deadline = tokio::time::Instant::now() + ctx.state.config.upstream_request_timeout;
+    let timeout = if emitted_event {
+        ctx.state.config.upstream_request_timeout
+    } else {
+        ctx.budget.lock().await.remaining()
+    };
+    let read_deadline = tokio::time::Instant::now() + timeout;
     tokio::pin!(read);
     loop {
         let disconnected_at = *disconnected.borrow();
@@ -1601,6 +1756,17 @@ fn finish_forwarded_turn(
             util::now_ms(),
             ctx.state.config.rate_limit_fallback_cooldown,
         );
+    }
+    if scope == proxy::FailureScope::Quota
+        && let Some(until) = ctx
+            .state
+            .quota
+            .snapshot(resolved.key.id, util::now_ms())
+            .cooldown_until_ms
+    {
+        ctx.state
+            .upstream_key_health
+            .defer_until(resolved.key.id, until);
     }
     record_turn(
         ctx,
@@ -1694,6 +1860,9 @@ where
         }
     };
 
+    if !begin_ws_attempt(ctx, resolved, false).await {
+        return ForwardResult::RetryableBeforeEvent(budget_error());
+    }
     let reservation = match proxy::reserve_attempt(&ctx.state, resolved, util::now_ms()) {
         Ok(reservation) => reservation,
         Err(proxy::AttemptReservationError::Quota) => {
@@ -1745,7 +1914,6 @@ where
             });
         }
     };
-    ctx.state.metrics.record_upstream_attempt();
 
     let upstream_uri = match build_upstream_http_responses_uri(&resolved.endpoint.base_url) {
         Ok(uri) => uri,
@@ -1848,16 +2016,25 @@ where
             scope: proxy::FailureScope::Provider,
         });
     }
-    let mut response = proxy::dispatch_upstream_request(
+    if !reservation.is_current() {
+        reservation.neutral();
+        return ForwardResult::RetryableBeforeEvent(target_unavailable_error());
+    }
+    let remaining = ctx.budget.lock().await.remaining();
+    note_ws_send(ctx, resolved).await;
+    let mut response = proxy::dispatch_upstream_request_with_timeout(
         &ctx.state,
         &Method::POST,
         hyper::Version::HTTP_11,
         &headers,
         body.clone(),
         upstream_uri.clone(),
+        remaining,
     )
     .await;
+    let mut oauth_replayed = false;
     if is_codex_oauth
+        && ctx.budget.lock().await.available()
         && response
             .as_ref()
             .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
@@ -1901,19 +2078,36 @@ where
                 scope: proxy::FailureScope::Provider,
             });
         }
-        response = proxy::dispatch_upstream_request(
+        if !reservation.is_current() {
+            reservation.neutral();
+            return ForwardResult::RetryableBeforeEvent(target_unavailable_error());
+        }
+        if !begin_ws_attempt(ctx, resolved, false).await {
+            reservation.neutral();
+            return ForwardResult::RetryableBeforeEvent(budget_error());
+        }
+        if !reservation.is_current() {
+            reservation.neutral();
+            return ForwardResult::RetryableBeforeEvent(target_unavailable_error());
+        }
+        let remaining = ctx.budget.lock().await.remaining();
+        finish_ws_trace(ctx, StatusCode::UNAUTHORIZED, Some("oauth_token_refresh"));
+        note_ws_send(ctx, resolved).await;
+        oauth_replayed = true;
+        response = proxy::dispatch_upstream_request_with_timeout(
             &ctx.state,
             &Method::POST,
             hyper::Version::HTTP_11,
             &retry_headers,
             body,
             upstream_uri,
+            remaining,
         )
         .await;
         retry_headers.clear();
     }
     headers.clear();
-    if is_codex_oauth
+    if oauth_replayed
         && response
             .as_ref()
             .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
@@ -1965,6 +2159,17 @@ where
         util::now_ms(),
         ctx.state.config.rate_limit_fallback_cooldown,
     );
+    if matches!(status_i32, 402 | 429)
+        && let Some(until) = ctx
+            .state
+            .quota
+            .snapshot(resolved.key.id, util::now_ms())
+            .cooldown_until_ms
+    {
+        ctx.state
+            .upstream_key_health
+            .defer_until(resolved.key.id, until);
+    }
     let (parts, mut body) = upstream_resp.into_parts();
     let is_sse = parts
         .headers
@@ -1980,7 +2185,7 @@ where
     let mut capture = BytesMut::new();
     let mut emitted_event = false;
     loop {
-        let frame = match read_with_disconnect_grace(ctx, body.frame()).await {
+        let frame = match read_with_disconnect_grace(ctx, body.frame(), emitted_event).await {
             Ok(Some(Ok(frame))) => Some(frame),
             Ok(None) => None,
             Ok(Some(Err(error))) => {
@@ -2295,6 +2500,7 @@ fn record_turn(
             ),
         );
     }
+    finish_ws_trace(ctx, outcome.status, outcome.error_type.as_deref());
     let event = TelemetryEvent {
         id: None,
         api_key_id: ctx.api_key.id,
@@ -2324,7 +2530,7 @@ fn record_turn(
         requested_service_tier: ctx.requested_service_tier.clone(),
         upstream_service_tier: ctx.upstream_service_tier.clone(),
         service_tier,
-        routing_trace: None,
+        routing_trace: Some(ws_trace_value(ctx)),
     };
     *ctx.pending_turn_log.lock() = Some(PendingTurnLog {
         permit: telemetry_permit.take(),
@@ -2396,7 +2602,7 @@ fn record_ws_setup_failed_turn(
         requested_service_tier: ctx.requested_service_tier.clone(),
         upstream_service_tier: None,
         service_tier: None,
-        routing_trace: None,
+        routing_trace: Some(ws_trace_value(ctx)),
     });
 }
 
@@ -2811,14 +3017,14 @@ mod tests {
     }
 
     #[test]
-    fn websocket_provider_budget_should_allow_only_four_distinct_providers() {
+    fn websocket_provider_budget_should_allow_only_three_distinct_providers() {
         let mut budget = WsProviderBudget::default();
 
         assert_eq!(budget.try_note_attempt(1), Some(false));
         assert_eq!(budget.try_note_attempt(1), Some(false));
         assert_eq!(budget.try_note_attempt(2), Some(true));
         assert_eq!(budget.try_note_attempt(3), Some(true));
-        assert_eq!(budget.try_note_attempt(4), Some(true));
+        assert_eq!(budget.try_note_attempt(4), None);
         assert!(budget.exhausted());
         assert_eq!(budget.try_note_attempt(5), None);
     }

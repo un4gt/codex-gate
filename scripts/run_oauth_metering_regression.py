@@ -259,6 +259,8 @@ class Regression:
         assert row['upstream_service_tier'] == ('priority' if getattr(self, 'oauth', False) else 'fast'), row
         if case == 'failed':
             assert row['error_type'] == 'mock_failure', row
+            # Each case is independent; a real failure now starts a 30-second cooldown.
+            self.api('POST', f'/providers/{self.provider}/circuit/reset', {})
         return row
 
     def check_failed_preflight_tier(self):
@@ -268,6 +270,7 @@ class Regression:
         row = self.settled(before)[0]
         assert row['requested_service_tier'] == 'fast' and row['service_tier'] == 'default', row
         assert not row['usage_observed'], row
+        self.api('POST', f'/providers/{self.provider}/circuit/reset', {})
 
     def check_ws(self, transport="ws_native"):
         before = len(self.logs())
@@ -402,6 +405,7 @@ class Regression:
         assert status == 200
         row = self.settled(before)[0]
         assert (row['provider_id'], row['requested_service_tier'], row['upstream_service_tier'], row['service_tier']) == (other, 'fast', 'priority', 'default'), row
+        self.api('POST', f'/providers/{self.provider}/circuit/reset', {})
         before = len(self.logs())
         metrics_before = self.api('GET', '/stats/live')['metrics']['responses']
         ws = WsClient(self.port, self.token)
@@ -415,12 +419,13 @@ class Regression:
         self.api('DELETE', f'/providers/{other}')
         self.api('PATCH', f'/endpoints/{self.endpoint}', {'baseUrl': f'http://127.0.0.1:{self.mock_port}/native/v1'})
         self.api('POST', f'/providers/{self.provider}/circuit/reset', {})
-        # A successful probe clears consecutive endpoint failures from the retry cases.
+        # Begin the next independent metering scenario with healthy runtime state.
         self.check_http('normal', False)
         before = len(self.logs())
         status, _ = self.request('POST', '/v1/responses', {'model': MODEL, 'input': 'failed usage', 'test_case': 'http_error_usage'}, self.token)
         assert status == 502
         assert self.settled(before)[0]['input_tokens'] == 100
+        self.api('POST', f'/providers/{self.provider}/circuit/reset', {})
 
     def enable_oauth(self):
         # Let the gateway encrypt a synthetic credential envelope, then seed only

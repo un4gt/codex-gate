@@ -17,6 +17,7 @@ mod pricing;
 mod provider_runtime;
 mod proxy;
 mod request_overrides;
+mod resilience;
 mod response_events;
 mod responses_via_chat;
 mod responses_ws;

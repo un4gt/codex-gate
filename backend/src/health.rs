@@ -232,16 +232,37 @@ impl RuntimeHealthBook {
         state.updated_at_ms = Some(now_ms);
         release_probe_owner(state, token);
 
-        state.consecutive_failures = if previous_kind == CircuitState::HalfOpen {
-            self.failure_threshold
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        // Stop using a failed target immediately, even before the operator's breaker threshold.
+        let configured = if state.consecutive_failures >= self.failure_threshold
+            || previous_kind == CircuitState::HalfOpen
+        {
+            self.open_duration_ms
         } else {
-            state.consecutive_failures.saturating_add(1)
+            0
         };
+        state.open_until_ms = Some(now_ms.saturating_add(crate::resilience::cooldown_ms(
+            configured,
+            state.consecutive_failures,
+        )));
+        advance_generation(state);
+    }
 
-        if state.consecutive_failures >= self.failure_threshold {
-            state.open_until_ms = Some(now_ms.saturating_add(self.open_duration_ms));
-            advance_generation(state);
-        }
+    pub fn reset(&self, id: i64) {
+        let mut guard = self.by_id.write();
+        let state = guard.entry(id).or_default();
+        advance_generation(state);
+        state.consecutive_failures = 0;
+        state.open_until_ms = None;
+        state.last_error_type = None;
+        state.last_error_message = None;
+    }
+
+    pub fn defer_until(&self, id: i64, until_ms: i64) {
+        let mut guard = self.by_id.write();
+        let state = guard.entry(id).or_default();
+        state.open_until_ms = Some(state.open_until_ms.unwrap_or(0).max(until_ms));
+        advance_generation(state);
     }
 
     fn to_view(state: &RuntimeHealthState, now_ms: i64) -> RuntimeHealthView {
@@ -287,6 +308,14 @@ pub struct RuntimeHealthAttemptGuard {
 }
 
 impl RuntimeHealthAttemptGuard {
+    pub fn is_current(&self) -> bool {
+        self.book
+            .by_id
+            .read()
+            .get(&self.id)
+            .is_some_and(|state| attempt_token_matches(state, self.token))
+    }
+
     pub fn success(mut self, status: Option<i32>, observed_latency_ms: Option<i64>, now_ms: i64) {
         self.active = false;
         self.book
@@ -537,6 +566,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_failure_cools_immediately_and_only_one_probe_can_recover() {
+        let book = Arc::new(RuntimeHealthBook::new(3, 30_000));
+        let stale = book.try_begin_attempt(7, 0).unwrap();
+        assert!(stale.is_current());
+        book.try_begin_attempt(7, 0)
+            .unwrap()
+            .failure(Some(503), None, None, 0);
+        assert_eq!(book.snapshot(7, 1).open_until_ms, Some(30_000));
+        assert!(!stale.is_current());
+        stale.success(Some(200), None, 2);
+        assert!(book.try_begin_attempt(7, 29_999).is_none());
+        let mut now = 30_000;
+        for cooldown in [60_000, 120_000, 240_000, 300_000, 300_000] {
+            let probe = book.try_begin_attempt(7, now).unwrap();
+            assert!(probe.is_current());
+            assert!(book.try_begin_attempt(7, now).is_none());
+            probe.failure(Some(503), None, None, now);
+            assert_eq!(book.snapshot(7, now).open_until_ms, Some(now + cooldown));
+            now += cooldown;
+        }
+        book.try_begin_attempt(7, now)
+            .unwrap()
+            .success(Some(200), None, now);
+        assert_eq!(book.snapshot(7, now).state, CircuitState::Closed);
+        assert_eq!(book.snapshot(7, now).consecutive_failures, 0);
+    }
+
+    #[test]
+    fn quota_cooldown_keeps_late_success_from_releasing_probe() {
+        let book = Arc::new(RuntimeHealthBook::new(3, 30_000));
+        let stale = book.try_begin_attempt(7, 0).unwrap();
+        book.defer_until(7, 900_000);
+        stale.success(Some(200), None, 1);
+        assert!(!book.snapshot(7, 899_999).available);
+        let probe = book.try_begin_attempt(7, 900_000).unwrap();
+        assert!(!book.snapshot(7, 900_000).available);
+        probe.success(Some(200), None, 900_001);
+        assert!(book.snapshot(7, 900_002).available);
+    }
+
+    #[test]
     fn old_result_should_not_release_a_new_half_open_probe() {
         let book = Arc::new(RuntimeHealthBook::new(1, 30));
         let old_attempt = book.try_begin_attempt(7, 50).expect("old closed attempt");
@@ -544,13 +614,13 @@ mod tests {
             .expect("opening attempt")
             .failure(Some(503), Some("upstream_error"), Some("failed"), 51);
         let current_probe = book
-            .try_begin_attempt(7, 81)
+            .try_begin_attempt(7, 30_051)
             .expect("current half-open probe");
 
-        old_attempt.success(Some(200), Some(10), 82);
+        old_attempt.success(Some(200), Some(10), 30_052);
 
-        assert!(!book.snapshot(7, 82).available);
+        assert!(!book.snapshot(7, 30_052).available);
         drop(current_probe);
-        assert!(book.snapshot(7, 83).available);
+        assert!(book.snapshot(7, 30_053).available);
     }
 }

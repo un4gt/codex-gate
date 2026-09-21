@@ -10,6 +10,7 @@ mimalloc = ["dep:mimalloc"]
 jemalloc = ["dep:jemallocator"]
 
 [dependencies]
+httpdate = "1"
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "getrandom"] }
 async-trait = "0.1"
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
@@ -49,3 +50,6 @@ time = { version = "0.3", default-features = false, features = ["formatting", "p
 thiserror = "2"
 ulid = { version = "1", default-features = false, features = ["std"] }
 url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

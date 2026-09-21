@@ -723,7 +723,7 @@ def main():
     mock_proc, mock_log = start_process([
         'python3', 'scripts/mock_upstream.py',
         '--listen', '127.0.0.1:19092',
-        '--route', '/bad/api/coding/v3|429|rate limited||0|chat',
+        '--route', '/bad/api/coding/v3|503|endpoint unavailable||0|chat',
         '--route', '/good/api/coding/v3|200|good endpoint||0|chat',
         '--route', '/key/api/coding/v3|200|key ok|good-key|0|chat',
         '--route', '/bridge/api/coding/v3|200|bridge ok|good-key|0|chat',
@@ -798,6 +798,10 @@ def main():
             '--bad-key-secret', 'bad-key',
             '--good-key-secret', 'good-key',
         ]).stdout)
+
+        for scenario in (failover_endpoint, failover_key):
+            if scenario['proxy_response']['status'] != 200:
+                raise AssertionError(('failover did not reach the healthy target', scenario))
 
         mock_stats = request_json('GET', f'{MOCK_URL}/__admin/stats')
         upstream_requests = mock_stats.get('recent_requests', [])
