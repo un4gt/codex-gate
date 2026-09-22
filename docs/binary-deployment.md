@@ -154,3 +154,7 @@ bash scripts/install-prek-hooks.sh
 本地 hooks 仍可能被 `--no-verify`、手工 tag 或 CI tag 绕过，所以发布安全边界位于 GitHub Actions。`scripts/git-push-with-next-tag.sh` 只允许从 `main` 创建发布 tag；统一的 `.github/workflows/release.yml` 还会先拒绝非 `main` 的手动运行，以及提交尚未进入 `main` 的 tag，再在二进制与 Docker 发布 job 之前调用一次 `.github/workflows/quality-gate.yml`。来源校验或质量门禁失败时不会生成二进制发布资产，也不会推送镜像。Dockerfile 自身还会在构建静态资源前再次运行 React smoke tests。
 
 `manual` stage 不会由 Git 自动触发。源码 Docker Compose 部署应使用 `bash scripts/docker-compose-up.sh -d --build` 显式运行它。
+
+## 云端价格目录
+
+默认后台同步云端模型名称、品牌与价格，保留手工报价和渠道专属报价。可通过 `PRICE_SYNC_ENABLED`、`PRICE_SYNC_SOURCE_URL`、`PRICE_SYNC_INTERVAL_MINUTES` 设置初始值，或在「模型中心 → 价格管理」修改运行时配置。升级启动时自动添加来源字段和目录/任务表，原有价格迁移为手工来源。详情及接口见 [云端价格同步](price-sync.md)。

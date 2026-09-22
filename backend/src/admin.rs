@@ -136,6 +136,9 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         return crate::notification::handle_admin(req, state).await;
     }
 
+    if path == "/api/v1/price-sync" || path.starts_with("/api/v1/price-sync/") {
+        return crate::price_sync::handle(req, state).await;
+    }
     match (method, path) {
         (Method::GET, "/api/v1/ping") => return http::text(StatusCode::OK, "pong\n"),
 
@@ -562,6 +565,10 @@ async fn list_provider_models(req: Request<Incoming>, state: SharedState) -> Htt
 }
 
 async fn list_all_provider_models(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let display = match state.db.cloud_display().await {
+        Ok(v) => v,
+        Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
     let (models, providers) = match tokio::try_join!(
         state.db.list_all_provider_models(),
         state.db.list_upstream_providers(),
@@ -591,6 +598,7 @@ async fn list_all_provider_models(_req: Request<Incoming>, state: SharedState) -
                 "provider_id": model.provider_id,
                 "provider_name": provider.name,
                 "provider_type": provider.provider_type,
+                "display": display.get(&model.upstream_model),
                 "upstream_model": model.upstream_model,
                 "alias": model.alias,
                 "enabled": model.enabled,
@@ -3262,6 +3270,11 @@ async fn upsert_route(req: Request<Incoming>, state: SharedState) -> HttpRespons
 }
 
 async fn list_prices(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let (display, sources) =
+        match tokio::try_join!(state.db.cloud_display(), state.db.price_sources()) {
+            Ok(v) => v,
+            Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
     let provider_id = query_i64(req.uri().query(), "provider_id");
 
     match state.db.list_latest_model_prices().await {
@@ -3274,6 +3287,9 @@ async fn list_prices(req: Request<Incoming>, state: SharedState) -> HttpResponse
                         "id": p.id,
                         "provider_id": p.provider_id,
                         "model_name": p.model_name,
+                        "display": display.get(&p.model_name),
+                        "source": sources.get(&p.id).and_then(|v|v.get("source")),
+                        "source_version": sources.get(&p.id).and_then(|v|v.get("source_version")),
                         "price_data": p.price.to_json(),
                         "created_at_ms": p.created_at_ms,
                         "updated_at_ms": p.updated_at_ms
@@ -3325,7 +3341,7 @@ async fn reconcile_after_price_change(state: &SharedState, price_id: i64) -> (u6
     }
 }
 
-async fn reconcile_unpriced_usage(
+pub(crate) async fn reconcile_unpriced_usage(
     state: &SharedState,
     time_from_ms: i64,
     time_to_ms: i64,
@@ -3385,7 +3401,7 @@ async fn reconcile_unpriced_usage(
         let Some(price) = price else {
             continue;
         };
-        if price.card.validate_complete().is_err() {
+        if price.card.cost_for_usage(&usage, 0).is_none() {
             continue;
         }
         backfilled_requests = backfilled_requests.saturating_add(
@@ -3559,12 +3575,20 @@ async fn get_price(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let Some(p) = price else {
         return http::json_error(StatusCode::NOT_FOUND, "price not found");
     };
+    let (display, sources) =
+        match tokio::try_join!(state.db.cloud_display(), state.db.price_sources()) {
+            Ok(v) => v,
+            Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
     http::json(
         StatusCode::OK,
         &serde_json::json!({
             "id": p.id,
             "provider_id": p.provider_id,
             "model_name": p.model_name,
+            "display": display.get(&p.model_name),
+            "source": sources.get(&p.id).and_then(|v|v.get("source")),
+            "source_version": sources.get(&p.id).and_then(|v|v.get("source_version")),
             "price_data": p.price.to_json(),
             "created_at_ms": p.created_at_ms,
             "updated_at_ms": p.updated_at_ms

@@ -118,7 +118,7 @@ export function SettingsPage(props: SettingsPageProps) {
       <SettingsSection title="运行设置" description="常用设置可直接生效，资源类设置按建议调整后重启。" open={openSection === 'runtime'} onToggle={() => toggleSection('runtime')}>
         <Box className="grid gap-4">
           <Box className="grid gap-3 md:grid-cols-2">
-            {(props.runtimeSettings?.settings ?? []).map(setting => <Box key={`${setting.key}:${String(setting.value)}`} className="surface-tile" onSubmit={event => void submitRuntimeSetting(event, setting)} component="form">
+            {(props.runtimeSettings?.settings ?? []).filter(setting => setting.key !== 'price_sync').map(setting => <Box key={`${setting.key}:${String(setting.value)}`} className="surface-tile" onSubmit={event => void submitRuntimeSetting(event, setting)} component="form">
                   <Box className="mb-3 flex items-center justify-between gap-2.5">
                     <Box>
                       <Box className="text-[0.8125rem] font-medium text-foreground">{setting.label}</Box>
@@ -245,8 +245,9 @@ function RuntimeSettingControl(props: {
   }
   return <InputBase name={`runtime_${setting.key}`} defaultValue={String(setting.value ?? '')} disabled={!setting.editable} />;
 }
-function formatSettingValue(value: string | number | boolean | null) {
+function formatSettingValue(value: RuntimeSettingView['value']) {
   if (typeof value === 'boolean') return value ? '开启' : '关闭';
   if (value === null) return '—';
+  if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }

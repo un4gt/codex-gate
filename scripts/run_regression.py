@@ -735,6 +735,7 @@ def main():
 
     gateway_env = os.environ.copy()
     gateway_env.update({
+        'PRICE_SYNC_ENABLED': 'false',  # Keep routing/archive fixtures independent of external pricing.
         'ADMIN_TOKEN': 'adm',
         'MASTER_KEY': 'adm',
         'DB_DSN': f'sqlite://./{DB_PATH.relative_to(ROOT)}',

@@ -1,3 +1,4 @@
+mod price_sync;
 mod provider_config;
 pub use provider_config::ProviderBundle;
 
@@ -173,7 +174,8 @@ impl Database {
         match self {
             Database::Sqlite(pool) => migrate_sqlite(pool).await,
             Database::Postgres(pool) => migrate_postgres(pool).await,
-        }
+        }?;
+        self.migrate_price_sync().await
     }
 
     pub async fn find_api_key_by_hash(

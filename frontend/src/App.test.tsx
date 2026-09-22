@@ -15,7 +15,7 @@ import { ModelAliasesPage } from '@/components/ModelAliasesPage';
 import { PricesPage } from '@/components/PricesPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { initializeI18n } from '@/lib/i18n';
-import type { ModelPrice, ProviderWorkspace } from '@/lib/types';
+import type { ModelPrice, ProviderModelInventory, ProviderWorkspace } from '@/lib/types';
 import { theme } from '@/theme';
 
 function renderWithTheme(children: ReactNode) {
@@ -401,7 +401,7 @@ describe('admin console smoke test', () => {
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm Delete' }));
 
-    await waitFor(() => expect(requests).toEqual(['DELETE /api/v1/prices/11']));
+    await waitFor(() => expect(requests.filter(request => !request.startsWith('GET '))).toEqual(['DELETE /api/v1/prices/11']));
     expect(refreshMessages).toEqual([
       'Price model-a deleted. No historical requests required repricing.',
     ]);
@@ -1270,6 +1270,90 @@ describe('admin console smoke test', () => {
     return jsonResponse([]);
   };
 
+  it('disables a model only for the selected provider and preserves the same model on another provider', async () => {
+    window.history.replaceState({}, '', '/models?provider_id=7');
+    const inventory: ProviderModelInventory[] = [7, 8].map((providerId, index) => ({
+      id: 11 + index, provider_id: providerId, provider_name: index === 0 ? 'Provider A' : 'Provider B',
+      provider_type: 'openai_compatible', upstream_model: 'model-a', alias: null,
+      enabled: true, available: true, responses_via_chat_enabled: false,
+      native_api_formats: ['chat_completions'], created_at_ms: 1, updated_at_ms: 1,
+    }));
+    const patches: Array<{ path: string; body: unknown }> = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body));
+        patches.push({ path, body });
+        const model = inventory.find(item => path === `/api/v1/provider-models/${item.id}`);
+        if (!model) return jsonResponse({ error: 'unexpected update' }, 400);
+        model.enabled = body.enabled;
+        return jsonResponse({ ok: true });
+      }
+      if (path === '/api/v1/provider-models') return jsonResponse(inventory);
+      return catalogResponse(input);
+    });
+    renderWithTheme(<ModelsPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} providers={[providerWorkspace()]} onMessage={() => undefined} />);
+
+    const providerA = await screen.findByRole('checkbox', { name: 'Toggle model-a for Provider A' }) as HTMLInputElement;
+    expect(providerA.checked).toBe(true);
+    expect(screen.queryByRole('checkbox', { name: 'Toggle global state for model-a' })).toBeNull();
+    fireEvent.click(providerA);
+    await waitFor(() => expect(providerA.checked).toBe(false));
+    expect(patches).toEqual([{ path: '/api/v1/provider-models/11', body: { enabled: false } }]);
+    expect(inventory.map(model => model.enabled)).toEqual([false, true]);
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Providers' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'Provider B' }));
+    const providerB = await screen.findByRole('checkbox', { name: 'Toggle model-a for Provider B' }) as HTMLInputElement;
+    expect(providerB.checked).toBe(true);
+    expect(screen.queryByRole('checkbox', { name: 'Toggle model-a for Provider A' })).toBeNull();
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Providers' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'All Providers' }));
+    const global = await screen.findByRole('checkbox', { name: 'Toggle global state for model-a' }) as HTMLInputElement;
+    expect(global.checked).toBe(true);
+    expect(within(screen.getByRole('table', { name: 'Model Inventory' })).getByText('1 / 2')).toBeTruthy();
+    expect(patches).toHaveLength(1);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('shows an existing global block in a provider view and restores it only through the explicit global control', async () => {
+    window.history.replaceState({}, '', '/models?provider_id=7');
+    let globallyEnabled = false;
+    const patches: Array<{ path: string; body: unknown }> = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/api/v1/gateway-models') {
+        if (init?.method === 'PATCH') {
+          const body = JSON.parse(String(init.body));
+          patches.push({ path, body });
+          globallyEnabled = body.enabled;
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse([{ model_name: 'model-a', enabled: globallyEnabled, created_at_ms: 1, updated_at_ms: 1 }]);
+      }
+      return catalogResponse(input);
+    });
+    renderWithTheme(<ModelsPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} providers={[providerWorkspace()]} onMessage={() => undefined} />);
+
+    const table = await screen.findByRole('table', { name: 'Model Inventory' });
+    expect(await within(table).findByText('Disabled')).toBeTruthy();
+    expect((within(table).getByRole('checkbox', { name: 'Toggle model-a for Provider A' }) as HTMLInputElement).checked).toBe(true);
+    expect(patches).toHaveLength(0);
+
+    fireEvent.click(within(table).getByRole('button', { name: 'model-a' }));
+    const dialog = await screen.findByRole('dialog', { name: 'model-a' });
+    expect(within(dialog).getByText('This model is disabled globally and cannot be used through any provider.')).toBeTruthy();
+    const global = within(dialog).getByRole('checkbox', { name: 'Globally Enabled' }) as HTMLInputElement;
+    expect(global.checked).toBe(false);
+    fireEvent.click(global);
+    await waitFor(() => expect(global.checked).toBe(true));
+    expect(patches).toEqual([{ path: '/api/v1/gateway-models', body: { model_name: 'model-a', enabled: true } }]);
+    expect((within(dialog).getByRole('checkbox', { name: 'Toggle model-a for Provider A' }) as HTMLInputElement).checked).toBe(true);
+    expect(within(dialog).queryByText('This model is disabled globally and cannot be used through any provider.')).toBeNull();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it('restores a saved session directly into a deep link without showing the connection gate', async () => {
     window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
     window.history.replaceState({}, '', '/models?provider_id=7&model=model-a');
@@ -1407,7 +1491,7 @@ describe('admin console smoke test', () => {
     expect(screen.getByRole('alert').textContent).toContain('policy service unavailable');
     fireEvent.click(screen.getByRole('button', { name: 'model-a' }));
     const dialog = await screen.findByRole('dialog', { name: 'model-a' });
-    expect((within(dialog).getByRole('checkbox', { name: 'Enable' }) as HTMLInputElement).disabled).toBe(false);
+    expect((within(dialog).getByRole('checkbox', { name: 'Toggle model-a for Provider A' }) as HTMLInputElement).disabled).toBe(false);
     expect(consoleError).not.toHaveBeenCalled();
   });
 

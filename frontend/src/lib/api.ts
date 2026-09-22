@@ -808,3 +808,26 @@ export async function updateGatewayModelPolicy(
   const { apiBase, adminToken } = requireConnection(settings);
   return patchJson<{ ok: boolean }>(apiBase, '/api/v1/gateway-models', adminToken, payload);
 }
+
+export interface PriceSyncConfig { enabled: boolean; source_url: string; interval_minutes: number }
+export interface PriceSyncJob {
+  id: string; status: 'running' | 'preview' | 'applied' | 'failed'; source_version: string; error: string | null;
+  counts: { added: number; updated: number; unchanged: number; manual_preserved: number; failed: number };
+  conflicts: { model_name: string; local_id: number; local_price: ModelPrice['price_data']; cloud_price: ModelPrice['price_data'] }[];
+}
+export interface PriceSyncStatus { config: PriceSyncConfig; running: boolean; last_success_ms: number | null; next_run_ms: number | null; last_job?: PriceSyncJob }
+export function loadPriceSync(settings: ConnectionSettings): Promise<PriceSyncStatus> {
+  return requestJson(settings.apiBase, '/api/v1/price-sync', settings.adminToken);
+}
+export function savePriceSyncConfig(settings: ConnectionSettings, config: PriceSyncConfig): Promise<PriceSyncConfig> {
+  return requestJson(settings.apiBase, '/api/v1/price-sync/config', settings.adminToken, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+}
+export function previewPriceSync(settings: ConnectionSettings): Promise<{ id: string }> {
+  return requestJson(settings.apiBase, '/api/v1/price-sync/preview', settings.adminToken, { method: 'POST' });
+}
+export function loadPriceSyncJob(settings: ConnectionSettings, id: string): Promise<PriceSyncJob> {
+  return requestJson(settings.apiBase, `/api/v1/price-sync/jobs/${encodeURIComponent(id)}`, settings.adminToken);
+}
+export function applyPriceSync(settings: ConnectionSettings, job: PriceSyncJob, useCloud: string[]): Promise<PriceSyncJob> {
+  return requestJson(settings.apiBase, `/api/v1/price-sync/apply/${encodeURIComponent(job.id)}`, settings.adminToken, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_version: job.source_version, use_cloud: useCloud }) });
+}

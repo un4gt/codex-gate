@@ -11,6 +11,7 @@ use crate::selector::EndpointSelectorStrategy;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSettingsSnapshot {
+    pub price_sync: crate::price_sync::SyncConfig,
     pub inject_include_usage: bool,
     pub endpoint_selector_strategy: EndpointSelectorStrategy,
     pub usage_capture_bytes: usize,
@@ -22,6 +23,7 @@ pub struct RuntimeSettingsSnapshot {
 impl RuntimeSettingsSnapshot {
     pub fn from_config(config: &Config) -> Self {
         Self {
+            price_sync: crate::price_sync::SyncConfig::from_env(),
             inject_include_usage: config.inject_include_usage,
             endpoint_selector_strategy: config.endpoint_selector_strategy,
             usage_capture_bytes: config.usage_capture_bytes,
@@ -33,6 +35,12 @@ impl RuntimeSettingsSnapshot {
 
     fn apply_value(&mut self, key: &str, value: &Value) -> Result<(), String> {
         match key {
+            "price_sync" => {
+                let config: crate::price_sync::SyncConfig =
+                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+                config.validate()?;
+                self.price_sync = config;
+            }
             "inject_include_usage" => {
                 self.inject_include_usage = value
                     .as_bool()
@@ -93,6 +101,13 @@ struct RuntimeSettingSpec {
 }
 
 const SPECS: &[RuntimeSettingSpec] = &[
+    RuntimeSettingSpec {
+        key: "price_sync",
+        group: "pricing",
+        label: "云端价格同步",
+        editable: true,
+        requires_restart: false,
+    },
     RuntimeSettingSpec {
         key: "inject_include_usage",
         group: "routing",
@@ -170,6 +185,10 @@ impl RuntimeSettings {
         })
     }
 
+    pub fn replace_price_sync(&self, config: crate::price_sync::SyncConfig) {
+        self.current.write().price_sync = config;
+    }
+
     pub fn snapshot(&self) -> RuntimeSettingsSnapshot {
         self.current.read().clone()
     }
@@ -233,6 +252,7 @@ fn spec_for(key: &str) -> Option<&'static RuntimeSettingSpec> {
 
 fn value_for(key: &str, settings: &RuntimeSettingsSnapshot, config: &Config) -> Value {
     match key {
+        "price_sync" => serde_json::json!(settings.price_sync),
         "inject_include_usage" => Value::Bool(settings.inject_include_usage),
         "endpoint_selector_strategy" => {
             Value::String(format!("{:?}", settings.endpoint_selector_strategy).to_ascii_lowercase())

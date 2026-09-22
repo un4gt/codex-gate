@@ -606,6 +606,7 @@ export interface ProviderModel {
 }
 
 export interface ProviderModelInventory extends ProviderModel {
+  display?: ModelDisplay | null;
   provider_name: string;
   provider_type: string;
   native_api_formats: Array<'chat_completions' | 'responses'>;
@@ -764,7 +765,12 @@ export interface RequestPricing {
   card: PriceCardV2 | null;
 }
 
+export interface ModelDisplay { display_name: string; brand: string; aliases: string[]; quote_provider: string; adaptation: string; present: boolean }
+
 export interface ModelPrice {
+  source?: 'manual' | 'cloud';
+  source_version?: string | null;
+  display?: ModelDisplay | null;
   id: number;
   provider_id: number | null;
   model_name: string;
@@ -788,8 +794,8 @@ export interface RuntimeSettingView {
   key: string;
   group: string;
   label: string;
-  value: string | number | boolean | null;
-  default_value: string | number | boolean | null;
+  value: string | number | boolean | Record<string, unknown> | null;
+  default_value: string | number | boolean | Record<string, unknown> | null;
   editable: boolean;
   requires_restart: boolean;
   updated_at_ms: number | null;
@@ -805,7 +811,7 @@ export interface RuntimeEnvPreviewResponse {
   hot_settings: Array<{
     key: string;
     label: string;
-    value: string | number | boolean | null;
+    value: string | number | boolean | Record<string, unknown> | null;
   }>;
   restart_settings: Array<{
     key: string;

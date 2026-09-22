@@ -10,6 +10,7 @@ mimalloc = ["dep:mimalloc"]
 jemalloc = ["dep:jemallocator"]
 
 [dependencies]
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 httpdate = "1"
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "getrandom"] }
 async-trait = "0.1"
@@ -41,7 +42,7 @@ pin-project-lite = { version = "0.2", default-features = false }
 rust_decimal = { version = "1", default-features = false, features = ["serde-with-str", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
-serde_json = { version = "1", default-features = false, features = ["std"] }
+serde_json = { version = "1", default-features = false, features = ["std", "arbitrary_precision"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres"] }
 tokio = { version = "1", default-features = false, features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }

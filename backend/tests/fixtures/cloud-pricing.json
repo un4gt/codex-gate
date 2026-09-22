@@ -1,0 +1,597 @@
+{
+  "schema": "cchp.pricing-table/v1",
+  "version": "c8a14339e115ed68",
+  "refreshed_at": "2026-09-21T14:33:43.146Z",
+  "currency": "USD",
+  "models": [
+    {
+      "model_name": "claude-sonnet-4-5",
+      "display_name": "Claude Sonnet 4.5",
+      "vendor": "anthropic",
+      "aliases": [
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "anthropic/claude-sonnet-4-5",
+        "anthropic/claude-sonnet-4-5-20250929",
+        "anthropic/claude-sonnet-4-5@20250929",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-4.5-20250929",
+        "anthropic/claude-sonnet-4.5:thinking",
+        "au.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "aws-bedrock/claude-sonnet-4-5",
+        "aws-bedrock/claude-sonnet-4-5-20250929",
+        "bedrock/claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-5-20250929-v1:0",
+        "claude-sonnet-4-5@20250929",
+        "claude-sonnet-4.5",
+        "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "jp.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "pa/claude-sonnet-4-5-20250929",
+        "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "vertex-anthropic/claude-sonnet-4-5",
+        "vertex/claude-sonnet-4-5",
+        "vertexanthropic/claude-sonnet-4-5"
+      ],
+      "pricing": [
+        {
+          "provider": "anthropic",
+          "provider_name": "Anthropic",
+          "official": true,
+          "source": "models-dev+litellm+pydantic-prices+truefoundry+helicone-registry+computeprices+portkey+llmdb+lobehub-modelbank+llm-prices-www+ai-model-directory+override",
+          "charges": {
+            "prompt": {
+              "unit": "per_M_tokens",
+              "price": "3"
+            },
+            "completion": {
+              "unit": "per_M_tokens",
+              "price": "15"
+            },
+            "cache_read": {
+              "unit": "per_M_tokens",
+              "price": "0.3"
+            },
+            "cache_write": {
+              "unit": "per_M_tokens",
+              "price": "3.75"
+            },
+            "cache_write_1h": {
+              "unit": "per_M_tokens",
+              "price": "6"
+            },
+            "web_search": {
+              "unit": "per_k_calls",
+              "price": "10"
+            }
+          },
+          "provider_model_id": "claude-sonnet-4-5-20250929",
+          "tracks": [
+            {
+              "label": "Batch",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "0.5",
+                "completion": "0.5"
+              },
+              "triggers": [
+                {
+                  "kind": "endpoint_matches",
+                  "pattern": "^batch\\."
+                }
+              ]
+            },
+            {
+              "label": "Header anthropic-beta /context-1m-\\d{4}-\\d{2}-\\d{2}/ AND Context >200K",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "2",
+                "completion": "1.5",
+                "cache_read": "2",
+                "cache_write": "2",
+                "cache_write_1h": "2"
+              },
+              "triggers": [
+                {
+                  "kind": "header_matches",
+                  "header": "anthropic-beta",
+                  "pattern": "context-1m-\\d{4}-\\d{2}-\\d{2}"
+                },
+                {
+                  "kind": "input_tokens_above",
+                  "threshold": 200000,
+                  "inclusive": false
+                }
+              ]
+            },
+            {
+              "label": "Base pricing",
+              "factor": "1",
+              "triggers": []
+            }
+          ],
+          "warnings": [
+            {
+              "code": "unresolved_track_combination",
+              "service_tier": "batch",
+              "source": "truefoundry",
+              "message": "batch pricing and context tiers are both published, but no exact combined batch + context prices were provided."
+            }
+          ]
+        },
+        {
+          "provider": "302ai",
+          "provider_name": "302.AI",
+          "official": false,
+          "source": "models-dev+llmdb",
+          "charges": {
+            "prompt": {
+              "unit": "per_M_tokens",
+              "price": "3"
+            },
+            "completion": {
+              "unit": "per_M_tokens",
+              "price": "15"
+            }
+          },
+          "provider_model_id": "claude-sonnet-4-5-20250929"
+        }
+      ]
+    },
+    {
+      "model_name": "gemini-2.5-pro",
+      "display_name": "Gemini 2.5 Pro",
+      "vendor": "google",
+      "aliases": [
+        "coding/gemini-2.5-pro",
+        "deepinfra/google/gemini-2.5-pro",
+        "gemini-2-5-pro",
+        "gemini/gemini-2.5-pro",
+        "google-ai-studio/gemini-2.5-pro",
+        "google-vertex/gemini-2.5-pro",
+        "google/gemini-2.5-pro",
+        "vertex/gemini-2.5-pro"
+      ],
+      "pricing": [
+        {
+          "provider": "google",
+          "provider_name": "Google",
+          "official": true,
+          "source": "models-dev+litellm+pydantic-prices+truefoundry+helicone-registry+computeprices+llmdb+lobehub-modelbank+pricetoken+llm-prices-www",
+          "charges": {
+            "prompt": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "completion": {
+              "unit": "per_M_tokens",
+              "price": "10"
+            },
+            "cache_read": {
+              "unit": "per_M_tokens",
+              "price": "0.125"
+            },
+            "web_search": {
+              "unit": "per_k_calls",
+              "price": "35"
+            },
+            "cache_write_1h": {
+              "unit": "per_M_tokens",
+              "price": "4.5"
+            },
+            "cache_write": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "cache_storage": {
+              "unit": "per_M_tokens_per_hour",
+              "price": "4.5"
+            },
+            "image_input": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "video_input": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "audio_input": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            }
+          },
+          "provider_model_id": "gemini-2-5-pro",
+          "tracks": [
+            {
+              "label": "Batch",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "0.5",
+                "completion": "0.5",
+                "cache_read": "0.4"
+              },
+              "triggers": [
+                {
+                  "kind": "endpoint_matches",
+                  "pattern": "^batch\\."
+                }
+              ]
+            },
+            {
+              "label": "Context >200K",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "2",
+                "completion": "1.5",
+                "cache_read": "2",
+                "image_input": "2",
+                "video_input": "2",
+                "audio_input": "2"
+              },
+              "triggers": [
+                {
+                  "kind": "input_tokens_above",
+                  "threshold": 200000,
+                  "inclusive": false
+                }
+              ]
+            },
+            {
+              "label": "Base pricing",
+              "factor": "1",
+              "triggers": []
+            }
+          ],
+          "warnings": [
+            {
+              "code": "unresolved_track_combination",
+              "service_tier": "batch",
+              "source": "truefoundry",
+              "message": "batch pricing and context tiers are both published, but no exact combined batch + context prices were provided."
+            }
+          ]
+        },
+        {
+          "provider": "google-vertex",
+          "provider_name": "Vertex",
+          "official": true,
+          "source": "models-dev+litellm+helicone-registry+portkey+llmdb",
+          "charges": {
+            "prompt": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "completion": {
+              "unit": "per_M_tokens",
+              "price": "10"
+            },
+            "cache_read": {
+              "unit": "per_M_tokens",
+              "price": "0.125"
+            },
+            "web_search": {
+              "unit": "per_k_calls",
+              "price": "35"
+            },
+            "cache_write": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "cache_storage": {
+              "unit": "per_M_tokens_per_hour",
+              "price": "4.5"
+            },
+            "google_search_grounding": {
+              "unit": "per_k_calls",
+              "price": "35"
+            },
+            "enterprise_web_search": {
+              "unit": "per_request",
+              "price": "0.045"
+            },
+            "maps": {
+              "unit": "per_request",
+              "price": "0.025"
+            }
+          },
+          "tracks": [
+            {
+              "label": "Batch AND Context >200K",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "1",
+                "completion": "0.75",
+                "web_search": "1",
+                "google_search_grounding": "1",
+                "enterprise_web_search": "1",
+                "maps": "1"
+              },
+              "triggers": [
+                {
+                  "kind": "endpoint_matches",
+                  "pattern": "^batch\\."
+                },
+                {
+                  "kind": "input_tokens_above",
+                  "threshold": 200000,
+                  "inclusive": false
+                }
+              ]
+            },
+            {
+              "label": "Batch",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "0.5",
+                "completion": "0.5",
+                "web_search": "1",
+                "google_search_grounding": "1",
+                "enterprise_web_search": "1",
+                "maps": "1"
+              },
+              "triggers": [
+                {
+                  "kind": "endpoint_matches",
+                  "pattern": "^batch\\."
+                }
+              ]
+            },
+            {
+              "label": "Priority AND Context >200K",
+              "factor": "1",
+              "charge_factors": {
+                "web_search": "1",
+                "google_search_grounding": "1",
+                "enterprise_web_search": "1",
+                "maps": "1",
+                "prompt": "3.6",
+                "completion": "2.7",
+                "cache_read": "3.6"
+              },
+              "triggers": [
+                {
+                  "kind": "body_matches",
+                  "field": "service_tier",
+                  "pattern": "^priority$"
+                },
+                {
+                  "kind": "input_tokens_above",
+                  "threshold": 200000,
+                  "inclusive": false
+                }
+              ]
+            },
+            {
+              "label": "Priority",
+              "factor": "1",
+              "charge_factors": {
+                "web_search": "1",
+                "google_search_grounding": "1",
+                "enterprise_web_search": "1",
+                "maps": "1",
+                "prompt": "1.8",
+                "completion": "1.8",
+                "cache_read": "1.84"
+              },
+              "triggers": [
+                {
+                  "kind": "body_matches",
+                  "field": "service_tier",
+                  "pattern": "^priority$"
+                }
+              ]
+            },
+            {
+              "label": "Flex AND Context >200K",
+              "factor": "1",
+              "charge_factors": {
+                "web_search": "1",
+                "google_search_grounding": "1",
+                "enterprise_web_search": "1",
+                "maps": "1",
+                "prompt": "1",
+                "completion": "0.75"
+              },
+              "triggers": [
+                {
+                  "kind": "body_matches",
+                  "field": "service_tier",
+                  "pattern": "^flex$"
+                },
+                {
+                  "kind": "input_tokens_above",
+                  "threshold": 200000,
+                  "inclusive": false
+                }
+              ]
+            },
+            {
+              "label": "Flex",
+              "factor": "1",
+              "charge_factors": {
+                "web_search": "1",
+                "google_search_grounding": "1",
+                "enterprise_web_search": "1",
+                "maps": "1",
+                "prompt": "0.5",
+                "completion": "0.5"
+              },
+              "triggers": [
+                {
+                  "kind": "body_matches",
+                  "field": "service_tier",
+                  "pattern": "^flex$"
+                }
+              ]
+            },
+            {
+              "label": "Context >200K",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "2",
+                "completion": "1.5",
+                "cache_read": "2",
+                "cache_write": "0.2",
+                "web_search": "1",
+                "google_search_grounding": "1",
+                "enterprise_web_search": "1",
+                "maps": "1"
+              },
+              "triggers": [
+                {
+                  "kind": "input_tokens_above",
+                  "threshold": 200000,
+                  "inclusive": false
+                }
+              ]
+            },
+            {
+              "label": "Base pricing",
+              "factor": "1",
+              "triggers": []
+            }
+          ],
+          "finetune_charges": {
+            "train": {
+              "unit": "per_M_tokens",
+              "price": "25"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model_name": "gpt-5",
+      "display_name": "GPT-5",
+      "vendor": "openai",
+      "aliases": [
+        "azure/gpt-5",
+        "gpt-5-2025-08-07",
+        "openai/gpt-5",
+        "openai/gpt-5-2025-08-07",
+        "pa/gpt-5",
+        "pa/gpt-5-2025-08-07"
+      ],
+      "pricing": [
+        {
+          "provider": "openai",
+          "provider_name": "OpenAI",
+          "official": true,
+          "source": "models-dev+litellm+pydantic-prices+truefoundry+helicone-registry+computeprices+portkey+llmdb+lobehub-modelbank+pricetoken+llm-prices-www+ai-model-directory",
+          "charges": {
+            "prompt": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "completion": {
+              "unit": "per_M_tokens",
+              "price": "10"
+            },
+            "cache_read": {
+              "unit": "per_M_tokens",
+              "price": "0.125"
+            },
+            "web_search": {
+              "unit": "per_k_calls",
+              "price": "10"
+            },
+            "file_search_call": {
+              "unit": "per_k_calls",
+              "price": "2.5"
+            },
+            "cache_write": {
+              "unit": "per_M_tokens",
+              "price": "0"
+            },
+            "web_search_preview": {
+              "unit": "per_k_calls",
+              "price": "10"
+            },
+            "file_search": {
+              "unit": "per_k_calls",
+              "price": "2.5"
+            }
+          },
+          "provider_model_id": "gpt-5-2025-08-07",
+          "tracks": [
+            {
+              "label": "Batch",
+              "factor": "1",
+              "charge_factors": {
+                "prompt": "0.5",
+                "completion": "0.5",
+                "cache_read": "0.5",
+                "web_search": "1",
+                "file_search_call": "1"
+              },
+              "triggers": [
+                {
+                  "kind": "endpoint_matches",
+                  "pattern": "^batch\\."
+                }
+              ]
+            },
+            {
+              "label": "Priority",
+              "factor": "1",
+              "charge_factors": {
+                "web_search": "1",
+                "file_search_call": "1",
+                "prompt": "2",
+                "completion": "2",
+                "cache_read": "2"
+              },
+              "triggers": [
+                {
+                  "kind": "body_matches",
+                  "field": "service_tier",
+                  "pattern": "^priority$"
+                }
+              ]
+            },
+            {
+              "label": "Flex",
+              "factor": "1",
+              "charge_factors": {
+                "web_search": "1",
+                "file_search_call": "1",
+                "prompt": "0.5",
+                "completion": "0.5",
+                "cache_read": "0.5"
+              },
+              "triggers": [
+                {
+                  "kind": "body_matches",
+                  "field": "service_tier",
+                  "pattern": "^flex$"
+                }
+              ]
+            },
+            {
+              "label": "Base pricing",
+              "factor": "1",
+              "triggers": []
+            }
+          ]
+        },
+        {
+          "provider": "302ai",
+          "provider_name": "302.AI",
+          "official": false,
+          "source": "models-dev+llmdb",
+          "charges": {
+            "prompt": {
+              "unit": "per_M_tokens",
+              "price": "1.25"
+            },
+            "completion": {
+              "unit": "per_M_tokens",
+              "price": "10"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

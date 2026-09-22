@@ -13,6 +13,7 @@ mod log_archive;
 mod metrics;
 mod notification;
 mod openai;
+mod price_sync;
 mod pricing;
 mod provider_runtime;
 mod proxy;
@@ -311,6 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         started_at_ms,
     });
 
+    price_sync::spawn(state.clone());
     notification::spawn(state.clone(), notification_rx);
     codex_oauth_callback::spawn(state.clone());
 

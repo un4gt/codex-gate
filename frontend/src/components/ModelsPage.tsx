@@ -1,3 +1,4 @@
+import { ModelIdentity } from './console/ModelIdentity';
 import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation } from 'react-router';
 import { RefreshCw, Search } from 'lucide-react';
@@ -20,7 +21,7 @@ import Tabs from '@mui/material/Tabs';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
-import TableContainer from '@mui/material/TableContainer';
+import TableContainer from '@/components/console/ScrollableTable';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import Tooltip from '@mui/material/Tooltip';
@@ -92,7 +93,7 @@ const MODEL_COLUMNS = [
   { id: 'provider_count', label: '上游数量', defaultWidth: 104, minWidth: 88, maxWidth: 240 },
   { id: 'native_endpoint', label: '原生端点', defaultWidth: 160, minWidth: 128, maxWidth: 420 },
   { id: 'availability', label: '库存', defaultWidth: 96, minWidth: 88, maxWidth: 240 },
-  { id: 'enabled', label: '启用', defaultWidth: 96, minWidth: 88, maxWidth: 240 },
+  { id: 'enabled', label: '上游启用', defaultWidth: 128, minWidth: 112, maxWidth: 240 },
   { id: 'input_price', label: '输入', defaultWidth: 152, minWidth: 112, maxWidth: 360 },
   { id: 'output_price', label: '输出', defaultWidth: 152, minWidth: 112, maxWidth: 360 },
   { id: 'global', label: '全局', defaultWidth: 88, minWidth: 72, maxWidth: 180 },
@@ -122,7 +123,7 @@ function ModelInventory(props: InventoryProps) {
   useEffect(() => { if (props.preferences.data) applyPersistedWidths(props.preferences.data.model_column_widths); }, [props.preferences.data, applyPersistedWidths]);
   const filtered = useMemo(() => aggregateModels((props.inventory.data ?? []).filter(model => {
     const query = search.trim().toLowerCase();
-    if (query && ![model.upstream_model, model.alias ?? '', model.provider_name].some(value => value.toLowerCase().includes(query))) return false;
+    if (query && ![model.upstream_model, model.display?.display_name ?? '', ...(model.display?.aliases ?? []), model.alias ?? '', model.provider_name].some(value => value.toLowerCase().includes(query))) return false;
     if (providerId && String(model.provider_id) !== providerId) return false;
     if (protocol && !model.native_api_formats.includes(protocol as 'chat_completions' | 'responses')) return false;
     if (availability && model.available !== (availability === 'available')) return false;
@@ -144,6 +145,7 @@ function ModelInventory(props: InventoryProps) {
     finally { setBusy(false); }
   };
   const toggleGlobal = (model: string, enabled: boolean) => void run(() => updateGatewayModelPolicy(props.settings, { model_name: model, enabled }), props.policies.reload, enabled ? '已取消全局禁用。' : '已全局禁用该模型。');
+  const toggleProvider = (model: ProviderModelInventory, enabled: boolean) => void run(() => updateProviderModel(props.settings, model.id, { enabled }), props.inventory.reload, enabled ? '已在此上游启用模型。' : '已在此上游停用模型。');
   const setPrice = (model: ProviderModelInventory, item: ModelPrice | null) => update({ price_id: item ? String(item.id) : 'new', price_model: model.upstream_model, price_provider: String(model.provider_id) });
   return <Box sx={{ display: 'grid', gap: 2, minWidth: 0 }}>
     <FilterBar primary={<>
@@ -156,6 +158,7 @@ function ModelInventory(props: InventoryProps) {
     {error ? <Alert severity="error" onClose={() => setError(null)}>{error}</Alert> : null}
     {([['库存', props.inventory], ['全局', props.policies], ['价格', props.prices], ['列宽', props.preferences]] as const).map(([label, resource]) => resource.error ? <Alert key={label} severity="error" action={<Button onClick={() => void resource.reload()}>{t('重试')}</Button>}>{t(label)}: {resource.error}</Alert> : null)}
     <Typography variant="body2" color="text.secondary">{t('{{count}} 个模型 · 基础价格 / 百万 token', { count: filtered.length })}</Typography>
+    {providerId ? <Typography variant="body2" color="text.secondary">{t('启用开关仅影响 {{provider}}，全局状态可在模型详情中管理。', { provider: providerNames.get(providerId) ?? providerId })}</Typography> : null}
     {props.inventory.loading && props.inventory.data === null ? <CircularProgress size={24} aria-label={t('正在读取模型')} /> : null}
     {filtered.length ? <TableContainer data-testid="model-inventory-table-container" sx={{ maxHeight: '70dvh' }}>
       <Table stickyHeader size="small" aria-label={t('模型库存')} sx={{ tableLayout: 'fixed', width: MODEL_COLUMNS.reduce((sum, column) => sum + widths[column.id], 0) }}>
@@ -164,16 +167,19 @@ function ModelInventory(props: InventoryProps) {
           {t(column.label)}
           {props.preferences.data && !props.preferences.error ? <ColumnResizeHandle column={column} label={t('调整 {{column}} 列宽', { column: t(column.label) })} width={widths[column.id]} onResize={resizeColumn} onReset={resetColumn} /> : null}
         </TableCell>)}</TableRow></TableHead>
-        <TableBody>{paginate(filtered, page, pageSize).items.map(model => <TableRow key={model.name} hover>
-          <TableCell data-sticky-column="model" sx={{ position: 'sticky', left: 0, zIndex: 2, bgcolor: 'background.paper' }}><Button variant="text" onClick={() => update({ model: model.name })} title={model.name} sx={{ display: 'block', minWidth: 0, width: '100%', textAlign: 'left', textTransform: 'none', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', px: 0 }}>{model.name}</Button></TableCell>
+        <TableBody>{paginate(filtered, page, pageSize).items.map(model => {
+          const providerModel = providerId ? model.inventories.find(item => String(item.provider_id) === providerId) : null;
+          return <TableRow key={model.name} hover>
+          <TableCell data-sticky-column="model" sx={{ position: 'sticky', left: 0, zIndex: 2, bgcolor: 'background.paper' }}><ModelIdentity id={model.name} display={model.inventories[0]?.display} onOpen={() => update({ model: model.name })} /></TableCell>
           <TableCell>{model.inventories.length}</TableCell>
           <TableCell sx={{ overflow: 'hidden' }}><Typography variant="caption" component="div">{Array.from(new Set(model.inventories.flatMap(item => item.native_api_formats))).map(format => format === 'responses' ? 'Responses' : 'Chat Completions').join(' · ')}</Typography></TableCell>
           <TableCell>{model.inventories.filter(item => item.available).length} / {model.inventories.length}</TableCell>
-          <TableCell>{model.inventories.filter(item => item.enabled).length} / {model.inventories.length}</TableCell>
+          <TableCell>{providerModel ? <Checkbox checked={providerModel.enabled} disabled={busy} slotProps={{ input: { 'aria-label': t('切换 {{provider}} 的 {{model}} 启用状态', { provider: providerModel.provider_name, model: providerModel.upstream_model }) } }} onChange={(_, enabled) => toggleProvider(providerModel, enabled)} /> : <>{model.inventories.filter(item => item.enabled).length} / {model.inventories.length}</>}</TableCell>
           {(['input', 'output'] as const).map(kind => <TableCell key={kind}><RateSummary model={model} prices={pricesKnown ? priceItems : null} kind={kind} /></TableCell>)}
-          <TableCell><Tooltip title={t('作用于所有上游的同名真实模型。')}><Box component="span"><Checkbox checked={policiesKnown && !disabled.has(model.name)} indeterminate={!policiesKnown} disabled={busy || !policiesKnown} slotProps={{ input: { 'aria-label': t('切换 {{model}} 的全局状态', { model: model.name }) } }} onChange={(_, enabled) => toggleGlobal(model.name, enabled)} /></Box></Tooltip></TableCell>
+          <TableCell>{providerId ? <Typography variant="body2" color={policiesKnown && disabled.has(model.name) ? 'warning.main' : 'text.secondary'}>{policiesKnown ? t(disabled.has(model.name) ? '已禁用' : '已启用') : '—'}</Typography> : <Tooltip title={t('作用于所有上游的同名真实模型。')}><Box component="span"><Checkbox checked={policiesKnown && !disabled.has(model.name)} indeterminate={!policiesKnown} disabled={busy || !policiesKnown} slotProps={{ input: { 'aria-label': t('切换 {{model}} 的全局状态', { model: model.name }) } }} onChange={(_, enabled) => toggleGlobal(model.name, enabled)} /></Box></Tooltip>}</TableCell>
           <TableCell><Button onClick={() => update({ model: model.name })}>{t('详情')}</Button></TableCell>
-        </TableRow>)}</TableBody>
+        </TableRow>;
+        })}</TableBody>
       </Table>
     </TableContainer> : !props.inventory.loading && !props.inventory.error ? <EmptyState title={t('未找到模型')} description={t('尝试放宽筛选条件，或前往上游页同步模型。')} action={<Button component={Link} to="/upstreams" variant="outline">{t('前往上游')}</Button>} /> : null}
     <ListPagination count={filtered.length} />
@@ -181,7 +187,8 @@ function ModelInventory(props: InventoryProps) {
       {error ? <Alert severity="error" onClose={() => setError(null)}>{error}</Alert> : null}
       {props.policies.error ? <Alert severity="error" action={<Button onClick={() => void props.policies.reload()}>{t('重试')}</Button>}>{props.policies.error}</Alert> : null}
       {props.inventory.loading && !selected ? <CircularProgress size={24} /> : !selected ? <Alert severity="warning">{props.inventory.error ?? t('当前筛选下未找到该模型，可能已删除。')}</Alert> : <Box sx={{ display: 'grid', gap: 2 }}>
-        <Alert severity="info"><Typography variant="body2">{t('作用于所有上游的同名真实模型。')}</Typography><FormControlLabel control={<Checkbox checked={policiesKnown && !disabled.has(selected.name)} indeterminate={!policiesKnown} disabled={busy || !policiesKnown} onChange={(_, enabled) => toggleGlobal(selected.name, enabled)} />} label={t('全局启用')} /></Alert>
+        <ModelIdentity id={selected.name} display={selected.inventories[0]?.display} />
+        <Alert severity={policiesKnown && disabled.has(selected.name) ? 'warning' : 'info'}><Typography variant="body2">{t(policiesKnown && disabled.has(selected.name) ? '该模型已全局禁用，所有上游均无法使用。' : '作用于所有上游的同名真实模型。')}</Typography><FormControlLabel control={<Checkbox checked={policiesKnown && !disabled.has(selected.name)} indeterminate={!policiesKnown} disabled={busy || !policiesKnown} onChange={(_, enabled) => toggleGlobal(selected.name, enabled)} />} label={t('全局启用')} /></Alert>
         {selected.inventories.map(model => {
           const price = pricesKnown ? effectivePrice(priceItems, model.provider_id, model.upstream_model) : null;
           const specific = price?.provider_id === model.provider_id ? price : null;
@@ -190,7 +197,7 @@ function ModelInventory(props: InventoryProps) {
             <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}><Chip size="small" label={t(model.available ? '可用' : '已下线')} />{model.native_api_formats.map(format => <Chip size="small" variant="outlined" key={format} label={format === 'responses' ? 'Responses' : 'Chat Completions'} />)}</Box>
             <ModelNameForm key={`${model.id}:${model.alias ?? ''}`} model={model} busy={busy} onSave={alias => void run(() => updateProviderModel(props.settings, model.id, { alias }), props.inventory.reload, '已保存别名。')} />
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-              <FormControlLabel control={<Checkbox checked={model.enabled} disabled={busy} onChange={(_, enabled) => void run(() => updateProviderModel(props.settings, model.id, { enabled }), props.inventory.reload, enabled ? '模型已启用。' : '模型已停用。')} />} label={t('启用')} />
+              <FormControlLabel control={<Checkbox checked={model.enabled} disabled={busy} slotProps={{ input: { 'aria-label': t('切换 {{provider}} 的 {{model}} 启用状态', { provider: model.provider_name, model: model.upstream_model }) } }} onChange={(_, enabled) => toggleProvider(model, enabled)} />} label={t('在此上游启用')} />
               <FormControlLabel control={<Checkbox checked={model.responses_via_chat_enabled} disabled={busy || model.provider_type !== 'openai_compatible' || !model.available} slotProps={{ input: { 'aria-label': t('切换 {{model}} 的 Responses 转协议', { model: model.upstream_model }) } }} onChange={(_, enabled) => void run(() => updateProviderModel(props.settings, model.id, { responses_via_chat_enabled: enabled }), props.inventory.reload, enabled ? '已开启 Responses 转协议。' : '已关闭 Responses 转协议。')} />} label={model.provider_type === 'openai_compatible' ? 'Chat → Responses' : t(model.native_api_formats.includes('responses') ? '原生 Responses' : '不支持')} />
               <Button color="error" disabled={busy} onClick={() => setDeleteTarget(model)}>{t('删除模型')}</Button>
             </Box>
