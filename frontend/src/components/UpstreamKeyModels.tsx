@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { Alert, Box, Button, Checkbox, CircularProgress, FormControlLabel, TextField, Typography } from '@mui/material';
 import { addUpstreamKeyModels, deleteUpstreamKeyModel, loadUpstreamKeyModels, syncUpstreamKeyModels, updateUpstreamKeyModel } from '@/lib/api';
 import type { ConnectionSettings, UpstreamKeyModel } from '@/lib/types';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 
 export function UpstreamKeyModels(props: {
   settings: ConnectionSettings;
   keyId: number;
   onChanged: () => Promise<void>;
 }) {
+  const { t } = useI18n();
   const [models, setModels] = useState<UpstreamKeyModel[] | null>(null);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);

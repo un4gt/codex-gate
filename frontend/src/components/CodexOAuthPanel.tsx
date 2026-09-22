@@ -35,7 +35,7 @@ import {
   updateProviderKey,
 } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
-import { getIntlLocale, t } from '@/lib/i18n';
+import { getIntlLocale, t, useI18n } from '@/lib/i18n';
 import type {
   CodexOAuthSession,
   CodexOAuthFlow,
@@ -58,6 +58,7 @@ interface CodexOAuthLoginDialogProps {
 }
 
 export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
+  const { t } = useI18n();
   const [flow, setFlow] = useState<CodexOAuthFlow>('browser');
   const [session, setSession] = useState<CodexOAuthSession | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -406,6 +407,7 @@ interface LoginTarget {
 }
 
 export function CodexOAuthPanel(props: CodexOAuthPanelProps) {
+  const { t } = useI18n();
   const [busy, setBusy] = useState<string | null>(null);
   const [loginTarget, setLoginTarget] = useState<LoginTarget | null>(null);
   const [modelAccount, setModelAccount] = useState<UpstreamKeyMeta | null>(null);
@@ -583,6 +585,7 @@ function CodexAccountRow(props: {
   onModels: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useI18n();
   const account = props.item.codex_oauth;
   const status = account?.auth_status ?? 'reauth_required';
 
@@ -705,6 +708,7 @@ function AccountActions(props: {
   onModels: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useI18n();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const close = () => setAnchor(null);
   const run = (action: () => void) => () => {
@@ -776,6 +780,7 @@ function Meta(props: { label: string; value: string }) {
 }
 
 function CreditsMeta(props: { credits: CodexQuotaCredits }) {
+  const { t } = useI18n();
   const { credits } = props;
   const balance = credits.unlimited
     ? t('无限')
@@ -819,6 +824,7 @@ function QuotaGlance(props: { label: string; window: CodexQuotaWindow }) {
 }
 
 function QuotaWindowRow(props: { label: string; window: CodexQuotaWindow }) {
+  const { t } = useI18n();
   const remaining = Math.max(0, Math.min(100, props.window.remaining_percent));
   return (
     <Box className="grid gap-1.5">

@@ -37,7 +37,7 @@ import { PricesPage } from './PricesPage';
 import { PriceCardDetails, PriceEditorDrawer, formatUnitCost } from './PriceEditor';
 import { deleteProviderModel, loadConsolePreferences, loadGatewayModelPolicies, loadModelAliases, loadPrices, loadProviderModelInventory, updateConsolePreferences, updateGatewayModelPolicy, updateProviderModel } from '@/lib/api';
 import { aggregateModels, effectivePrice, summarizeRate, type ModelSummary } from '@/lib/modelCatalog';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import { paginate, useListQuery } from '@/lib/useListQuery';
 import { useRemoteResource } from '@/lib/useRemoteResource';
 import type { ConnectionSettings, ConsolePreferences, GatewayModelPolicy, ModelPrice, ProviderModelInventory, ProviderWorkspace } from '@/lib/types';
@@ -50,6 +50,7 @@ interface ModelsPageProps {
 }
 
 export function ModelsPage(props: ModelsPageProps) {
+  const { t } = useI18n();
   const { pathname } = useLocation();
   const { params } = useListQuery();
   const inventory = useRemoteResource(props.settings, loadProviderModelInventory, props.refreshKey);
@@ -101,6 +102,7 @@ const MODEL_COLUMNS = [
 ] as const;
 
 function ModelInventory(props: InventoryProps) {
+  const { t } = useI18n();
   const { params, filter, update, page, pageSize } = useListQuery();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,7 +165,7 @@ function ModelInventory(props: InventoryProps) {
     {filtered.length ? <TableContainer data-testid="model-inventory-table-container" sx={{ maxHeight: '70dvh' }}>
       <Table stickyHeader size="small" aria-label={t('模型库存')} sx={{ tableLayout: 'fixed', width: MODEL_COLUMNS.reduce((sum, column) => sum + widths[column.id], 0) }}>
         <colgroup>{MODEL_COLUMNS.map(column => <col key={column.id} data-column-id={column.id} style={{ width: widths[column.id] }} />)}</colgroup>
-        <TableHead><TableRow>{MODEL_COLUMNS.map(column => <TableCell key={column.id} data-column-id={column.id} data-sticky-column={column.id === 'model' ? 'model' : undefined} data-sticky-offset={column.id === 'model' ? 0 : undefined} sx={{ whiteSpace: 'nowrap', position: 'sticky', left: column.id === 'model' ? 0 : undefined, zIndex: column.id === 'model' ? 4 : 3, bgcolor: 'background.paper', pr: 3 }}>
+        <TableHead><TableRow>{MODEL_COLUMNS.map(column => <TableCell key={column.id} data-column-id={column.id} data-sticky-column={column.id === 'model' ? 'model' : undefined} data-sticky-offset={column.id === 'model' ? 0 : undefined} sx={{ whiteSpace: 'nowrap', position: 'sticky', left: column.id === 'model' ? 0 : undefined, zIndex: column.id === 'model' ? 4 : 3, bgcolor: 'background.default', pr: 3 }}>
           {t(column.label)}
           {props.preferences.data && !props.preferences.error ? <ColumnResizeHandle column={column} label={t('调整 {{column}} 列宽', { column: t(column.label) })} width={widths[column.id]} onResize={resizeColumn} onReset={resetColumn} /> : null}
         </TableCell>)}</TableRow></TableHead>
@@ -177,7 +179,7 @@ function ModelInventory(props: InventoryProps) {
           <TableCell>{providerModel ? <Checkbox checked={providerModel.enabled} disabled={busy} slotProps={{ input: { 'aria-label': t('切换 {{provider}} 的 {{model}} 启用状态', { provider: providerModel.provider_name, model: providerModel.upstream_model }) } }} onChange={(_, enabled) => toggleProvider(providerModel, enabled)} /> : <>{model.inventories.filter(item => item.enabled).length} / {model.inventories.length}</>}</TableCell>
           {(['input', 'output'] as const).map(kind => <TableCell key={kind}><RateSummary model={model} prices={pricesKnown ? priceItems : null} kind={kind} /></TableCell>)}
           <TableCell>{providerId ? <Typography variant="body2" color={policiesKnown && disabled.has(model.name) ? 'warning.main' : 'text.secondary'}>{policiesKnown ? t(disabled.has(model.name) ? '已禁用' : '已启用') : '—'}</Typography> : <Tooltip title={t('作用于所有上游的同名真实模型。')}><Box component="span"><Checkbox checked={policiesKnown && !disabled.has(model.name)} indeterminate={!policiesKnown} disabled={busy || !policiesKnown} slotProps={{ input: { 'aria-label': t('切换 {{model}} 的全局状态', { model: model.name }) } }} onChange={(_, enabled) => toggleGlobal(model.name, enabled)} /></Box></Tooltip>}</TableCell>
-          <TableCell><Button onClick={() => update({ model: model.name })}>{t('详情')}</Button></TableCell>
+          <TableCell><Button variant="ghost" onClick={() => update({ model: model.name })}>{t('详情')}</Button></TableCell>
         </TableRow>;
         })}</TableBody>
       </Table>
@@ -193,7 +195,7 @@ function ModelInventory(props: InventoryProps) {
           const price = pricesKnown ? effectivePrice(priceItems, model.provider_id, model.upstream_model) : null;
           const specific = price?.provider_id === model.provider_id ? price : null;
           return <Card key={model.id} variant="outlined"><CardContent sx={{ display: 'grid', gap: 2 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}><Typography component="h3" variant="subtitle1">{model.provider_name}</Typography><Button component={Link} to={`/upstreams?provider_id=${model.provider_id}`}>{t('上游详情')}</Button></Box>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}><Typography component="h3" variant="subtitle1">{model.provider_name}</Typography><Button variant="ghost" component={Link} to={`/upstreams?provider_id=${model.provider_id}`}>{t('上游详情')}</Button></Box>
             <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}><Chip size="small" label={t(model.available ? '可用' : '已下线')} />{model.native_api_formats.map(format => <Chip size="small" variant="outlined" key={format} label={format === 'responses' ? 'Responses' : 'Chat Completions'} />)}</Box>
             <ModelNameForm key={`${model.id}:${model.alias ?? ''}`} model={model} busy={busy} onSave={alias => void run(() => updateProviderModel(props.settings, model.id, { alias }), props.inventory.reload, '已保存别名。')} />
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
@@ -206,7 +208,7 @@ function ModelInventory(props: InventoryProps) {
               {price ? <PriceCardDetails card={price.price_data} /> : null}
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                 <Button variant="outline" onClick={() => setPrice(model, specific)}>{t(specific ? '编辑专属价格' : '设置专属价格')}</Button>
-                {price?.provider_id === null ? <Button onClick={() => update({ price_id: String(price.id) })}>{t('编辑全局价格')}</Button> : null}
+                {price?.provider_id === null ? <Button variant="outline" onClick={() => update({ price_id: String(price.id) })}>{t('编辑全局价格')}</Button> : null}
               </Box>
             </>}
           </CardContent></Card>;
@@ -221,6 +223,7 @@ function ModelInventory(props: InventoryProps) {
 }
 
 function ModelNameForm({ model, busy, onSave }: { model: ProviderModelInventory; busy: boolean; onSave: (name: string) => void }) {
+  const { t } = useI18n();
   const fieldId = useId();
   const save = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); onSave(String(new FormData(event.currentTarget).get('alias') ?? '').trim()); };
   return <Box component="form" onSubmit={save} sx={{ display: 'flex', alignItems: 'flex-end', gap: 1 }}>
@@ -230,6 +233,7 @@ function ModelNameForm({ model, busy, onSave }: { model: ProviderModelInventory;
 }
 
 function RateSummary({ model, prices, kind }: { model: ModelSummary; prices: ModelPrice[] | null; kind: 'input' | 'output' }) {
+  const { t } = useI18n();
   if (!prices) return <Typography variant="caption" color="text.secondary">—</Typography>;
   const rate = summarizeRate(model.inventories, prices, kind);
   const tiered = model.inventories.some(item => (effectivePrice(prices, item.provider_id, item.upstream_model)?.price_data.tiers.length ?? 0) > 0);

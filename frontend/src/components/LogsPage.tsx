@@ -8,7 +8,7 @@ import {
   ColumnResizeHandle,
   useResizableColumns,
 } from '@/components/console/ResizableTable';
-import { t } from '@/lib/i18n';
+import { t, useI18n } from '@/lib/i18n';
 import { loadConsolePreferences, loadRequestLogs, updateConsolePreferences } from '../lib/api';
 import {
   formatCompactInteger,
@@ -191,6 +191,7 @@ function transportTone(row: RequestLogRow): 'normal' | 'warning' | 'error' | 'di
   return 'disabled';
 }
 export function LogsPage(props: LogsPageProps) {
+  const { t } = useI18n();
   const [filters, setFilters] = useState<LogFilters>(EMPTY_FILTERS);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [rows, setRows] = useState<RequestLogRow[]>([]);
@@ -456,7 +457,7 @@ export function LogsPage(props: LogsPageProps) {
           </Box>} />
 
       <Box className="grid gap-4">
-        <Card className="border border-border bg-background shadow-none">
+        <Card className="console-panel">
           <Box className="flex flex-col gap-2 p-4 pb-4">
             <Box className="flex items-center justify-between gap-2.5">
               <Box>
@@ -679,7 +680,7 @@ export function LogsPage(props: LogsPageProps) {
                   <MetricCard label="成本" value={pricingValue} badge={pricing.status === 'unpriced' ? <StatusBadge tone="warning">{t('未定价')}</StatusBadge> : undefined} />
                 </Box>
 
-                <Card className="border border-border bg-background shadow-none">
+                <Card className="console-panel">
                   <Box className="flex flex-col gap-2 p-4 pb-3">
                     <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("请求信息")}</Typography>
                   </Box>
@@ -848,7 +849,7 @@ export function LogsPage(props: LogsPageProps) {
                     </CardContent>
                   </Box> : null}
 
-                <Card className="border border-border bg-background shadow-none">
+                <Card className="console-panel">
                   <Box className="flex flex-col gap-2 p-4 pb-3">
                     <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("用量信息")}</Typography>
                   </Box>
@@ -882,6 +883,7 @@ function LogColumnValue(props: {
   endpointNameMap: Map<number, string>;
   apiKeyNameMap: Map<number, string>;
 }) {
+  const { t } = useI18n();
   const { id, row } = props;
   const status = rowStatus(row);
   const mono = 'font-mono text-xs';
@@ -927,6 +929,7 @@ function LogColumnValue(props: {
   }
 }
 function UsageBreakdown(props: { row: RequestLogRow }) {
+  const { t } = useI18n();
   const items = [
     { label: t('输入'), value: props.row.input_tokens },
     { label: t('输出'), value: props.row.output_tokens },
@@ -952,6 +955,7 @@ function BadgeSummary(props: {
   label: string;
   value: number;
 }) {
+  const { t } = useI18n();
   return <Box className="rounded border border-border bg-transparent px-2.5 py-0.5 font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground">
       {t(props.label)} {formatCompactInteger(props.value)}
     </Box>;
@@ -961,6 +965,7 @@ function MetricCard(props: {
   value: string;
   badge?: any;
 }) {
+  const { t } = useI18n();
   return <Box className="flex flex-col gap-1 pr-4 border-r border-border/40 last:border-r-0">
       <Box className="flex items-center justify-between">
         <Box className="text-[0.6875rem] uppercase tracking-widest font-mono text-muted-foreground" component="span">{t(props.label)}</Box>
@@ -973,6 +978,7 @@ function DetailItem(props: {
   value: string;
   onCopy?: () => void;
 }) {
+  const { t } = useI18n();
   return <Box className="flex flex-col gap-1.5 border-b border-r border-border/40 p-3 relative group hover:bg-muted/10 transition-colors">
       <Box className="flex items-center justify-between gap-2">
         <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground opacity-70" component="span">{t(props.label)}</Box>

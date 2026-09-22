@@ -1,10 +1,11 @@
 import { useLayoutEffect, useRef } from 'react';
 import Box from '@mui/material/Box';
 import TableContainer, { type TableContainerProps } from '@mui/material/TableContainer';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 
 /** A table-local scrollbar clipped to the visible viewport and scroll ancestors. */
 export default function ScrollableTable({ children, sx, ...props }: TableContainerProps) {
+  const { t } = useI18n();
   const rootRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);

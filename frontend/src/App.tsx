@@ -4,7 +4,7 @@ import { KeyboardSensor, PointerActivationConstraints, PointerSensor } from '@dn
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router';
-import { Activity, Bell, Boxes, Copy, Fingerprint, GripVertical, KeyRound, ListFilter, LogOut, RefreshCw, Server, Settings, SquareTerminal, type LucideIcon } from "lucide-react";
+import { Activity, ArrowRight, Bell, Boxes, Check, Copy, Cpu, Database, Eye, EyeOff, Fingerprint, GripVertical, KeyRound, ListFilter, LogOut, Menu, RefreshCw, Server, Settings, ShieldCheck, SquareTerminal, Timer, Wallet, X, Zap, type LucideIcon } from "lucide-react";
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
@@ -17,6 +17,7 @@ import { OAuthPage } from '@/components/OAuthPage';
 import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
+import { useRemoteResource } from '@/lib/useRemoteResource';
 import { ApiRequestError, subscribeAuthenticationFailures, loadApiKeyWorkspace, loadProviderGroups, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
 import { formatBytes, formatCommitShort, formatCompactInteger, formatMs, formatVersionLabel } from '@/lib/format';
 import { calculateOverviewPricing, formatUsd } from '@/lib/pricing';
@@ -29,6 +30,10 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import CircularProgress from '@mui/material/CircularProgress';
 import InputBase from "@mui/material/InputBase";
+import Drawer from "@mui/material/Drawer";
+import IconButton from "@mui/material/IconButton";
+import LinearProgress from "@mui/material/LinearProgress";
+import Snackbar from "@mui/material/Snackbar";
 import Typography from "@mui/material/Typography";
 import useMediaQuery from '@mui/material/useMediaQuery';
 type LoadState = 'idle' | 'loading' | 'ready';
@@ -283,20 +288,18 @@ function moveNavKey(order: NavKey[], from: NavKey, toIndex: number): NavKey[] {
 }
 function NavigationItemContent(props: {
   item: NavigationItemView;
-  index: number;
   active: boolean;
   overlay?: boolean;
 }) {
+  const { t } = useI18n();
   const Icon = props.item.icon;
   return <>
-      {props.active ? <Box className="absolute inset-y-2 left-0 w-0.5 bg-primary" aria-hidden="true" component="span" /> : null}
-      <Box className={`relative z-10 flex size-8 shrink-0 items-center justify-center ${props.active || props.overlay ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground'}`} aria-hidden="true" component="span">
-        <Icon className="size-4" />
+      <Box className={`flex size-8 shrink-0 items-center justify-center ${props.active || props.overlay ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground'}`} aria-hidden="true" component="span">
+        <Icon size={18} strokeWidth={1.8} />
       </Box>
-      <Box className="relative z-10 min-w-0 flex-1 truncate" component="span">{t(props.item.label)}</Box>
-      <Box className="relative z-10 font-mono text-[0.6rem] text-muted-foreground opacity-45" aria-hidden="true" component="span">{String(props.index + 1).padStart(2, '0')}</Box>
-      <Box className={`relative z-10 flex size-8 shrink-0 items-center justify-center transition-[color,opacity] duration-150 motion-reduce:transition-none ${props.overlay ? 'text-primary opacity-100' : 'text-muted-foreground opacity-45 group-hover:opacity-90'}`} aria-hidden="true" component="span">
-        <GripVertical className="size-4" />
+      <Box className="min-w-0 flex-1 truncate" component="span">{t(props.item.label)}</Box>
+      <Box className={props.overlay ? 'text-primary' : 'nav-grip text-muted-foreground'} aria-hidden="true" component="span">
+        <GripVertical size={14} />
       </Box>
     </>;
 }
@@ -305,6 +308,7 @@ function SortableNavigationItem(props: {
   index: number;
   active: boolean;
   reducedMotion: boolean;
+  onNavigate?: () => void;
 }) {
   const { ref, isDragSource, isDropTarget, isDropping } = useSortable({
     id: props.item.key,
@@ -314,15 +318,15 @@ function SortableNavigationItem(props: {
     accept: NAVIGATION_SORTABLE_TYPE,
     transition: props.reducedMotion ? null : NAVIGATION_SORT_TRANSITION
   });
-  const stateClass = isDragSource ? 'border-primary/45 bg-primary/10 text-primary opacity-[0.32]' : isDropTarget ? 'border-primary/45 bg-primary/10 text-primary' : props.active ? 'border-primary/20 bg-primary/[0.06] font-semibold text-primary' : 'border-transparent border-b-border/40 text-muted-foreground hover:border-border/70 hover:bg-muted/35 hover:text-foreground';
-  return <Box ref={ref} component={Link} to={props.item.to} aria-current={props.active ? 'page' : undefined} aria-describedby={NAVIGATION_SORT_INSTRUCTIONS_ID} aria-keyshortcuts="Space ArrowUp ArrowDown" className={`nav-sortable-item group relative flex min-h-[2.5rem] w-full cursor-grab select-none items-center gap-2 rounded border px-2 py-1.5 text-[0.8125rem] font-medium outline-none transition-[background-color,border-color,color,box-shadow,opacity] duration-150 ease-out active:cursor-grabbing motion-reduce:transition-none ${stateClass} ${isDropping ? 'pointer-events-none' : ''}`} data-nav-key={props.item.key} data-nav-sortable="true" data-nav-dragging={isDragSource ? 'true' : undefined} data-nav-drop-target={isDropTarget ? 'true' : undefined} sx={{
+  const stateClass = isDragSource ? 'border-primary/45 bg-primary/10 text-primary opacity-[0.32]' : isDropTarget ? 'border-primary/45 bg-primary/10 text-primary' : props.active ? 'border-primary/10 bg-primary/[0.08] font-semibold text-primary' : 'border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground';
+  return <Box ref={ref} component={Link} to={props.item.to} onClick={props.onNavigate} aria-current={props.active ? 'page' : undefined} aria-describedby={NAVIGATION_SORT_INSTRUCTIONS_ID} aria-keyshortcuts="Space ArrowUp ArrowDown" className={`nav-sortable-item group relative flex min-h-11 w-full cursor-grab select-none items-center gap-2 rounded-lg border px-2 py-1.5 text-[0.8125rem] font-medium outline-none transition-[background-color,border-color,color,box-shadow,opacity] duration-150 ease-out active:cursor-grabbing motion-reduce:transition-none ${stateClass} ${isDropping ? 'pointer-events-none' : ''}`} data-nav-key={props.item.key} data-nav-sortable="true" data-nav-dragging={isDragSource ? 'true' : undefined} data-nav-drop-target={isDropTarget ? 'true' : undefined} sx={{
     WebkitTapHighlightColor: 'transparent',
     '&:focus-visible': {
       outline: '2px solid var(--primary)',
       outlineOffset: '-2px'
     }
   }}>
-      <NavigationItemContent item={props.item} index={props.index} active={props.active} />
+      <NavigationItemContent item={props.item} active={props.active} />
     </Box>;
 }
 function NavigationDragPreview(props: {
@@ -334,16 +338,22 @@ function NavigationDragPreview(props: {
     boxShadow: '0 12px 28px -20px rgb(0 0 0 / 0.38), 0 6px 14px -12px rgb(0 0 0 / 0.24)',
     transform: 'scale(1.015)'
   }}>
-      <NavigationItemContent item={props.item} index={props.index} active={props.active} overlay />
+      <NavigationItemContent item={props.item} active={props.active} overlay />
     </Box>;
 }
 async function copyText(value: string, success: string, onMessage: (message: string) => void) {
-  if (!navigator?.clipboard) {
-    onMessage(t('当前环境不支持剪贴板。'));
-    return;
+  try {
+    if (!navigator.clipboard) {
+      onMessage(t('当前环境不支持剪贴板。'));
+      return false;
+    }
+    await navigator.clipboard.writeText(value);
+    onMessage(t(success));
+    return true;
+  } catch {
+    onMessage(t('复制失败，请重试。'));
+    return false;
   }
-  await navigator.clipboard.writeText(value);
-  onMessage(t(success));
 }
 function pageDescription(pathname: string) {
   if (pathname.startsWith('/overview')) return '查看请求、用量与响应表现。';
@@ -379,8 +389,12 @@ function TopShell(props: {
   data: AppDataContext;
   children: ReactNode;
 }) {
+  const { t } = useI18n();
   const location = useLocation();
-  const [navOrder, setNavOrder] = useState<NavKey[]>(readNavOrder());
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const compact = useMediaQuery('(max-width: 1023.95px)', { noSsr: true });
+  const closeNavigation = () => setNavigationOpen(false);
+  const [navOrder, setNavOrder] = useState<NavKey[]>(readNavOrder);
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)', {
     noSsr: true
   });
@@ -413,82 +427,90 @@ function TopShell(props: {
       return next;
     });
   }, []);
-  return <Box className="min-h-screen bg-background">
-      <Box className="app-shell">
-        <Box className="app-sidebar" component="aside">
-          <Box className="flex items-center gap-3 px-2 pb-10">
-            <Box className="flex size-8 items-center justify-center bg-foreground text-background">
-              <SquareTerminal className="size-4" />
-            </Box>
-            <Box className="min-w-0">
-              <Box className="text-[0.95rem] font-bold tracking-[0.08em] text-foreground uppercase" component="p">LITTLE GATE</Box>
-            </Box>
-          </Box>
-          <DragDropProvider sensors={NAVIGATION_DRAG_SENSORS} modifiers={NAVIGATION_DRAG_MODIFIERS} onDragEnd={reorderNav}>
-            <Box className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1" aria-label="Primary" component="nav">
-              <Box id={NAVIGATION_SORT_INSTRUCTIONS_ID} className="sr-only">
-                {t('拖动任意导航项可调整顺序。键盘操作：按空格开始，使用上下方向键移动，再按空格完成。')}
-              </Box>
-              {navItems.slice(0, 6).map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} />)}
-              <Box component="details" open={location.pathname.startsWith('/notifications') || location.pathname.startsWith('/settings')} sx={{ mt: 2 }}>
-                <Box component="summary" sx={{ px: 2, py: 1.5, cursor: 'pointer', color: 'text.secondary', fontSize: '0.8125rem' }}>{t('更多')}</Box>
-                {navItems.slice(6).map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index + 6} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} />)}
-              </Box>
-            </Box>
-            <DragOverlay className="pointer-events-none z-[120]" dropAnimation={reducedMotion ? null : NAVIGATION_DROP_ANIMATION}>
-              {source => {
-              const key = String(source.id);
-              if (!isNavKey(key)) return null;
-              const item = navItems.find(candidate => candidate.key === key);
-              if (!item) return null;
-              return <NavigationDragPreview item={item} index={navOrder.indexOf(key)} active={location.pathname.startsWith(item.to)} />;
-            }}
-            </DragOverlay>
-          </DragDropProvider>
-          <Box className="mt-auto flex flex-col gap-3 border-t border-border/40 px-3 pt-7">
-            <Box className="flex items-center justify-between">
-              <Box className="text-[0.72rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('SYSTEM STATUS')}</Box>
-              <Box
-                className={`size-2 rounded-full ${props.data.status === 'loading' ? 'bg-warning' : props.data.linkOk ? 'bg-success' : 'bg-danger'}`}
-                component="span"
-              />
-            </Box>
-            <Box className="truncate text-xs leading-5 text-muted-foreground" component="p">{props.data.message}</Box>
-            <Box className="flex items-center justify-between gap-3 border border-border/50 px-3 py-2">
-              <Box className="text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('版本')}</Box>
-              <Box className="truncate font-mono text-xs text-foreground" title={serviceCommitTitle} component="span">
-                {serviceVersion}
-                {serviceCommit !== '—' ? <Box className="ml-2 text-muted-foreground" component="span">{serviceCommit}</Box> : null}
-              </Box>
-            </Box>
-            <Button type="button" variant="ghost" className="mt-2 justify-start border border-border/60 px-3 text-muted-foreground hover:text-foreground" onClick={props.data.onLogout}>
-              <LogOut className="size-4" />
-              {t('退出')}
-            </Button>
-          </Box>
-        </Box>
-
-        <Box className="app-main" component="main">
-          <Box className="app-content">
-            <Box className="app-pagebar">
-              <Box className="min-w-0">
-                <Box className="app-title" component="h1">{t(currentItem.label)}</Box>
-                <Box className="app-description" component="p">{t(pageDescription(location.pathname))}</Box>
-              </Box>
-              <Box className="app-toolbar">
-                <LocaleSwitch />
-                <ConnectionIndicator status={props.data.status} linkOk={props.data.linkOk} />
-                <Button type="button" variant="ghost" size="sm" className="border-border text-foreground hover:bg-muted" onClick={() => void props.data.onRefresh()} disabled={props.data.status === 'loading'}>
-                  <RefreshCw className={`mr-2 size-3 ${props.data.status === 'loading' ? 'animate-spin' : ''}`} />
-                  {t('SYNC')}
-                </Button>
-              </Box>
-            </Box>
-            {props.children}
-          </Box>
+  const sidebar = <Box className="app-sidebar" component="aside">
+    <Box className="mb-8 flex items-center justify-between gap-2 px-2">
+      <Box component={Link} to="/overview" onClick={closeNavigation} className="flex min-w-0 items-center gap-3">
+        <Box className="brand-mark"><SquareTerminal size={21} /></Box>
+        <Box className="min-w-0">
+          <Box className="text-[0.9375rem] font-bold tracking-wide text-foreground" component="p">LITTLE GATE</Box>
+          <Box className="mt-0.5 text-xs text-muted-foreground" component="p">{t('网关控制台')}</Box>
         </Box>
       </Box>
-    </Box>;
+      {compact ? <IconButton aria-label={t('关闭导航')} onClick={closeNavigation}><X size={18} /></IconButton> : null}
+    </Box>
+    <DragDropProvider sensors={NAVIGATION_DRAG_SENSORS} modifiers={NAVIGATION_DRAG_MODIFIERS} onDragEnd={reorderNav}>
+      <Box className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto" aria-label="Primary" component="nav">
+        <Box id={NAVIGATION_SORT_INSTRUCTIONS_ID} className="sr-only">
+          {t('拖动任意导航项可调整顺序。键盘操作：按空格开始，使用上下方向键移动，再按空格完成。')}
+        </Box>
+        <Box className="nav-section-label">{t('工作空间')}</Box>
+        {navItems.slice(0, 6).map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} onNavigate={closeNavigation} />)}
+        <Box className="nav-section-label mt-6">{t('管理')}</Box>
+        {navItems.slice(6).map((item, index) => <SortableNavigationItem key={item.key} item={item} index={index + 6} active={location.pathname.startsWith(item.to)} reducedMotion={reducedMotion} onNavigate={closeNavigation} />)}
+      </Box>
+      <DragOverlay className="pointer-events-none z-[1500]" dropAnimation={reducedMotion ? null : NAVIGATION_DROP_ANIMATION}>
+        {source => {
+          const key = String(source.id);
+          if (!isNavKey(key)) return null;
+          const item = navItems.find(candidate => candidate.key === key);
+          return item ? <NavigationDragPreview item={item} index={navOrder.indexOf(key)} active={location.pathname.startsWith(item.to)} /> : null;
+        }}
+      </DragOverlay>
+    </DragDropProvider>
+    <Box className="mt-5 flex flex-col gap-3 border-t border-border pt-4">
+      <Box className="rounded-lg border border-border bg-background p-3">
+        <Box className="flex items-center justify-between gap-2">
+          <Box className="text-xs font-medium text-muted-foreground" component="span">{t('SYSTEM STATUS')}</Box>
+          <ConnectionIndicator status={props.data.status} linkOk={props.data.linkOk} />
+        </Box>
+        <Box className="mt-2 truncate font-mono text-[0.6875rem] text-muted-foreground" component="p" title={props.data.settings.apiBase}>{props.data.settings.apiBase}</Box>
+        <Box className="mt-1 max-h-20 overflow-y-auto break-words text-xs leading-5 text-muted-foreground" component="p">{props.data.message}</Box>
+      </Box>
+      <Box className="flex items-center justify-between gap-2 px-1">
+        <Box className="min-w-0 truncate font-mono text-[0.6875rem] text-muted-foreground" title={serviceCommitTitle} component="span">
+          {serviceVersion}{serviceCommit !== '—' ? ` · ${serviceCommit}` : ''}
+        </Box>
+        <Button type="button" variant="ghost" size="sm" className="text-muted-foreground" onClick={props.data.onLogout}>
+          <LogOut size={14} />{t('退出')}
+        </Button>
+      </Box>
+    </Box>
+  </Box>;
+  return <Box className="min-h-dvh bg-background">
+    <Box component="a" href="#main-content" className="skip-link">{t('跳转到内容')}</Box>
+    <Box className="app-shell">
+      {compact ? <>
+        <Box component="header" className="sticky top-0 z-30 flex h-16 w-full items-center justify-between gap-3 border-b border-border bg-card px-4">
+          <Box className="flex items-center gap-2">
+            <IconButton aria-label={t('打开导航')} aria-expanded={navigationOpen} aria-controls={navigationOpen ? 'mobile-navigation' : undefined} onClick={() => setNavigationOpen(true)}><Menu size={21} /></IconButton>
+            <Box className="text-sm font-bold tracking-wide" component="span">LITTLE GATE</Box>
+          </Box>
+          <ConnectionIndicator status={props.data.status} linkOk={props.data.linkOk} />
+        </Box>
+        <Drawer open={navigationOpen} onClose={closeNavigation} slotProps={{ paper: { id: 'mobile-navigation', role: 'dialog', 'aria-modal': true, 'aria-label': t('主导航'), sx: { width: 280, maxWidth: 'calc(100vw - 32px)', '& .app-sidebar': { width: '100%', borderRight: 0 } } } }}>
+          {sidebar}
+        </Drawer>
+      </> : sidebar}
+      <Box className="app-main" component="main" id="main-content" tabIndex={-1}>
+        <Box className="app-content">
+          <Box className="app-pagebar" component="header">
+            <Box className="min-w-0">
+              <Box className="app-title" component="h1">{t(currentItem.label)}</Box>
+              <Box className="app-description" component="p">{t(pageDescription(location.pathname))}</Box>
+            </Box>
+            <Box className="app-toolbar">
+              <LocaleSwitch />
+              <Button type="button" variant="outline" onClick={() => void props.data.onRefresh()} disabled={props.data.status === 'loading'}>
+                <RefreshCw className={props.data.status === 'loading' ? 'animate-spin motion-reduce:animate-none' : ''} size={15} />
+                {t(props.data.status === 'loading' ? '同步中' : 'SYNC')}
+              </Button>
+            </Box>
+          </Box>
+          {props.children}
+        </Box>
+      </Box>
+    </Box>
+  </Box>;
 }
 /** 连接指示器必须反映真实状态：绿=后台可达，琥珀=请求进行中，红=最近一次请求失败。 */
 function ConnectionIndicator(props: {
@@ -508,134 +530,89 @@ function ConnectionGate(props: {
   onAdminTokenChange: (value: string) => void;
   onRefresh: (successMessage?: string) => Promise<void>;
 }) {
+  const { t } = useI18n();
   const apiBaseInputRef = useRef<HTMLInputElement>(null);
   const adminTokenInputRef = useRef<HTMLInputElement>(null);
+  const [showToken, setShowToken] = useState(false);
+  const connecting = props.status === 'loading';
   useEffect(() => {
     if (props.issue === 'apiBase') apiBaseInputRef.current?.focus();
     if (props.issue === 'adminToken') adminTokenInputRef.current?.focus();
   }, [props.issue]);
-  return <Box className="min-h-screen bg-background px-4 py-8 sm:px-6 lg:px-8">
-      <Box className="mx-auto flex max-w-md flex-col gap-6 mt-8">
-        <Box className="flex justify-end">
-          <LocaleSwitch />
+  return <Box className="connection-page">
+    <Box component="header" className="flex items-center justify-between gap-4">
+      <Box className="flex items-center gap-2 text-sm font-medium text-muted-foreground"><SquareTerminal size={18} /><Box component="span">little-gate</Box></Box>
+      <LocaleSwitch />
+    </Box>
+    <Box className="flex flex-1 flex-col items-center justify-center gap-6 py-10 sm:py-16">
+      <Box className="flex flex-col items-center gap-4 text-center">
+        <Box className="brand-mark size-12"><SquareTerminal size={25} /></Box>
+        <Box>
+          <Box className="text-2xl font-bold tracking-wide text-foreground" component="h1">LITTLE GATE</Box>
+          <Box className="mt-2 text-sm text-muted-foreground" component="p">{t('模型、流量与连接，尽在掌握。')}</Box>
         </Box>
-        <Box className="flex flex-col gap-3 text-center items-center">
-          <Box className="flex size-10 items-center justify-center rounded bg-foreground text-background">
-            <SquareTerminal className="size-5" />
-          </Box>
-          <Box>
-            <Box className="text-2xl font-semibold tracking-tight text-foreground mt-3" component="h1">LITTLE GATE</Box>
-            <Box className="mt-1.5 text-[0.6875rem] font-medium text-muted-foreground tracking-[0.08em] uppercase" component="p">{t('ADMIN CONSOLE INITIALIZATION')}</Box>
-          </Box>
-        </Box>
-
-        <Card className="rounded border border-border bg-background shadow-none">
-          <Box className="flex flex-col gap-2 p-4 pb-3">
-            <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("登录控制台")}</Typography>
-            <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t("输入管理员口令以验证身份。")}</Typography>
-          </Box>
-          <CardContent>
-            <Box className="flex flex-col gap-4" aria-busy={props.status === 'loading'} onSubmit={event => {
-            event.preventDefault();
-            void props.onRefresh();
-          }} component="form">
-              <Box className="grid gap-4">
-                <Box className="flex flex-col gap-2" component="label">
-                  <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('服务地址')}</Box>
-                  <InputBase
-                    value={props.settings.apiBase}
-                    error={props.issue === 'apiBase'}
-                    inputRef={apiBaseInputRef}
-                    inputProps={{
-                      'aria-describedby': 'connection-status-message',
-                      'aria-invalid': props.issue === 'apiBase'
-                    }}
-                    autoComplete="url"
-                    autoCapitalize="none"
-                    spellCheck={false}
-                    onChange={event => props.onApiBaseChange(event.target.value)}
-                    placeholder={t("http://127.0.0.1:8080")}
-                    className="font-mono text-[0.8125rem]"
-                  />
-                </Box>
-                <Box className="flex flex-col gap-2" component="label">
-                  <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground" component="span">{t('管理员口令')}</Box>
-                  <InputBase
-                    type="password"
-                    value={props.settings.adminToken}
-                    error={props.issue === 'adminToken'}
-                    inputRef={adminTokenInputRef}
-                    inputProps={{
-                      'aria-describedby': 'connection-status-message',
-                      'aria-invalid': props.issue === 'adminToken'
-                    }}
-                    autoComplete="current-password"
-                    autoCapitalize="none"
-                    spellCheck={false}
-                    onChange={event => props.onAdminTokenChange(event.target.value)}
-                    placeholder={t("输入管理员口令")}
-                    className="font-mono text-[0.8125rem]"
-                  />
-                </Box>
-              </Box>
-
-              <Alert
-                severity={props.issue ? 'error' : 'info'}
-                role={props.issue ? 'alert' : 'status'}
-                className="border-border/40 bg-muted/20"
-                sx={props.issue ? {
-                  backgroundColor: 'color-mix(in oklab, var(--destructive) 5%, transparent)',
-                  borderColor: 'color-mix(in oklab, var(--destructive) 45%, var(--border))',
-                  '& .MuiAlertTitle-root': {
-                    color: 'var(--destructive)'
-                  }
-                } : undefined}
-              >
-                <AlertTitle className="text-sm font-semibold">{t(props.issue ? '登录失败' : '登录状态')}</AlertTitle>
-                <Typography id="connection-status-message" className="mt-2 text-sm leading-5 text-muted-foreground opacity-80" component="div">{props.message}</Typography>
-              </Alert>
-
-              <Box className="flex flex-wrap gap-2 pt-2">
-                <Button type="submit" disabled={props.status === 'loading'} className="w-full sm:w-auto">
-                  {props.status === 'loading' ? t('CONNECTING...') : t('ENTER CONSOLE')}
-                </Button>
-              </Box>
-            </Box>
-          </CardContent>
-        </Card>
       </Box>
-    </Box>;
+      <Card className="connection-card">
+        <Box className="px-6 pb-5 pt-7 sm:px-8 sm:pt-8">
+          <Typography className="text-lg font-semibold text-foreground" component="h2">{t('登录控制台')}</Typography>
+          <Typography className="mt-1.5 text-[0.8125rem] leading-6 text-muted-foreground">{t('输入管理员口令以验证身份。')}</Typography>
+        </Box>
+        <CardContent className="px-6 pb-7 sm:px-8 sm:pb-8">
+          <Box className="flex flex-col gap-5" aria-busy={connecting} component="form" onSubmit={event => {
+            event.preventDefault();
+            if (!connecting) void props.onRefresh();
+          }}>
+            <Box className="flex flex-col gap-2">
+              <Box component="label" htmlFor="connection-api-base" className="text-xs font-semibold text-foreground">{t('服务地址')}</Box>
+              <InputBase id="connection-api-base" value={props.settings.apiBase} disabled={connecting} error={props.issue === 'apiBase'} inputRef={apiBaseInputRef}
+                inputProps={{ 'aria-describedby': 'connection-status-message', 'aria-invalid': props.issue === 'apiBase' }}
+                autoComplete="url" autoCapitalize="none" spellCheck={false}
+                onChange={event => props.onApiBaseChange(event.target.value)} placeholder={t('http://127.0.0.1:8080')}
+                className="h-11 font-mono text-[0.8125rem]" startAdornment={<Server size={16} className="shrink-0 text-muted-foreground" />} />
+            </Box>
+            <Box className="flex flex-col gap-2">
+              <Box component="label" htmlFor="connection-admin-token" className="text-xs font-semibold text-foreground">{t('管理员口令')}</Box>
+              <InputBase id="connection-admin-token" type={showToken ? 'text' : 'password'} value={props.settings.adminToken} disabled={connecting} error={props.issue === 'adminToken'} inputRef={adminTokenInputRef}
+                inputProps={{ 'aria-describedby': 'connection-status-message token-storage-hint', 'aria-invalid': props.issue === 'adminToken' }}
+                autoComplete="current-password" autoCapitalize="none" spellCheck={false}
+                onChange={event => props.onAdminTokenChange(event.target.value)} placeholder={t('输入管理员口令')}
+                className="h-11 font-mono text-[0.8125rem]" startAdornment={<KeyRound size={16} className="shrink-0 text-muted-foreground" />}
+                endAdornment={<IconButton type="button" aria-label={t(showToken ? '隐藏口令' : '显示口令')} aria-pressed={showToken} disabled={connecting} onClick={() => setShowToken(value => !value)} edge="end">{showToken ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>} />
+              <Typography id="token-storage-hint" className="text-xs text-muted-foreground">{t('只保存在当前标签页。')}</Typography>
+            </Box>
+            {props.issue ? <Alert severity="error" role="alert">
+              <AlertTitle>{t('登录失败')}</AlertTitle>
+              <Box id="connection-status-message">{props.message}</Box>
+            </Alert> : <Box id="connection-status-message" role="status" className="flex items-center gap-2 text-xs text-muted-foreground"><Box component="span" className="size-1.5 rounded-full bg-muted-foreground/60" />{props.message}</Box>}
+            <Button type="submit" disabled={connecting} className="h-11 w-full text-sm">
+              {connecting ? <RefreshCw size={16} className="animate-spin motion-reduce:animate-none" /> : null}
+              {t(connecting ? 'CONNECTING...' : 'ENTER CONSOLE')}
+              {!connecting ? <ArrowRight size={16} /> : null}
+            </Button>
+          </Box>
+        </CardContent>
+      </Card>
+      <Box className="flex items-center gap-2 text-xs text-muted-foreground"><ShieldCheck size={14} aria-hidden="true" />{t('统一接入 · 灵活路由 · 用量可见')}</Box>
+    </Box>
+  </Box>;
 }
 function OverviewPage(props: {
   data: AppDataContext;
 }) {
-  const [overview, setOverview] = useState<StatsOverviewResponse | null>(null);
+  const { t } = useI18n();
   const [period, setPeriod] = useState<StatsPeriod>('today');
-  const live = () => overview;
-  const loadOverview = useCallback(async () => {
-    const current = props.data.settings;
-    if (!current.adminToken.trim()) {
-      setOverview(null);
-      return;
-    }
-    try {
-      const data = await loadStatsOverview(current, period);
-      setOverview(data);
-    } catch (error) {
-      props.data.onMessage(error instanceof Error ? t('{{message}}；暂时显示当前数据。', {
-        message: error.message
-      }) : '读取总览失败。');
-      setOverview(null);
-    }
-  }, [period, props.data.onMessage, props.data.settings]);
+  const [copied, setCopied] = useState(false);
+  const loadOverview = useCallback(async (settings: ConnectionSettings) => ({
+    period,
+    overview: await loadStatsOverview(settings, period),
+  }), [period]);
+  const resource = useRemoteResource(props.data.settings, loadOverview, props.data.refreshKey);
+  const overview = resource.data?.period === period ? resource.data.overview : null;
+  // A different period must not inherit the previous period's figures while loading.
+  const loading = resource.loading || (!overview && !resource.error);
   useEffect(() => {
-    void loadOverview();
-  }, [loadOverview, props.data.refreshKey]);
-  useEffect(() => {
-    if (props.data.apiKeys.length === 0) {
-      void props.data.loadApiKeys();
-    }
-  }, [props.data.apiKeys.length, props.data.loadApiKeys]);
+    void props.data.loadApiKeys();
+  }, [props.data.loadApiKeys, props.data.refreshKey]);
   const periodLabel = () => OVERVIEW_PERIODS.find(item => item.value === period)?.label ?? '今天';
   const tokenUsage = () => overview?.token_usage;
   const serverStatus = () => overview?.server_status;
@@ -647,12 +624,9 @@ function OverviewPage(props: {
     if (total <= 0) return 0;
     return cacheTokens() / total * 100;
   };
-  const overviewPricing = () => {
-    const current = overview;
-    return current ? calculateOverviewPricing(current) : null;
-  };
+  const overviewPricing = overview ? calculateOverviewPricing(overview) : null;
   const metrics = (): StatItem[] => {
-    const current = live();
+    const current = overview;
     if (current) {
       return [{
         label: '访问密钥',
@@ -669,16 +643,16 @@ function OverviewPage(props: {
         tone: current.kpis.error_rate > 5 ? 'warning' : 'success'
       }, {
         label: '消费',
-        value: overviewPricing() && overviewPricing()!.priceableRequests > 0 ? formatUsd(overviewPricing()!.totalUsd) : '—',
-        hint: overviewPricing() ? t('已计价 {{priced}} · 未定价 {{unpriced}} · 缺用量 {{missing}} · token 覆盖 {{coverage}}%', {
-          priced: formatCompactInteger(overviewPricing()!.priceableRequests),
-          unpriced: formatCompactInteger(overviewPricing()!.unpricedRequests),
-          missing: formatCompactInteger(overviewPricing()!.usageMissingRequests),
-          coverage: overviewPricing()!.tokenCoveragePercent.toDecimalPlaces(1).toFixed(1)
+        value: overviewPricing && overviewPricing.priceableRequests > 0 ? formatUsd(overviewPricing.totalUsd) : '—',
+        hint: overviewPricing ? t('已计价 {{priced}} · 未定价 {{unpriced}} · 缺用量 {{missing}} · token 覆盖 {{coverage}}%', {
+          priced: formatCompactInteger(overviewPricing.priceableRequests),
+          unpriced: formatCompactInteger(overviewPricing.unpricedRequests),
+          missing: formatCompactInteger(overviewPricing.usageMissingRequests),
+          coverage: overviewPricing.tokenCoveragePercent.toDecimalPlaces(1).toFixed(1)
         }) : t('当前窗口：{{window}}', {
           window: t(periodLabel())
         }),
-        tone: overviewPricing() && (overviewPricing()!.unpricedRequests > 0 || overviewPricing()!.usageMissingRequests > 0) ? 'warning' : 'success'
+        tone: overviewPricing && (overviewPricing.unpricedRequests > 0 || overviewPricing.usageMissingRequests > 0) ? 'warning' : 'success'
       }, {
         label: '用量',
         value: formatCompactInteger(current.token_usage.total_tokens),
@@ -728,85 +702,91 @@ function OverviewPage(props: {
       hint: '等待数据'
     }];
   };
-  return <Box className="flex flex-col gap-4">
-      <PageHeader actions={<Box className="flex w-full flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
-            <Box className="flex w-fit flex-wrap rounded border border-border bg-background p-0.5">
-              {OVERVIEW_PERIODS.map(item => <Button key={item.value} type="button" size="sm" variant={period === item.value ? 'default' : 'ghost'} className="h-7 rounded px-2.5 text-[0.6875rem]" onClick={() => setPeriod(item.value)}>
-                    {t(item.label)}
-                  </Button>)}
+  const items = metrics();
+  const icons = [KeyRound, Activity, Wallet, Zap, Database, Timer];
+  const orderedItems = [1, 3, 2, 5, 4, 0].map(index => ({ ...items[index], icon: icons[index] }));
+  const health = overview?.service_health;
+  return <Box className="flex min-w-0 flex-col gap-5">
+    <PageHeader actions={<Box className="flex w-full flex-wrap items-center justify-between gap-3">
+      <Box className="segmented-control" role="group" aria-label={t('统计时间范围')}>
+        {OVERVIEW_PERIODS.map(item => <Button key={item.value} type="button" size="sm" variant="ghost" aria-pressed={period === item.value}
+          className={period === item.value ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground'} onClick={() => setPeriod(item.value)}>{t(item.label)}</Button>)}
+      </Box>
+      <Box className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" onClick={async () => setCopied(await copyText(props.data.settings.apiBase, '地址已复制。', props.data.onMessage))} onBlur={() => setCopied(false)}>
+          {copied ? <Check size={15} /> : <Copy size={15} />}{t(copied ? '已复制' : 'COPY URL')}
+        </Button>
+        <Button component={Link} to="/keys"><KeyRound size={15} />{t('CREATE KEY')}</Button>
+      </Box>
+    </Box>} />
+    {resource.error ? <Alert severity="error" action={<Button variant="ghost" disabled={resource.loading} onClick={() => void resource.reload()}>{t('重试')}</Button>}>
+      <AlertTitle>{t('读取总览失败。')}</AlertTitle>
+      {resource.error}{overview ? <Box className="mt-1">{t('当前显示上次成功获取的数据。')}</Box> : null}
+    </Alert> : null}
+    <Box className="relative" aria-busy={loading}>
+      {loading && overview ? <LinearProgress aria-label={t('更新总览数据')} className="absolute -top-2 inset-x-0" /> : null}
+      <StatsGrid items={orderedItems} loading={loading && !overview} ariaLabel="用量概览" />
+    </Box>
+    <Box className="grid min-w-0 gap-5 xl:grid-cols-[1.15fr_1fr]">
+      <Card className="console-panel">
+        <Box className="panel-heading">
+          <Box>
+            <Typography component="h2" className="text-sm font-semibold text-foreground">{t('服务状态')}</Typography>
+            <Typography className="mt-1 text-xs leading-5 text-muted-foreground">{t('健康状态与可用资源。')}</Typography>
+          </Box>
+          <StatusBadge tone={!health ? 'disabled' : health.error > 0 ? 'error' : health.warning > 0 ? 'warning' : 'normal'}>
+            {!health ? '等待数据' : health.error > 0 ? '异常' : health.warning > 0 ? '警告' : '正常'}
+          </StatusBadge>
+        </Box>
+        <CardContent className="px-5">
+          <Box className="grid grid-cols-3 gap-2 sm:gap-4">
+            <Box className="min-w-0 rounded-lg bg-background p-3 sm:p-3.5">
+              <Box className="mb-3 flex items-center gap-2 text-xs text-muted-foreground"><Server size={14} className="hidden shrink-0 sm:block" />{t('上游健康')}</Box>
+              <Box className="text-xl font-semibold tabular-nums">{health ? health.healthy : '—'}</Box>
+              <Box className="mt-1.5 text-xs leading-5 text-muted-foreground">{health ? t('{{warning}} 警告 · {{error}} 异常', { warning: health.warning, error: health.error }) : t('等待数据')}</Box>
             </Box>
-            <Box className="flex flex-wrap items-center gap-2">
-              <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => void copyText(props.data.settings.apiBase, '地址已复制。', props.data.onMessage)}>
-                <Copy className="mr-1.5 size-3" />
-                {t('COPY URL')}
-              </Button>
-              <Button component={Link} to="/keys" type="button" size="sm" className="shrink-0">{t('CREATE KEY')}</Button>
+            <Box className="min-w-0 rounded-lg bg-background p-3 sm:p-3.5">
+              <Box className="mb-3 flex items-center gap-2 text-xs text-muted-foreground"><Zap size={14} className="hidden shrink-0 sm:block" />{t('可用目标')}</Box>
+              <Box className="text-xl font-semibold tabular-nums">{health ? health.endpoints_enabled : '—'}</Box>
+              <Box className="mt-1.5 text-xs leading-5 text-muted-foreground">{t('已启用的连接目标')}</Box>
             </Box>
-          </Box>} />
-
-      <StatsGrid items={metrics()} />
-
-      <Box className="grid gap-4">
-        <Card className="rounded border border-border bg-background shadow-none">
-          <Box className="flex flex-col gap-2 p-4 pb-3">
-            <Box className="flex items-center justify-between gap-2.5">
-              <Box>
-                <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t("服务状态")}</Typography>
-                <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t('健康状态与可用资源。')}</Typography>
-              </Box>
-              <StatusBadge tone={(overview?.service_health.error ?? 0) > 0 ? 'error' : (overview?.service_health.warning ?? 0) > 0 ? 'warning' : 'normal'}>
-                {(overview?.service_health.error ?? 0) > 0 ? '异常' : (overview?.service_health.warning ?? 0) > 0 ? '警告' : '正常'}
-              </StatusBadge>
+            <Box className="min-w-0 rounded-lg bg-background p-3 sm:p-3.5">
+              <Box className="mb-3 flex items-center gap-2 text-xs text-muted-foreground"><KeyRound size={14} className="hidden shrink-0 sm:block" />{t('活跃密钥')}</Box>
+              <Box className="text-xl font-semibold tabular-nums">{health ? formatCompactInteger(health.upstream_keys_enabled) : '—'}</Box>
+              <Box className="mt-1.5 text-xs leading-5 text-muted-foreground">{t('当前可用密钥。')}</Box>
             </Box>
           </Box>
-          <CardContent className="grid gap-3 md:grid-cols-3">
-            <Box className="border-l-2 border-primary/20 pl-3 py-0.5">
-              <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">上游健康</Box>
-              <Box className="mt-1.5 text-lg font-medium text-foreground tracking-tight">
-                {overview ? t('{{count}} 正常', {
-                count: overview?.service_health.healthy ?? 0
-              }) : t('等待数据')}
-              </Box>
-              <Box className="mt-1 text-[0.6875rem] leading-4 text-muted-foreground opacity-80" component="p">
-                {overview ? t('{{warning}} 警告 · {{error}} 异常', {
-                warning: overview?.service_health.warning ?? 0,
-                error: overview?.service_health.error ?? 0
-              }) : t('暂无实时数据')}
-              </Box>
-            </Box>
-            <Box className="border-l-2 border-primary/20 pl-3 py-0.5">
-              <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('活跃密钥')}</Box>
-              <Box className="mt-1.5 text-lg font-medium text-foreground tracking-tight">
-                {overview ? formatCompactInteger(overview?.service_health.upstream_keys_enabled ?? 0) : '—'}
-              </Box>
-              <Box className="mt-1 text-[0.6875rem] leading-4 text-muted-foreground opacity-80" component="p">{t('当前可用密钥。')}</Box>
-            </Box>
-            <Box className="border-l-2 border-primary/20 pl-3 py-0.5">
-              <Box className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{t('服务器状态')}</Box>
-              <Box className="mt-1.5 grid grid-cols-2 gap-2.5">
-                <Box>
-                  <Box className="text-[0.625rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">CPU</Box>
-                  <Box className="mt-0.5 text-base font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.cpu_usage_percent)}</Box>
-                </Box>
-                <Box>
-                  <Box className="text-[0.625rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground opacity-70">{t('内存')}</Box>
-                  <Box className="mt-0.5 text-base font-medium text-foreground tracking-tight">{formatUsagePercent(serverStatus()?.memory_usage_percent)}</Box>
-                </Box>
-              </Box>
-              <Box className="mt-1.5 text-[0.6875rem] leading-4 text-muted-foreground opacity-80" component="p">
-                {`${formatServerMemory(serverStatus())} · ${formatServerScope(serverStatus()?.scope, serverStatus()?.memory_limited)}`}
-              </Box>
-              <Box className="mt-1 text-xs leading-5 text-muted-foreground opacity-70" component="p">{formatCpuCapacity(serverStatus()?.cpu_capacity_cores)}</Box>
-            </Box>
-            <Box className="md:col-span-3 pt-2">
-              <Button component={Link} to="/upstreams" type="button" variant="ghost" className="w-full justify-start pl-0 hover:bg-transparent hover:text-primary shrink-0">
-                {`[ ${t('查看上游详情')} ]`}
-              </Button>
-            </Box>
-          </CardContent>
-        </Card>
-      </Box>
-    </Box>;
+          <Button component={Link} to="/upstreams" variant="ghost" className="mt-4 text-primary">{t('查看上游详情')}<ArrowRight size={15} /></Button>
+        </CardContent>
+      </Card>
+      <Card className="console-panel">
+        <Box className="panel-heading">
+          <Box>
+            <Typography component="h2" className="text-sm font-semibold text-foreground">{t('服务器状态')}</Typography>
+            <Typography className="mt-1 text-xs leading-5 text-muted-foreground">{formatServerScope(serverStatus()?.scope, serverStatus()?.memory_limited)}</Typography>
+          </Box>
+          <Box className="flex size-8 items-center justify-center rounded-lg bg-muted/60 text-muted-foreground"><Cpu size={17} /></Box>
+        </Box>
+        <CardContent className="flex flex-col gap-5 px-5">
+          <ResourceMeter label="CPU" value={serverStatus()?.cpu_usage_percent} hint={formatCpuCapacity(serverStatus()?.cpu_capacity_cores)} />
+          <ResourceMeter label="内存" value={serverStatus()?.memory_usage_percent} hint={formatServerMemory(serverStatus())} />
+        </CardContent>
+      </Card>
+    </Box>
+  </Box>;
+}
+function ResourceMeter({ label, value, hint }: { label: string; value: number | null | undefined; hint: string }) {
+  const { t } = useI18n();
+  const known = typeof value === 'number' && Number.isFinite(value);
+  return <Box>
+    <Box className="mb-2 flex items-baseline justify-between gap-3">
+      <Box component="span" className="text-xs font-medium text-muted-foreground">{t(label)}</Box>
+      <Box component="span" className="text-sm font-semibold tabular-nums">{formatUsagePercent(value)}</Box>
+    </Box>
+    {known ? <LinearProgress variant="determinate" value={Math.max(0, Math.min(100, value))} aria-label={t(label)} sx={{ height: 6, '& .MuiLinearProgress-bar': { backgroundColor: value >= 90 ? 'var(--warning)' : 'var(--primary)' } }} />
+      : <Box className="h-1.5 rounded-full bg-muted" />}
+    <Box className="mt-2 text-xs leading-5 text-muted-foreground">{hint}</Box>
+  </Box>;
 }
 function UpstreamsPage(props: {
   data: AppDataContext;
@@ -875,7 +855,7 @@ function NotificationsRoutePage(props: {
   return <NotificationsPage settings={props.data.settings} providers={props.data.providers} apiKeys={props.data.apiKeys} onMessage={props.data.onMessage} />;
 }
 function ConsoleRoot() {
-  useI18n();
+  const { t } = useI18n();
   const [settings, setSettings] = useState<ConnectionSettings>(readSettings);
   const [providers, setProviders] = useState<ProviderWorkspace[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
@@ -887,6 +867,7 @@ function ConsoleRoot() {
   const [status, setStatus] = useState<LoadState>('idle');
   const [linkOk, setLinkOk] = useState(true);
   const [message, setMessage] = useState(t('未连接后台。'));
+  const [notice, setNotice] = useState<{ message: string; key: number } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [consoleMode, setConsoleMode] = useState<ConsoleMode>(() => settings.adminToken.trim() ? 'checking' : 'connect');
   const [connectionIssue, setConnectionIssue] = useState<ConnectionIssue>(null);
@@ -1041,6 +1022,7 @@ function ConsoleRoot() {
     setSettings(nextSettings);
     persistSettings(nextSettings);
     clearWorkspace();
+    setNotice(null);
     setMessage(t('已退出。'));
     setStatus('ready');
     setConnectionIssue(null);
@@ -1071,7 +1053,10 @@ function ConsoleRoot() {
     }));
     clearConnectionFeedback();
   }, [clearConnectionFeedback, clearWorkspace]);
-  const onMessage = useCallback((nextMessage: string) => setMessage(t(nextMessage)), []);
+  const onMessage = useCallback((nextMessage: string) => {
+    setMessage(t(nextMessage));
+    setNotice({ message: t(nextMessage), key: Date.now() });
+  }, []);
   useEffect(() => {
     if (consoleMode !== 'console') return;
     let cancelled = false;
@@ -1171,6 +1156,9 @@ function ConsoleRoot() {
           <Route path="/prices" element={<LegacyPricesRedirect />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
+        <Snackbar key={notice?.key} open={!!notice} autoHideDuration={6000} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+          onClose={(_, reason) => { if (reason !== 'clickaway') setNotice(null); }} message={notice?.message}
+          action={<IconButton size="small" aria-label={t('关闭提示')} onClick={() => setNotice(null)} sx={{ color: 'inherit' }}><X size={16} /></IconButton>} />
       </TopShell>
   ) : (
     <ConnectionGate

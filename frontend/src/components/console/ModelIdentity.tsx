@@ -5,7 +5,7 @@ import IconButton from '@mui/material/IconButton';
 import Typography from '@mui/material/Typography';
 import Tooltip from '@mui/material/Tooltip';
 import { Check, Copy, Cpu } from 'lucide-react';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import type { ModelDisplay } from '@/lib/types';
 
 const brands: Record<string, string> = { openai: 'openai', anthropic: 'anthropic', google: 'google', 'google-deepmind': 'google', deepseek: 'deepseek', alibaba: 'qwen', qwen: 'qwen', meta: 'meta', 'meta-llama': 'meta', mistral: 'mistral', mistralai: 'mistral', moonshot: 'moonshot', moonshotai: 'moonshot', 'moonshot-ai': 'moonshot', xai: 'xai', 'x-ai': 'xai', minimax: 'minimax' };
@@ -25,6 +25,7 @@ export function modelBrand(id: string, brand?: string): string | null {
   return null;
 }
 export function ModelIdentity({ id, display, onOpen }: { id: string; display?: ModelDisplay | null; onOpen?: () => void }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
   const name = display?.display_name || id;

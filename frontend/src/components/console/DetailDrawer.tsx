@@ -1,6 +1,6 @@
 import { useId, type ReactNode } from 'react';
 import { X } from "lucide-react";
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Drawer from '@mui/material/Drawer';
@@ -14,6 +14,7 @@ interface DetailDrawerProps {
   footer?: ReactNode;
 }
 export function DetailDrawer(props: DetailDrawerProps) {
+  const { t } = useI18n();
   const titleId = useId();
 
   return (
@@ -24,23 +25,24 @@ export function DetailDrawer(props: DetailDrawerProps) {
       onClose={props.onClose}
       slotProps={{
         backdrop: {
-          className: 'fixed inset-0 z-50 bg-background/80 backdrop-blur-sm',
+          className: 'fixed inset-0 bg-foreground/20 backdrop-blur-[2px]',
         },
         paper: {
           role: 'dialog',
           'aria-modal': true,
           'aria-labelledby': titleId,
-          className: 'flex h-full w-full max-w-3xl flex-col border-l border-border bg-card shadow-none outline-none',
+          className: 'flex h-full w-full max-w-3xl flex-col border-l border-border bg-card outline-none',
+          sx: { boxShadow: 'var(--shadow-overlay)' },
         },
       }}
     >
-      <Box className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-border/40 bg-card/95 px-5 py-4 backdrop-blur-md">
+      <Box className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-border bg-card px-5 py-5 sm:px-6">
         <Box className="flex min-w-0 flex-col gap-1">
           <Typography id={titleId} className="truncate text-lg font-semibold tracking-normal text-foreground" component="h2" title={t(props.title)}>
             {t(props.title)}
           </Typography>
           {props.description ? (
-            <Typography className="truncate text-[0.8125rem] leading-5 text-muted-foreground opacity-80" component="p">
+            <Typography className="break-words text-[0.8125rem] leading-5 text-muted-foreground" component="p">
               {t(props.description)}
             </Typography>
           ) : null}
@@ -49,8 +51,8 @@ export function DetailDrawer(props: DetailDrawerProps) {
           <X className="size-4" />
         </Button>
       </Box>
-      <Box className="min-h-0 flex-1 overflow-y-auto p-5">{props.children}</Box>
-      {props.footer ? <Box className="border-t border-border/40 bg-muted/5 px-5 py-4">{props.footer}</Box> : null}
+      <Box className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-6">{props.children}</Box>
+      {props.footer ? <Box className="border-t border-border bg-background px-5 py-4 sm:px-6">{props.footer}</Box> : null}
     </Drawer>
   );
 }

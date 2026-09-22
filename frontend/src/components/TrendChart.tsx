@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
@@ -41,6 +41,7 @@ function buildChart(points: TrendPoint[]) {
   };
 }
 export function TrendChart(props: TrendChartProps) {
+  const { t } = useI18n();
   const chart = useMemo(() => buildChart(props.points), [props.points]);
   const peak = Math.max(...props.points.map(point => point.value), 0);
   const latest = props.points[props.points.length - 1]?.value ?? 0;

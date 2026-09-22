@@ -16,7 +16,7 @@ import { CodexOAuthLoginDialog, CodexOAuthPanel } from '@/components/CodexOAuthP
 import { EmptyState } from '@/components/console/EmptyState';
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { createEndpoint, createProvider, deleteProvider } from '@/lib/api';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import type { ConnectionSettings, CreateProviderInput, ProviderWorkspace } from '@/lib/types';
 
 const CODEX_PROVIDER_TYPE = 'openai_codex_oauth';
@@ -54,6 +54,7 @@ interface PendingLogin {
 }
 
 export function OAuthPage(props: OAuthPageProps) {
+  const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const [creatingProvider, setCreatingProvider] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);

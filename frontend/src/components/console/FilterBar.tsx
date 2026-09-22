@@ -1,6 +1,6 @@
-import { type JSX } from "react";
-import { Filter } from "lucide-react";
-import { t } from '@/lib/i18n';
+import { useId, type JSX } from "react";
+import { ChevronDown, SlidersHorizontal } from "lucide-react";
+import { useI18n } from '@/lib/i18n';
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -13,19 +13,22 @@ interface FilterBarProps {
   onToggleAdvanced?: () => void;
 }
 export function FilterBar(props: FilterBarProps) {
-  return <Card className="border border-border bg-background shadow-none mb-4">
+  const { t } = useI18n();
+  const advancedId = useId();
+  return <Card className="console-panel">
       <CardContent className="flex flex-col gap-4 p-4">
-        <Box className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-          <Box className="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-5">{props.primary}</Box>
-          <Box className="flex flex-wrap gap-2 items-center">
+        <Box className="flex min-w-0 flex-col gap-3 2xl:flex-row 2xl:items-start">
+          <Box className="filter-fields">{props.primary}</Box>
+          {props.actions || props.advanced ? <Box className="flex flex-wrap items-center justify-end gap-2">
             {props.actions}
-            {props.advanced ? <Button type="button" variant="ghost" size="sm" onClick={props.onToggleAdvanced} className="px-2.5 ml-1">
-                <Filter className="mr-1.5 size-3" />
+            {props.advanced ? <Button type="button" variant={props.advancedOpen ? 'secondary' : 'ghost'} onClick={props.onToggleAdvanced} aria-expanded={!!props.advancedOpen} aria-controls={advancedId}>
+                <SlidersHorizontal size={15} />
                 {props.advancedOpen ? t('HIDE FILTERS') : t('ADVANCED')}
+                <ChevronDown className={`transition-transform motion-reduce:transition-none ${props.advancedOpen ? 'rotate-180' : ''}`} size={14} />
               </Button> : null}
-          </Box>
+          </Box> : null}
         </Box>
-        {props.advanced && props.advancedOpen ? <Box className="grid gap-3 border-t border-border/40 pt-4 md:grid-cols-2 xl:grid-cols-4">{props.advanced}</Box> : null}
+        {props.advanced ? <Box id={advancedId} hidden={!props.advancedOpen} className={props.advancedOpen ? 'grid gap-3 border-t border-border pt-4 md:grid-cols-2 xl:grid-cols-4' : 'hidden'}>{props.advanced}</Box> : null}
       </CardContent>
     </Card>;
 }

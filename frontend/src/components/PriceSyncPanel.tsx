@@ -23,10 +23,11 @@ import { PriceCardDetails } from './PriceEditor';
 import { applyPriceSync, loadPriceSync, loadPriceSyncJob, previewPriceSync, savePriceSyncConfig, type PriceSyncConfig, type PriceSyncJob } from '@/lib/api';
 import { useRemoteResource } from '@/lib/useRemoteResource';
 import { formatDateTime } from '@/lib/format';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import type { ConnectionSettings } from '@/lib/types';
 
 export function PriceSyncPanel({ settings, onRefresh }: { settings: ConnectionSettings; onRefresh: () => Promise<void> }) {
+  const { t } = useI18n();
   const status = useRemoteResource(settings, loadPriceSync);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,9 +94,11 @@ export function PriceSyncPanel({ settings, onRefresh }: { settings: ConnectionSe
   </CardContent></Card>;
 }
 function SyncCounts({ job }: { job: PriceSyncJob }) {
+  const { t } = useI18n();
   return <Typography variant="body2">{t('新增 {{added}} · 更新 {{updated}} · 未变化 {{unchanged}} · 保留手工价 {{manual_preserved}} · 失败/未适配 {{failed}}', job.counts)}</Typography>;
 }
 function SyncConfigForm({ config, busy, save }: { config: PriceSyncConfig; busy: boolean; save: (config: PriceSyncConfig) => Promise<void> }) {
+  const { t } = useI18n();
   const [draft, setDraft] = useState(config);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);

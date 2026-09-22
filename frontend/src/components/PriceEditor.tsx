@@ -20,7 +20,7 @@ import Typography from '@mui/material/Typography';
 import { DetailDrawer } from './console/DetailDrawer';
 import { createPrice, updatePrice } from '@/lib/api';
 import { formatCompactInteger } from '@/lib/format';
-import { t } from '@/lib/i18n';
+import { t, useI18n } from '@/lib/i18n';
 import { useListQuery } from '@/lib/useListQuery';
 import type { ConnectionSettings, ContextPriceTier, CreatePriceInput, ModelPrice, PriceCardV2, PriceRates, ProviderWorkspace } from '@/lib/types';
 
@@ -159,6 +159,7 @@ function RateFields(props: {
   disabled?: boolean;
   onChange: (key: keyof RateDraft, value: string) => void;
 }) {
+  const { t } = useI18n();
   const fields: Array<{ key: keyof RateDraft; label: string; placeholder: string }> = [
     { key: 'input', label: '输入单价 / MToken', placeholder: '2.50' },
     { key: 'output', label: '输出单价 / MToken', placeholder: '15.00' },
@@ -189,6 +190,7 @@ function PriceFields(props: {
   onChange: (draft: PriceDraft) => void;
   onNewTier: () => TierDraft;
 }) {
+  const { t } = useI18n();
   const updateBase = (key: keyof RateDraft, value: string) => {
     props.onChange({ ...props.draft, base: { ...props.draft.base, [key]: value } });
   };
@@ -305,6 +307,7 @@ interface PriceEditorProps {
 }
 
 export function PriceEditorDrawer(props: PriceEditorProps) {
+  const { t } = useI18n();
   const { params, update } = useListQuery();
   const editor = params.get('price_id');
   if (!editor) return null;
@@ -331,6 +334,7 @@ function PriceEditorForm(props: PriceEditorProps & {
   onClose: () => void;
   onEdit: (id: number) => void;
 }) {
+  const { t } = useI18n();
   const nextTierId = useRef(1);
   const [draft, setDraft] = useState<PriceDraft>(() => props.item
     ? draftFromPrice(props.item, () => nextTierId.current++)
@@ -378,6 +382,7 @@ function PriceEditorForm(props: PriceEditorProps & {
 }
 
 export function PriceCardDetails({ card }: { card: PriceCardV2 }) {
+  const { t } = useI18n();
   const tiers = [{ threshold: 0, rates: card.base }, ...card.tiers.map(tier => ({ threshold: tier.over_total_input_tokens, rates: tier.rates }))];
   return <Box sx={{ display: 'grid', gap: 1 }}>
     <Typography variant="caption" color="text.secondary">{t('美元 / 百万 token')}</Typography>

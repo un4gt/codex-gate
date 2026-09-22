@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import { ChevronDown } from "lucide-react";
 import { StatusBadge } from '@/components/console/StatusBadge';
 import { Link } from 'react-router';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import { updateRuntimeSetting } from '../lib/api';
 import { formatBytes, formatCommitShort, formatMs, formatRoutingStrategy, formatVersionLabel } from '../lib/format';
 import type { ConnectionSettings, RuntimeEnvPreviewResponse, RuntimeSettingView, RuntimeSettingsResponse, SystemConfigResponse } from '../lib/types';
@@ -33,6 +33,7 @@ function readString(formData: FormData, key: string) {
   return String(formData.get(key) ?? '').trim();
 }
 export function SettingsPage(props: SettingsPageProps) {
+  const { t } = useI18n();
   const [openSection, setOpenSection] = useState<SectionKey | null>('basic');
   const [busy, setBusy] = useState(false);
   const toggleSection = (key: SectionKey) => setOpenSection(current => current === key ? null : key);
@@ -89,12 +90,12 @@ export function SettingsPage(props: SettingsPageProps) {
         }} component="form">
             <Box className="grid gap-4 md:grid-cols-2">
               <FormControl>
-                <FormLabel>{t("服务地址")}</FormLabel>
-                <InputBase value={props.settings.apiBase} onChange={event => props.onApiBaseChange(event.target.value)} />
+                <FormLabel htmlFor="settings-api-base">{t("服务地址")}</FormLabel>
+                <InputBase id="settings-api-base" value={props.settings.apiBase} onChange={event => props.onApiBaseChange(event.target.value)} />
               </FormControl>
               <FormControl>
-                <FormLabel>{t("管理员口令")}</FormLabel>
-                <InputBase type="password" value={props.settings.adminToken} onChange={event => props.onAdminTokenChange(event.target.value)} />
+                <FormLabel htmlFor="settings-admin-token">{t("管理员口令")}</FormLabel>
+                <InputBase id="settings-admin-token" type="password" value={props.settings.adminToken} onChange={event => props.onAdminTokenChange(event.target.value)} />
                 <FormHelperText>{t("只保存在当前标签页。")}</FormHelperText>
               </FormControl>
             </Box>
@@ -199,26 +200,29 @@ function SettingsSection(props: {
   children: any;
   warning?: boolean;
 }) {
+  const { t } = useI18n();
+  const sectionId = useId();
   return <Card className={props.warning ? 'border-warning-border' : ''}>
       <Box className="flex flex-col gap-2 p-4 pb-3">
-        <Button type="button" className="flex h-auto w-full cursor-pointer items-center justify-between gap-3 p-0 text-left normal-case tracking-normal hover:bg-transparent" onClick={props.onToggle} variant="ghost">
-          <Box>
+        <Button type="button" aria-expanded={props.open} aria-controls={props.open ? sectionId : undefined} className="flex h-auto w-full cursor-pointer items-center justify-between gap-3 whitespace-normal p-0 text-left normal-case tracking-normal hover:bg-transparent" onClick={props.onToggle} variant="ghost">
+          <Box className="min-w-0">
             <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t(props.title)}</Typography>
             <Typography className="mt-0.5 text-[0.8125rem] leading-5 text-muted-foreground" component="div">{t(props.description)}</Typography>
           </Box>
-          <Box className="flex items-center gap-2">
+          <Box className="flex shrink-0 items-center gap-2">
             {props.warning ? <StatusBadge tone="warning">谨慎修改</StatusBadge> : null}
             <ChevronDown className={`size-4 ${props.open ? 'rotate-180 transition-transform' : 'transition-transform'}`} />
           </Box>
         </Button>
       </Box>
-      {props.open ? <CardContent>{props.children}</CardContent> : null}
+      {props.open ? <CardContent id={sectionId}>{props.children}</CardContent> : null}
     </Card>;
 }
 function InfoTile(props: {
   label: string;
   value: string;
 }) {
+  const { t } = useI18n();
   return <Box className="surface-tile">
       <Box className="surface-label">{t(props.label)}</Box>
       <Box className="surface-value">{t(props.value)}</Box>
@@ -227,6 +231,7 @@ function InfoTile(props: {
 function RuntimeSettingControl(props: {
   setting: RuntimeSettingView;
 }) {
+  const { t } = useI18n();
   const setting = props.setting;
   if (typeof setting.value === 'boolean') {
     return <Box className="check-row" component="label">

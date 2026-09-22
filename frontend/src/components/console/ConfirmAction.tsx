@@ -6,7 +6,7 @@ import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogTitle from '@mui/material/DialogTitle';
 import { useId } from 'react';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 
 export function ConfirmAction(props: {
   open: boolean;
@@ -17,6 +17,7 @@ export function ConfirmAction(props: {
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const { t } = useI18n();
   const id = useId();
   return <Dialog open={props.open} onClose={props.busy ? undefined : props.onClose} aria-labelledby={id}>
     <DialogTitle id={id}>{props.title}</DialogTitle>

@@ -11,7 +11,7 @@ import MenuItem from '@mui/material/MenuItem';
 import Select from '@mui/material/Select';
 import Typography from '@mui/material/Typography';
 
-import { t } from '@/lib/i18n';
+import { t, useI18n } from '@/lib/i18n';
 import type {
   RequestBodyOverride,
   RequestHeaderOverride,
@@ -346,6 +346,7 @@ export function parseRequestOverridesDraft(draft: RequestOverridesDraft): Parsed
 }
 
 export function RequestOverridesEditor({ value, onChange, disabled = false }: RequestOverridesEditorProps) {
+  const { t } = useI18n();
   const ruleCount = value.headers.length + value.body.length;
 
   const updateHeader = (id: string, patch: Partial<RequestHeaderOverrideDraft>) => {

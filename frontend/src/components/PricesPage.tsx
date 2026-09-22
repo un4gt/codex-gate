@@ -29,7 +29,7 @@ import { ListPagination } from './console/ListPagination';
 import { PriceEditorDrawer, formatUnitCost, reconciliationMessage } from './PriceEditor';
 import { deletePrice } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import { paginate, useListQuery } from '@/lib/useListQuery';
 import type { ConnectionSettings, ModelPrice, ProviderWorkspace } from '@/lib/types';
 
@@ -44,6 +44,7 @@ interface PricesPageProps {
 }
 
 export function PricesPage(props: PricesPageProps) {
+  const { t } = useI18n();
   const { params, filter, update, page, pageSize } = useListQuery();
   const [deleteTarget, setDeleteTarget] = useState<ModelPrice | null>(null);
   const [busy, setBusy] = useState(false);

@@ -1,5 +1,5 @@
 import { type JSX } from "react";
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
@@ -14,6 +14,7 @@ interface QuickActionsProps {
   items: QuickActionItem[];
 }
 export function QuickActions(props: QuickActionsProps) {
+  const { t } = useI18n();
   return <Card className="border border-border bg-background shadow-none">
       <Box className="flex flex-col gap-2 p-4 pb-3">
         <Typography className="text-sm font-semibold tracking-normal text-foreground" component="div">{t(props.title ?? '快捷操作')}</Typography>

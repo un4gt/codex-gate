@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import Alert from '@mui/material/Alert';
 import Typography from '@mui/material/Typography';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 
 export function RecoveryNotice({ until, message }: { until?: number | null; message?: string | null }) {
+  const { t } = useI18n();
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!until) return;

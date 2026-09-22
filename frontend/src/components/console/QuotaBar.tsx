@@ -1,5 +1,5 @@
 import Box from '@mui/material/Box';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 
 export type QuotaTone = 'healthy' | 'watch' | 'critical';
 
@@ -35,6 +35,7 @@ interface QuotaBarProps {
  * 纯宽度表达会让 0% 与「未加载」在视觉上无法区分。
  */
 export function QuotaBar(props: QuotaBarProps) {
+  const { t } = useI18n();
   const remaining = Math.max(0, Math.min(100, props.remainingPercent));
   const tone = quotaTone(remaining);
   return (

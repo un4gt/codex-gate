@@ -17,7 +17,7 @@ import {
   type RequestOverridesDraft,
 } from '@/components/console/RequestOverridesEditor';
 import { CodexOAuthLoginDialog, CodexOAuthPanel } from '@/components/CodexOAuthPanel';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import { createEndpoint, createProvider, createProviderGroup, createProviderKey, deleteEndpoint, deleteProvider, deleteProviderGroup, deleteProviderKey, resetProviderCircuit, reorderProviderChildren, syncProviderModels, testEndpointConnection, updateEndpoint, updateProvider, updateProviderGroup, updateProviderKey } from '../lib/api';
 import { formatDateTime, formatMs } from '../lib/format';
 import type { ConnectionSettings, CreateEndpointInput, CreateProviderInput, CreateProviderKeyInput, ProviderGroup, ProviderWorkspace, UpstreamEndpointSummary, UpstreamKeyMeta, UpdateEndpointInput, UpdateProviderInput, UpdateProviderKeyInput } from '../lib/types';
@@ -136,6 +136,7 @@ function providerHasBetaFeature(item: ProviderWorkspace, feature: string) {
   return item.provider.beta_features?.includes(feature) ?? false;
 }
 export function ProvidersPage(props: ProvidersPageProps) {
+  const { t } = useI18n();
   const theme = useTheme();
   const showProviderTable = useMediaQuery(theme.breakpoints.up('sm'));
   const providerGroups = props.groups ?? [];

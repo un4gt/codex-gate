@@ -1,4 +1,4 @@
-import { useSyncExternalStore, useTransition } from 'react';
+import { useMemo, useSyncExternalStore, useTransition } from 'react';
 import { dict as en } from '@/i18n/en';
 import { dict as zh } from '@/i18n/zh';
 
@@ -86,10 +86,13 @@ export function t(key: string, params?: TranslationParams) {
 export function useI18n() {
   const locale = useSyncExternalStore(subscribe, getLocale, getLocale);
   const [isSwitching, beginTransition] = useTransition();
+  // Render caches need a new translator identity when the locale changes.
+  // Existing event callbacks still translate using the current locale when invoked.
+  const translate = useMemo(() => (key: string, params?: TranslationParams) => t(key, params), [locale]);
 
   return {
     locale,
-    t,
+    t: translate,
     isSwitching,
     setLocale(next: Locale) {
       beginTransition(() => setLocale(next));

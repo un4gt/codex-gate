@@ -72,7 +72,9 @@ try {
  await priceTable.locator('tbody tr').nth(8).scrollIntoViewIfNeeded();await page.waitForTimeout(150);
  const priceBar=priceContainer.locator('..').locator('[data-table-scrollbar]').first();assert(await priceBar.isVisible());
  await priceBar.evaluate(el=>{el.scrollLeft=200;el.dispatchEvent(new Event('scroll'))});await page.waitForTimeout(100);assert((await priceContainer.evaluate(el=>el.scrollLeft))>0);
- await page.setViewportSize({width:390,height:844});await page.waitForTimeout(200);assert(await priceBar.isVisible());
+ await page.setViewportSize({width:390,height:844});
+ // Responsive filters can move the table below the viewport; inspect its scrollbar while the table is visible.
+ await priceTable.locator('tbody tr').nth(8).scrollIntoViewIfNeeded();await page.waitForTimeout(200);assert(await priceBar.isVisible());
  await page.screenshot({path:`${artifacts}/mobile.png`,fullPage:false});
  // No overflow, hidden table, and multiple table isolation.
  await priceTable.evaluate(el=>{el.style.minWidth='0';el.style.width='100%';for(const c of el.querySelectorAll('th,td')){c.style.width='0';c.style.maxWidth='0';c.style.padding='0';c.style.overflow='hidden'}});await page.waitForTimeout(200);

@@ -7,7 +7,7 @@ import { EmptyState } from '@/components/console/EmptyState';
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid } from '@/components/console/StatsGrid';
 import { StatusBadge } from '@/components/console/StatusBadge';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import { createApiKey, deleteApiKey, updateApiKey } from '../lib/api';
 import { formatCompactInteger, formatDateTime, formatDateTimeLocalInput, parseDateTimeLocalInput } from '../lib/format';
 import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, ProviderGroup, UpdateApiKeyInput } from '../lib/types';
@@ -62,6 +62,7 @@ function keyStatus(item: ApiKeyWorkspace) {
   };
 }
 export function ApiKeysPage(props: ApiKeysPageProps) {
+  const { t } = useI18n();
   const [removeItem, setRemoveItem] = useState<ApiKeyWorkspace | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);

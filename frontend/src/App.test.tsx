@@ -15,7 +15,7 @@ import { ModelAliasesPage } from '@/components/ModelAliasesPage';
 import { PricesPage } from '@/components/PricesPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { initializeI18n } from '@/lib/i18n';
-import type { ModelPrice, ProviderModelInventory, ProviderWorkspace } from '@/lib/types';
+import type { ModelPrice, ProviderModelInventory, ProviderWorkspace, StatsOverviewResponse, StatsPeriod } from '@/lib/types';
 import { theme } from '@/theme';
 
 function renderWithTheme(children: ReactNode) {
@@ -35,6 +35,17 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function overviewFixture(period: StatsPeriod, requests: number): StatsOverviewResponse {
+  return {
+    period,
+    window: { from_ms: 0, to_ms: 1000 },
+    kpis: { requests, failed: 0, error_rate: 0, p95_latency_ms: 0, avg_latency_ms: 0 },
+    service_health: { providers_enabled: 1, endpoints_enabled: 1, upstream_keys_enabled: 1, healthy: 1, warning: 0, error: 0 },
+    token_usage: { total_tokens: 0, input_tokens: 0, output_tokens: 0, visible_output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, reasoning_output_tokens: 0, usage_observed_requests: 0 },
+    pricing: { versions: [], usage_groups: [] },
+  };
 }
 
 function providerWorkspace(): ProviderWorkspace {
@@ -249,6 +260,38 @@ describe('admin console smoke test', () => {
     expect(screen.queryByText(/401|invalid token|\/api\/v1\/system\/config/i)).toBeNull();
     expect(screen.getByRole('button', { name: /enter console/i })).toBeTruthy();
     expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+  });
+
+  it('keeps statistics aligned with the selected period when responses arrive out of order', async () => {
+    window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
+    window.history.replaceState({}, '', '/overview');
+    const pending: Array<(response: Response) => void> = [];
+    fetchRequest.mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/v1/system/config') return jsonResponse({});
+      if (url.pathname === '/api/v1/stats/overview') {
+        const period = url.searchParams.get('period') as StatsPeriod;
+        if (period === '7h') return new Promise<Response>(resolve => pending.push(resolve));
+        return jsonResponse(overviewFixture(period, period === 'today' ? 321 : 987));
+      }
+      return jsonResponse([]);
+    });
+
+    renderWithTheme(<Root />);
+    expect(await screen.findByText('321')).toBeTruthy();
+    const periods = screen.getByRole('group', { name: 'Statistics period' });
+    fireEvent.click(within(periods).getByRole('button', { name: 'Last 7 hours' }));
+    await waitFor(() => expect(pending.length).toBeGreaterThan(0));
+    expect(screen.queryByText('321')).toBeNull();
+    expect(screen.queryByText('Normal')).toBeNull();
+
+    fireEvent.click(within(periods).getByRole('button', { name: 'Last 24 hours' }));
+    expect(await screen.findByText('987')).toBeTruthy();
+    await act(async () => { pending.forEach(resolve => resolve(jsonResponse(overviewFixture('7h', 456)))); });
+    expect(screen.getByText('987')).toBeTruthy();
+    expect(screen.queryByText('456')).toBeNull();
+    expect(within(periods).getByRole('button', { name: 'Last 24 hours' }).getAttribute('aria-pressed')).toBe('true');
+    expect(consoleError).not.toHaveBeenCalled();
   });
 
   it('validates a stored admin token before restoring the console', async () => {

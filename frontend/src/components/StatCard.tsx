@@ -1,5 +1,5 @@
 import { type JSX } from "react";
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
@@ -18,6 +18,7 @@ const accentClasses: Record<NonNullable<StatCardProps['accent']>, string> = {
   slate: 'border-border bg-muted/75 text-foreground'
 };
 export function StatCard(props: StatCardProps) {
+  const { t } = useI18n();
   const accent = props.accent ?? 'orange';
   return <Card className="overflow-hidden">
       <CardContent className="p-0">

@@ -24,7 +24,7 @@ import { EmptyState } from './console/EmptyState';
 import { FilterBar } from './console/FilterBar';
 import { ListPagination } from './console/ListPagination';
 import { createModelAlias, createModelAliasTarget, deleteModelAlias, deleteModelAliasTarget, updateModelAlias, updateModelAliasTarget } from '@/lib/api';
-import { t } from '@/lib/i18n';
+import { useI18n } from '@/lib/i18n';
 import { paginate, useListQuery } from '@/lib/useListQuery';
 import type { ConnectionSettings, ModelAlias, ModelAliasTarget, ProviderWorkspace } from '@/lib/types';
 
@@ -38,6 +38,7 @@ interface ModelAliasesPageProps {
 }
 
 export function ModelAliasesPage(props: ModelAliasesPageProps) {
+  const { t } = useI18n();
   const { params, update, filter, page, pageSize } = useListQuery();
   const search = params.get('q') ?? '';
   const editor = params.get('alias_id');
@@ -70,6 +71,7 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
 }
 
 function AliasEditor(props: ModelAliasesPageProps & { alias?: ModelAlias; onClose: () => void; onCreated: (id: number) => void }) {
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [removal, setRemoval] = useState<'alias' | ModelAliasTarget | null>(null);
@@ -152,6 +154,7 @@ function AliasEditor(props: ModelAliasesPageProps & { alias?: ModelAlias; onClos
 }
 
 function TargetForm(props: { target?: ModelAliasTarget; providers: ProviderWorkspace[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onDelete?: () => void }) {
+  const { t } = useI18n();
   const target = props.target;
   return <Box component="form" onSubmit={props.onSubmit} sx={{ border: 1, borderColor: 'divider', borderRadius: 1, p: 2, display: 'grid', gap: 2 }}>
     <Typography variant="subtitle2">{target?.upstream_model ?? t('添加目标')}</Typography>
@@ -185,6 +188,7 @@ function AliasField(props: {
   min?: number;
   max?: number;
 }) {
+  const { t } = useI18n();
   const id = useId();
   return <FormControl required={props.required} disabled={props.disabled} fullWidth>
     <FormLabel id={`${id}-label`} htmlFor={id}>{props.label}</FormLabel>

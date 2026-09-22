@@ -65,7 +65,7 @@ import {
   updateNotificationRule,
 } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
-import { getLocale, t } from '@/lib/i18n';
+import { getLocale, t, useI18n } from '@/lib/i18n';
 import type {
   ApiKeyWorkspace,
   ConnectionSettings,
@@ -448,6 +448,7 @@ function formatOptionalDateTime(value: number | null) {
 }
 
 function DetailValue(props: { label: string; children: ReactNode; mono?: boolean }) {
+  const { t } = useI18n();
   return <Box className="min-w-0">
       <Typography className="text-xs text-muted-foreground" component="div">{t(props.label)}</Typography>
       <Box className={`mt-1 break-words text-sm text-foreground${props.mono ? ' font-mono' : ''}`}>{props.children}</Box>
@@ -455,6 +456,7 @@ function DetailValue(props: { label: string; children: ReactNode; mono?: boolean
 }
 
 function DiagnosticBody(props: { title: string; value: string }) {
+  const { t } = useI18n();
   return <Box>
       <Typography className="mb-2 text-sm font-semibold" component="h3">{t(props.title)}</Typography>
       <Box component="pre" className="max-h-80 overflow-auto whitespace-pre-wrap break-all border border-border bg-muted/20 p-4 font-mono text-xs leading-5 text-foreground">{props.value}</Box>
@@ -468,6 +470,7 @@ function DeliveryDetailDrawer(props: {
   error: string;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const delivery = props.detail ?? props.delivery;
   return <DetailDrawer
       open={props.delivery !== null}
@@ -527,6 +530,7 @@ function operatorLabel(operator: NotificationAlertOperator) {
 }
 
 function SummaryCard(props: { label: string; value: number; warning?: boolean }) {
+  const { t } = useI18n();
   return <Card className={props.warning ? 'border-warning-border' : ''}>
       {/* 主题里 CardContent 的 paddingTop 为 0（默认上方有卡片头），这里单独使用需补回上内距 */}
       <CardContent className="flex h-full flex-col justify-center pt-4">
@@ -537,6 +541,7 @@ function SummaryCard(props: { label: string; value: number; warning?: boolean })
 }
 
 function SectionTitle(props: { title: string; description: string; action: ReactNode }) {
+  const { t } = useI18n();
   return <Box className="flex flex-col gap-2.5 sm:flex-row sm:items-end sm:justify-between">
       <Box>
         <Typography className="text-sm font-semibold text-foreground" component="h2">{t(props.title)}</Typography>
@@ -547,6 +552,7 @@ function SectionTitle(props: { title: string; description: string; action: React
 }
 
 export function NotificationsPage(props: NotificationsPageProps) {
+  const { t } = useI18n();
   const [summary, setSummary] = useState<NotificationSummary>(EMPTY_SUMMARY);
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [rules, setRules] = useState<NotificationRule[]>([]);
@@ -910,6 +916,7 @@ function RuleCards(props: {
   onDelete: (rule: NotificationRule) => void;
   onRun?: (rule: NotificationRule) => void;
 }) {
+  const { t } = useI18n();
   const channelNames = useMemo(() => new Map(props.channels.map((channel) => [channel.id, channel.name])), [props.channels]);
   if (props.rules.length === 0) return <Alert severity="info">{t('尚未配置此类通知规则。')}</Alert>;
   return <Box className="grid gap-4 xl:grid-cols-2">
@@ -953,6 +960,7 @@ function ChannelDialog(props: {
   onClose: () => void;
   onSubmit: (event: FormEvent) => void;
 }) {
+  const { t } = useI18n();
   const draft = props.draft;
   const smtpUsernameChanged = draft !== null
     && draft.id !== null
@@ -1023,6 +1031,7 @@ function RuleDialog(props: {
   onSubmit: (event: FormEvent) => void;
   onPreview: () => Promise<void>;
 }) {
+  const { t } = useI18n();
   const draft = props.draft;
   const update = <K extends keyof RuleDraft>(key: K, value: RuleDraft[K]) => {
     if (draft) props.onChange({ ...draft, [key]: value });
@@ -1082,5 +1091,6 @@ function RuleDialog(props: {
 }
 
 function NumberField(props: { label: string; value: string; onChange: (value: string) => void }) {
+  const { t } = useI18n();
   return <FormControl><FormLabel>{t(props.label)}</FormLabel><InputBase value={props.value} onChange={(event) => props.onChange(event.target.value)} inputProps={{ 'aria-label': t(props.label) }} inputMode="numeric" /></FormControl>;
 }

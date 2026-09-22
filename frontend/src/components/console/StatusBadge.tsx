@@ -1,4 +1,4 @@
-import { t } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n";
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
 import type { ChipProps } from "@mui/material/Chip";
@@ -20,5 +20,6 @@ function dotColor(tone: StatusTone): string {
   return 'bg-muted-foreground/50';
 }
 export function StatusBadge(props: StatusBadgeProps) {
+  const { t } = useI18n();
   return <Chip color={badgeColor(props.tone)} variant="outlined" label={<><Box className={`size-1.5 rounded-full mr-2 ${dotColor(props.tone)}`} component="span" />{t(props.children)}</>} />;
 }
