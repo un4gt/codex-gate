@@ -277,16 +277,17 @@ describe('admin console smoke test', () => {
       return jsonResponse([]);
     });
 
-    renderWithTheme(<Root />);
-    expect(await screen.findByText('321')).toBeTruthy();
+    // Flush authentication and the initial statistics request before asserting.
+    await act(async () => { renderWithTheme(<Root />); });
+    expect(screen.getByText('321')).toBeTruthy();
     const periods = screen.getByRole('group', { name: 'Statistics period' });
-    fireEvent.click(within(periods).getByRole('button', { name: 'Last 7 hours' }));
-    await waitFor(() => expect(pending.length).toBeGreaterThan(0));
+    await act(async () => { fireEvent.click(within(periods).getByRole('button', { name: 'Last 7 hours' })); });
+    expect(pending.length).toBeGreaterThan(0);
     expect(screen.queryByText('321')).toBeNull();
     expect(screen.queryByText('Normal')).toBeNull();
 
-    fireEvent.click(within(periods).getByRole('button', { name: 'Last 24 hours' }));
-    expect(await screen.findByText('987')).toBeTruthy();
+    await act(async () => { fireEvent.click(within(periods).getByRole('button', { name: 'Last 24 hours' })); });
+    expect(screen.getByText('987')).toBeTruthy();
     await act(async () => { pending.forEach(resolve => resolve(jsonResponse(overviewFixture('7h', 456)))); });
     expect(screen.getByText('987')).toBeTruthy();
     expect(screen.queryByText('456')).toBeNull();
@@ -1052,13 +1053,15 @@ describe('admin console smoke test', () => {
     fireEvent.click(screen.getByText('Provider A'));
     expect(screen.getByRole('combobox', { name: 'Key Selection' }).textContent).toContain('Round Robin');
     expect(screen.queryByText('Primary Key')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Save Provider' }));
-    await waitFor(() => expect(writes).toHaveLength(1));
+    // Wait for saving to finish so the key strategy select is enabled again.
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save Provider' })); });
+    expect(writes).toHaveLength(1);
     expect(writes[0].body).toMatchObject({ max_attempts: 2, circuit_breaker_enabled: true, circuit_breaker_open_ms: 30_000, circuit_breaker_half_open_success_threshold: 2 });
     expect(writes[0].body).not.toHaveProperty('key_selection_strategy');
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Key Selection' }));
-    fireEvent.click(await screen.findByRole('option', { name: 'Primary and Backup' }));
-    await waitFor(() => expect(writes).toHaveLength(2));
+    const primaryAndBackup = await screen.findByRole('option', { name: 'Primary and Backup' });
+    await act(async () => { fireEvent.click(primaryAndBackup); });
+    expect(writes).toHaveLength(2);
     expect(writes[1]).toEqual({ path: '/api/v1/providers/7', body: { key_selection_strategy: 'ordered' } });
     expect(consoleError).not.toHaveBeenCalled();
   });
