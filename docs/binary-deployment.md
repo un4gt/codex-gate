@@ -1,5 +1,7 @@
 # 二进制部署
 
+升级到上游配置精简版本前，先备份数据库，并阅读[直接授权与模型路由迁移说明](upstream-refactor.md)。旧管理接口保留一个版本；回退旧程序需恢复升级前备份。
+
 二进制发布包用于不依赖 Docker 的 Linux 或 Windows 部署。发布包会包含：
 
 - `little-gate` 或 `little-gate.exe`：网关服务

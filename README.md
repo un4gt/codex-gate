@@ -4,6 +4,8 @@
 
 管理台的“通知”模块支持按 Cron 定时发送服务器状态与上游 Provider/客户端访问 Key 用量报表，也支持 CPU、内存、上游健康、请求、错误率、Token 和估算成本阈值告警。投递通道包括 SMTP 邮件、带 HMAC-SHA256 签名的通用 Webhook，以及飞书、企业微信、钉钉、Slack、Discord 机器人消息格式，配置与安全说明见 [docs/notifications.md](docs/notifications.md)。
 
+上游配置、模型路由与直接授权已重组；升级前请阅读 [迁移、接口与验收说明](docs/upstream-refactor.md)，并备份数据库。
+
 ## 部署方式
 
 ### 1) Docker Compose 快速部署（使用已发布镜像）
@@ -382,7 +384,7 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `ENDPOINT_SELECTOR_STRATEGY` | `weighted` | endpoint 选择策略（`weighted`/`latency`）。 |
+| `ENDPOINT_SELECTOR_STRATEGY` | `weighted` | 弃用兼容字段；地址固定按健康状态及 priority、ID 顺序选择。 |
 | `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | 保留的地址 / Key 熔断阈值；首次故障仍立即进入至少 30 秒冷却。 |
 | `CIRCUIT_BREAKER_OPEN_MS` | `30000` | 地址 / Key 熔断基础时长；重复失败指数递增，默认上限 5 分钟，保留更长的原配置。 |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `2000` | 上游连接超时。 |
@@ -395,9 +397,9 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | `UPSTREAM_FIRST_EVENT_MAX_BYTES` | `65536` | SSE 首个有效事件预检缓冲上限。 |
 | `UPSTREAM_RATE_LIMIT_FALLBACK_COOLDOWN_MS` | `30000` | 402/429 未返回 reset 信息时的 key 冷却基准时长。 |
 
-Provider 调度先按 API Key 与 Provider 的调度组交集授权，再使用组内优先级覆盖（未设置时使用 Provider 全局优先级）。同一优先级使用权重采样加 power-of-two choices，根据并发占用与延迟 EWMA 选择。带 `session-id`、`session_id`、`x-session-id`、`thread-id`、`prompt_cache_key` 或支持的 `metadata` 会话标识的请求会保持 Provider 亲和；新增 Provider 不会让已有健康会话漂移。
+模型路由先按访问密钥允许的上游、模型库存、协议能力及启停状态筛选候选，再按模型路由目标的优先级与顺序 / 加权策略选择。未单独配置的模型使用默认路由；上游全局权重和组内优先级覆盖不再参与执行。路由级 Sticky 和跨上游 Failover 默认开启；会话绑定按“访问密钥 + 会话 + 请求模型”隔离，原请求缓存标识保持不变。
 
-`GET /v1/models` 是协议无关的全局活动模型注册表：接口仍要求有效的客户端 Bearer Key，但不会按该 Key 的 Provider Group、`api_format` 查询参数、模型路由、Endpoint 健康、quota 或 circuit 状态过滤。模型只有在至少一个启用 Provider 下存在 `enabled=true && available=true` 的库存记录，并且至少一个启用上游 Key 允许该模型时才进入注册表；启用别名至少需要一个满足同样条件的目标。模型出现在注册表中不代表任意 API Key、协议或当前运行时状态下一定可执行，具体原因会由请求错误和日志中的路由决策链说明。
+`GET /v1/models` 要求有效的客户端 Bearer Key，并按直接授权、模型路由、启停、库存、协议支持和 Key 模型限制过滤。临时 Endpoint 健康、quota 和 circuit 不决定模型是否出现在列表中；实际可执行性由请求时的运行状态决定。旧组授权在升级时取上游并集迁移，直接编辑允许列表后不再跟随旧组变化。
 
 网关在尚未请求上游时使用 OpenAI 风格结构化错误。常见 `error.code` 如下：
 
@@ -405,7 +407,7 @@ Provider 调度先按 API Key 与 Provider 的调度组交集授权，再使用�
 | ---: | --- | --- |
 | `404` | `model_not_found` | 没有 Provider 注册该模型，且不存在未同步库存的兼容 Provider。 |
 | `403` | `model_disabled` | Gateway 全局策略或模型别名禁用了模型。 |
-| `403` | `model_not_authorized` | 模型已注册，但客户端 Key 未授权匹配的 Provider Group。 |
+| `403` | `model_not_authorized` | 模型已注册，但客户端 Key 未授权匹配的上游。 |
 | `400` | `model_protocol_unsupported` | Provider 不支持客户端协议，或 Chat-only 模型未开启 Responses→Chat。 |
 | `503` | `model_not_available` | 同步库存中存在模型，但库存已禁用或不可用。 |
 | `503` | `model_route_unavailable` | 模型路由排除了所有匹配 Provider。 |
@@ -415,17 +417,17 @@ Provider 调度先按 API Key 与 Provider 的调度组交集授权，再使用�
 
 一旦上游已经返回响应，网关不会使用上述本地错误包装它：上游状态码、正文和安全响应头直接透传；模型级 `model_not_found` 错误也不会累计 Provider 熔断。
 
-每个请求总共最多 **3 次目标尝试**，包含 HTTP、WebSocket 建连、HTTP 桥接和 OAuth 刷新后的重放。原有每上游 `max_attempts` 配置保留，但仍受这项总上限约束。第二次尝试前等待 500–750 毫秒，第三次前等待 1000–1250 毫秒；退避与首个响应共同受 `UPSTREAM_REQUEST_TIMEOUT_MS` 截止时间约束。已开始正常输出的长流继续使用原来的读取超时。
+每个请求总共最多 **3 次目标尝试**，包含 HTTP、WebSocket 建连、HTTP 桥接和 OAuth 刷新后的重放。正式界面使用 `max_retries`（0–2，默认 1），原 `max_attempts` 在兼容层保留，均受这项总上限约束。第二次尝试前等待 500–750 毫秒，第三次前等待 1000–1250 毫秒；退避与首个响应共同受 `UPSTREAM_REQUEST_TIMEOUT_MS` 截止时间约束。已开始正常输出的长流继续使用原来的读取超时。
 
 地址出现连接错误、超时或服务故障后立即冷却，默认按 **30 / 60 / 120 / 240 / 300 秒**递增。冷却结束只允许一个恢复探测，成功后恢复，失败继续延长。401/403 只冷却对应 Key；402/429 按 Key 隔离额度，支持秒数和 HTTP 日期形式的 `Retry-After`，上游要求超过 5 分钟时不会截短。404 和正文明确标识的模型错误可跨服务切换，不累计服务熔断。健康的备用地址和 Key 仍可使用。
 
 所有候选暂时不可用时立即返回 `503 all_upstreams_temporarily_unavailable`、最早可重试时间与 `Retry-After`，不排队等恢复。客户端应遵守 `Retry-After`；客户端继续请求仍会产生访问日志，但冷却中的目标不会被转发。日志中的实际尝试次数可区分这两种情况。客户端断开后不再发起新重试；已经收到输出或用量的 HTTP/SSE/WS 请求不会重放。
 
-一个上游代表一家服务，多个服务地址共享该服务的 Key。地址按优先级主备使用；Key 默认轮流使用，也可选择“主备顺序”，旧加权配置继续兼容。新建服务、分组、地址和加密 Key 在一个数据库事务中保存；模型同步失败不会留下半套配置，可独立重试同步。地址和 Key 排序也整批保存。手动“重置故障状态”会重置服务、地址和 Key 的健康状态，**仍保留上游限流 / 额度等待窗口**。
+一个上游代表一家服务，多个服务地址共享该服务的 Key。地址按优先级主备使用；Key 默认轮流使用，也可选择“主备顺序”，旧加权配置继续兼容。新建服务、地址和加密 Key 在一个数据库事务中保存；模型同步失败不会留下半套配置，可独立重试同步。地址和 Key 排序也整批保存。手动“重置故障状态”会重置服务、地址和 Key 的健康状态，**仍保留上游限流 / 额度等待窗口**。
 
 离线验证：`python3 scripts/run_resilience_regression.py`（先编译后端），覆盖真实请求数量、退避间隔、冷却期间并发拦截、长 Retry-After、地址 / Key 组合切换、流开始后不重放、WebSocket、OAuth 401 重放预算和断开取消。全部使用本地模拟上游与临时数据库。
 
-会话亲和、Provider 并发、EWMA、熔断和 quota 冷却均为进程内内存状态：重启会清空，多副本之间不会自动共享。Provider/API Key 配置、调度组、路由和请求决策链日志仍持久化到 SQLite/Postgres。多副本部署如需全局一致亲和，应在网关前配置稳定的会话级负载分配。
+会话亲和、Provider 并发、EWMA、熔断和 quota 冷却均为进程内内存状态：重启会清空，多副本之间不会自动共享。上游 / 访问密钥配置、直接授权、模型路由和请求决策链日志仍持久化到 SQLite/Postgres；旧调度组仅供过渡接口使用。多副本部署如需全局一致亲和，应在网关前配置稳定的会话级负载分配。
 
 ### 留存与归档字段
 

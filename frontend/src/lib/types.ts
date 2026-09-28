@@ -59,6 +59,8 @@ export interface RoutingTrace {
   attempt_limit?: number;
   backoff_ms?: number;
   authorized_groups: Array<{ id: number; name: string }>;
+  authorized_provider_ids?: number[];
+  model_route?: ModelRoutePolicy | null;
   affinity: {
     source: string;
     hash: string;
@@ -354,6 +356,7 @@ export interface ApiKeySummary {
   expires_at_ms: number | null;
   log_enabled: boolean;
   provider_groups: ProviderGroupRef[];
+  allowed_provider_ids?: number[];
 }
 
 export interface CreateApiKeyInput {
@@ -361,7 +364,8 @@ export interface CreateApiKeyInput {
   enabled: boolean;
   expires_at_ms: number | null;
   log_enabled: boolean;
-  provider_group_ids: number[];
+  allowed_provider_ids: number[];
+  provider_group_ids?: number[];
 }
 
 export interface UpdateApiKeyInput {
@@ -370,6 +374,7 @@ export interface UpdateApiKeyInput {
   expires_at_ms?: number | null;
   log_enabled?: boolean;
   provider_group_ids?: number[];
+  allowed_provider_ids?: number[];
 }
 
 export interface CreatedApiKey {
@@ -450,25 +455,32 @@ export interface RequestOverrides {
 }
 
 export interface ProviderSummary {
+  endpoint_count?: number;
+  key_count?: number;
+  model_count?: number;
+  max_retries?: number;
+  request_timeout_ms?: number | null;
+  endpoint_failover?: boolean;
+  model_sync?: { last_attempt_ms: number | null; last_success_ms: number | null; error: string | null } | null;
   routing_availability?: RoutingAvailability;
   id: number;
   name: string;
   provider_type: string;
   enabled: boolean;
-  priority: number;
-  weight: number;
+  priority?: number;
+  weight?: number;
   supports_include_usage: boolean;
   websocket_enabled: boolean;
   beta_features: string[];
   request_overrides: RequestOverrides;
   key_selection_strategy: 'round_robin' | 'ordered' | 'weighted';
-  groups: ProviderGroupMembership[];
-  max_attempts: number;
+  groups?: ProviderGroupMembership[];
+  max_attempts?: number;
   max_concurrency: number | null;
-  circuit_breaker_enabled: boolean;
-  circuit_breaker_failure_threshold: number;
-  circuit_breaker_open_ms: number;
-  circuit_breaker_half_open_success_threshold: number;
+  circuit_breaker_enabled?: boolean;
+  circuit_breaker_failure_threshold?: number;
+  circuit_breaker_open_ms?: number;
+  circuit_breaker_half_open_success_threshold?: number;
   runtime?: ProviderRuntimeSummary;
   affinity_sessions?: number;
   health?: ProviderHealthSummary;
@@ -660,6 +672,9 @@ export interface ProviderWorkspace {
 }
 
 export interface CreateProviderInput {
+  max_retries?: number;
+  request_timeout_ms?: number | null;
+  endpoint_failover?: boolean;
   endpoints?: CreateEndpointInput[];
   keys?: CreateProviderKeyInput[];
   name: string;
@@ -682,6 +697,9 @@ export interface CreateProviderInput {
 }
 
 export interface UpdateProviderInput {
+  max_retries?: number;
+  request_timeout_ms?: number | null;
+  endpoint_failover?: boolean;
   name?: string;
   provider_type?: string;
   enabled?: boolean;
@@ -822,6 +840,7 @@ export interface RuntimeEnvPreviewResponse {
 }
 
 export interface SystemConfigResponse {
+  capabilities?: { websocket: boolean; websocket_to_http: boolean; http_to_websocket: boolean; response_rewrite: boolean; request_rewrite: boolean };
   build?: {
     version: string;
     commit: string;
@@ -926,4 +945,18 @@ export interface StatsOverviewResponse {
       cache_creation_input_tokens: number;
     }>;
   };
+}
+
+export interface UpstreamRuntimeState {
+  provider: Pick<ProviderSummary, 'id' | 'name' | 'enabled' | 'runtime' | 'health' | 'affinity_sessions' | 'routing_availability'>;
+  endpoints: UpstreamEndpointSummary[];
+  keys: UpstreamKeyMeta[];
+  recent_errors: Array<{time_ms:number;endpoint_id:number;key_id:number;category:string;status:number|null;summary:string}>;
+}
+export interface ModelRoutePolicy {
+  model_name: string;
+  mode: 'ordered' | 'weighted';
+  sticky: boolean;
+  failover: boolean;
+  targets: Array<{provider_id:number;priority:number;weight:number}>;
 }

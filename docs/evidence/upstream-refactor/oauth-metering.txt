@@ -1,0 +1,8 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 15s
+HTTP/WS framing, usage, tiers, restrictions and disconnect deadline: PASS
+WebSocket over HTTP bridge: PASS
+OAuth HTTP, SSE-to-JSON, native WS, HTTP bridge and account availability: PASS

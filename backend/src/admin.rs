@@ -1,3 +1,4 @@
+mod upstreams;
 use base64::Engine;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::Uri;
@@ -124,11 +125,44 @@ fn stats_window(period: &str, now_ms: i64) -> Option<(i64, i64)> {
     }
 }
 
-pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpResponse {
     if let Some(resp) = require_admin(&req, &state) {
         return resp;
     }
 
+    let original_path = req.uri().path().to_string();
+    if original_path == "/api/v1/model-route-policies"
+        && matches!(*req.method(), Method::GET | Method::PUT | Method::DELETE)
+    {
+        return upstreams::routes(req, state).await;
+    }
+    if original_path == "/api/v1/upstream-migration" && req.method() == Method::GET {
+        return match state.db.migration_report().await {
+            Ok(v) => http::json(StatusCode::OK, &v),
+            Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+    }
+    if original_path == "/api/v1/upstreams" || original_path.starts_with("/api/v1/upstreams/") {
+        if req.method() == Method::GET {
+            if original_path == "/api/v1/upstreams" {
+                return upstreams::read(state, None, false).await;
+            }
+            let suffix = original_path.trim_start_matches("/api/v1/upstreams/");
+            let raw = suffix.trim_end_matches("/runtime");
+            if let Ok(id) = raw.parse::<i64>() {
+                return upstreams::read(state, Some(id), suffix.ends_with("/runtime")).await;
+            }
+        }
+        req.extensions_mut().insert(UpstreamApi);
+        let path = req
+            .uri()
+            .to_string()
+            .replacen("/api/v1/upstreams", "/api/v1/providers", 1);
+        match path.parse() {
+            Ok(uri) => *req.uri_mut() = uri,
+            Err(_) => return http::json_error(StatusCode::BAD_REQUEST, "invalid upstream path"),
+        };
+    }
     let path = req.uri().path();
     let method = req.method().clone();
 
@@ -710,6 +744,21 @@ where
 }
 
 async fn sync_provider_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let id = parse_provider_id_with_suffix(req.uri().path(), "/models/sync");
+    let started_at_ms = util::now_ms();
+    let response = sync_provider_models_inner(req, state.clone()).await;
+    if let Some(id) = id
+        && response.status() != StatusCode::NOT_FOUND
+        && let Err(e) = state
+            .db
+            .record_model_sync(id, started_at_ms, response.status().as_u16())
+            .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    response
+}
+async fn sync_provider_models_inner(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     let Some(provider_id) = parse_provider_id_with_suffix(path, "/models/sync") else {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
@@ -1726,6 +1775,7 @@ struct CreateApiKeyReq {
     log_enabled: Option<bool>,
     #[serde(default, alias = "providerGroupIds")]
     provider_group_ids: Option<Vec<i64>>,
+    allowed_provider_ids: Option<Vec<i64>>,
 }
 
 async fn list_api_keys(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -1750,6 +1800,17 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         return http::json_error(StatusCode::BAD_REQUEST, "name is empty");
     }
 
+    if body.allowed_provider_ids.is_some() && body.provider_group_ids.is_some() {
+        return http::json_error(
+            StatusCode::CONFLICT,
+            "choose direct upstream authorization or legacy groups",
+        );
+    }
+    if let Some(ids) = body.allowed_provider_ids.as_deref()
+        && let Err(e) = validate_allowed_upstreams(&state, ids).await
+    {
+        return e;
+    }
     let enabled = body.enabled.unwrap_or(true);
     let log_enabled = body.log_enabled.unwrap_or(false);
     let available_groups = match state.db.list_provider_groups().await {
@@ -1804,6 +1865,12 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
+    if let Some(ids) = body.allowed_provider_ids.as_deref()
+        && let Err(e) = state.db.replace_allowed_providers(id, ids).await
+    {
+        let _ = state.db.delete_api_key(id).await;
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
     state.caches.api_keys.invalidate_all();
 
     let resp = serde_json::json!({
@@ -1836,6 +1903,7 @@ struct PatchApiKeyReq {
     log_enabled: Option<bool>,
     #[serde(alias = "providerGroupIds")]
     provider_group_ids: Option<Vec<i64>>,
+    allowed_provider_ids: Option<Vec<i64>>,
 }
 
 async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -1861,6 +1929,26 @@ async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         return http::json_error(StatusCode::NOT_FOUND, "api key not found");
     };
 
+    if patch.provider_group_ids.is_some() {
+        match state.db.authorization_is_direct(id).await {
+            Ok(true) => {
+                return http::json_error(
+                    StatusCode::CONFLICT,
+                    "authorization migrated: edit allowed_provider_ids",
+                );
+            }
+            Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => {}
+        }
+        if patch.allowed_provider_ids.is_some() {
+            return http::json_error(StatusCode::CONFLICT, "conflicting authorization fields");
+        }
+    }
+    if let Some(ids) = patch.allowed_provider_ids.as_deref()
+        && let Err(e) = validate_allowed_upstreams(&state, ids).await
+    {
+        return e;
+    }
     let new_name = patch.name.as_deref().unwrap_or(&current.name);
     if new_name.trim().is_empty() {
         return http::json_error(StatusCode::BAD_REQUEST, "name is empty");
@@ -1905,6 +1993,11 @@ async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
+    if let Some(ids) = patch.allowed_provider_ids.as_deref()
+        && let Err(e) = state.db.replace_allowed_providers(id, ids).await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
     state.caches.api_keys.invalidate_all();
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
 }
@@ -1938,8 +2031,15 @@ struct ProviderGroupAssignmentReq {
     priority_override: Option<i32>,
 }
 
+#[derive(Clone)]
+struct UpstreamApi;
+
 #[derive(Debug, Deserialize)]
 struct CreateProviderReq {
+    max_retries: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    request_timeout_ms: Option<Option<u64>>,
+    endpoint_failover: Option<bool>,
     #[serde(default)]
     endpoints: Vec<CreateEndpointReq>,
     #[serde(default)]
@@ -2091,6 +2191,7 @@ async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResp
 }
 
 async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let modern = req.extensions().get::<UpstreamApi>().is_some();
     let (_, body, _raw) =
         match http::read_json_limited::<CreateProviderReq>(req, state.config.max_request_bytes)
             .await
@@ -2098,11 +2199,49 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
             Ok(v) => v,
             Err(resp) => return resp,
         };
+    if modern
+        && (body.priority.is_some()
+            || body.weight.is_some()
+            || body.groups.is_some()
+            || body.key_selection_strategy.as_deref() == Some("weighted"))
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "upstream scheduling belongs to model routes; weighted keys are legacy-only",
+        );
+    }
+    if body.key_selection_strategy.as_deref() == Some("weighted") {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "weighted keys are read-only legacy configuration",
+        );
+    }
+    if body
+        .groups
+        .as_ref()
+        .is_some_and(|g| g.iter().any(|g| g.priority_override.is_some()))
+    {
+        return http::json_error(
+            StatusCode::CONFLICT,
+            "group priority overrides removed; use model routes",
+        );
+    }
     if body.name.trim().is_empty() || body.provider_type.trim().is_empty() {
         return http::json_error(StatusCode::BAD_REQUEST, "name/provider_type is empty");
     }
     if !is_valid_provider_type(body.provider_type.trim()) {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid provider_type");
+    }
+    if body.max_retries.is_some_and(|n| !(0..=2).contains(&n))
+        || body
+            .request_timeout_ms
+            .flatten()
+            .is_some_and(|n| !(1..=3_600_000).contains(&n))
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid retries or request timeout",
+        );
     }
     let enabled = body.enabled.unwrap_or(true);
     let priority = body.priority.unwrap_or(100);
@@ -2132,7 +2271,11 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     if !is_valid_key_selection_strategy(key_selection_strategy) {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid key_selection_strategy");
     }
-    let max_attempts = body.max_attempts.unwrap_or(2);
+    let max_attempts = body
+        .max_retries
+        .map(|n| n.saturating_add(1))
+        .or(body.max_attempts)
+        .unwrap_or(2);
     let max_concurrency = body.max_concurrency;
     let circuit_breaker_enabled = body.circuit_breaker_enabled.unwrap_or(true);
     let circuit_breaker_failure_threshold = body.circuit_breaker_failure_threshold.unwrap_or(3);
@@ -2228,6 +2371,8 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         });
     }
     let provider = crate::types::UpstreamProvider {
+        request_timeout_ms: body.request_timeout_ms.flatten(),
+        endpoint_failover: body.endpoint_failover.unwrap_or(true),
         id: 0,
         name: body.name.trim().into(),
         provider_type: body.provider_type.trim().into(),
@@ -2251,6 +2396,7 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         .map(|item| (item.group_id, item.priority_override))
         .collect::<Vec<_>>();
     let bundle = crate::db::ProviderBundle {
+        legacy_route_weighted: !modern,
         provider: &provider,
         groups: &groups,
         endpoints: &endpoints,
@@ -2262,6 +2408,7 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         .await
     {
         Ok(created) => {
+            state.caches.api_keys.invalidate_all();
             state.caches.upstream.invalidate();
             http::json(StatusCode::OK, &created)
         }
@@ -2271,6 +2418,10 @@ async fn create_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
 
 #[derive(Debug, Deserialize)]
 struct PatchProviderReq {
+    max_retries: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    request_timeout_ms: Option<Option<u64>>,
+    endpoint_failover: Option<bool>,
     name: Option<String>,
     #[serde(alias = "providerType")]
     provider_type: Option<String>,
@@ -2307,6 +2458,7 @@ struct PatchProviderReq {
 }
 
 async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResponse {
+    let modern = req.extensions().get::<UpstreamApi>().is_some();
     let path = req.uri().path();
     let Some(provider_id) = parse_id_suffix(path, "/api/v1/providers/") else {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid provider id");
@@ -2321,6 +2473,33 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    if modern && (patch.priority.is_some() || patch.weight.is_some() || patch.groups.is_some()) {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "upstream scheduling belongs to model routes",
+        );
+    }
+    if patch
+        .groups
+        .as_ref()
+        .is_some_and(|g| g.iter().any(|g| g.priority_override.is_some()))
+    {
+        return http::json_error(
+            StatusCode::CONFLICT,
+            "group priority overrides have been removed; use model routes",
+        );
+    }
+    if patch.max_retries.is_some_and(|n| !(0..=2).contains(&n))
+        || patch
+            .request_timeout_ms
+            .flatten()
+            .is_some_and(|n| !(1..=3_600_000).contains(&n))
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid retries or request timeout",
+        );
+    }
     if let Err(message) = validate_provider_routing(patch.priority, patch.weight) {
         return http::json_error(StatusCode::BAD_REQUEST, message);
     }
@@ -2333,6 +2512,14 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         return http::json_error(StatusCode::NOT_FOUND, "provider not found");
     };
 
+    if patch.key_selection_strategy.as_deref() == Some("weighted")
+        && current.key_selection_strategy != "weighted"
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "weighted keys are read-only legacy configuration",
+        );
+    }
     if let Some(name) = patch.name {
         if name.trim().is_empty() {
             return http::json_error(StatusCode::BAD_REQUEST, "name is empty");
@@ -2379,7 +2566,7 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
         }
         current.key_selection_strategy = value.to_string();
     }
-    if let Some(value) = patch.max_attempts {
+    if let Some(value) = patch.max_retries.map(|n| n + 1).or(patch.max_attempts) {
         current.max_attempts = value;
     }
     if let Some(value) = patch.max_concurrency {
@@ -2443,6 +2630,37 @@ async fn update_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
             return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
         }
     }
+    if (patch.priority.is_some() || patch.weight.is_some())
+        && let Err(e) = sync_legacy_provider_route(
+            &state,
+            provider_id,
+            current.priority,
+            current.weight,
+            patch.weight.is_some(),
+        )
+        .await
+    {
+        return e;
+    }
+    if patch.request_timeout_ms.is_some() || patch.endpoint_failover.is_some() {
+        let options = match state.db.request_options().await {
+            Ok(v) => v,
+            Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+        let (timeout, failover) = options.get(&provider_id).copied().unwrap_or((None, true));
+        if let Err(e) = state
+            .db
+            .save_request_options(
+                provider_id,
+                patch.request_timeout_ms.unwrap_or(timeout),
+                patch.endpoint_failover.unwrap_or(failover),
+            )
+            .await
+        {
+            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
+    state.caches.api_keys.invalidate_all();
     if !current.enabled {
         state.affinity.purge_provider(provider_id);
         state.provider_runtime.purge_provider(provider_id);
@@ -2471,6 +2689,7 @@ async fn delete_provider(req: Request<Incoming>, state: SharedState) -> HttpResp
     match state.db.delete_upstream_provider(provider_id).await {
         Ok(true) => {
             state.caches.upstream.invalidate();
+            state.caches.api_keys.invalidate_all();
             state.provider_runtime.purge_provider(provider_id);
             state.affinity.purge_provider(provider_id);
             for key_id in key_ids {
@@ -3265,6 +3484,13 @@ async fn upsert_route(req: Request<Incoming>, state: SharedState) -> HttpRespons
     {
         return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
+    if let Err(e) = state
+        .db
+        .adapt_legacy_route(&model_name, body.enabled, &body.provider_ids)
+        .await
+    {
+        return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
     state.caches.upstream.invalidate();
     http::json(StatusCode::OK, &serde_json::json!({ "ok": true }))
 }
@@ -3600,6 +3826,7 @@ async fn system_config(_req: Request<Incoming>, state: SharedState) -> HttpRespo
     let config = &state.config;
     let payload = serde_json::json!({
         "build": build_info(),
+        "capabilities": {"websocket":true,"websocket_to_http":true,"http_to_websocket":false,"response_rewrite":false,"request_rewrite":true},
         "connection": {
             "api_base": format!("http://{}", config.listen_addr),
             "healthz_path": "/healthz",
@@ -4015,6 +4242,7 @@ fn api_key_to_json(k: &ApiKeyAuth) -> Value {
         "enabled": k.enabled,
         "expires_at_ms": k.expires_at_ms,
         "log_enabled": k.log_enabled,
+        "allowed_provider_ids": k.allowed_provider_ids,
         "provider_groups": k.provider_groups
     })
 }
@@ -4260,6 +4488,43 @@ fn generate_api_key_plaintext() -> String {
     fastrand::fill(&mut bytes);
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     format!("cg_{}", raw)
+}
+
+async fn validate_allowed_upstreams(state: &SharedState, ids: &[i64]) -> Result<(), HttpResponse> {
+    let providers = state
+        .db
+        .list_upstream_providers()
+        .await
+        .map_err(|e| http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
+        || ids.iter().any(|id| !providers.iter().any(|p| p.id == *id))
+    {
+        return Err(http::json_error(
+            StatusCode::BAD_REQUEST,
+            "allowed_provider_ids must contain unique existing upstream IDs",
+        ));
+    }
+    Ok(())
+}
+async fn sync_legacy_provider_route(
+    state: &SharedState,
+    id: i64,
+    priority: i32,
+    weight: i32,
+    legacy_weighted: bool,
+) -> Result<(), HttpResponse> {
+    state
+        .db
+        .update_default_route_target(id, priority, weight, legacy_weighted)
+        .await
+        .map_err(|e| http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state
+        .db
+        .refresh_compat_authorizations()
+        .await
+        .map_err(|e| http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state.caches.api_keys.invalidate_all();
+    Ok(())
 }
 
 #[cfg(test)]

@@ -435,22 +435,7 @@ export async function loadStatsOverview(
 
 export async function loadProviderWorkspace(settings: ConnectionSettings): Promise<ProviderWorkspace[]> {
   const { apiBase, adminToken } = requireConnection(settings);
-  const providers = await fetchJson<ProviderSummary[]>(apiBase, '/api/v1/providers', adminToken);
-
-  return Promise.all(
-    providers.map(async (provider) => {
-      const [endpoints, keys] = await Promise.all([
-        fetchJson<UpstreamEndpointSummary[]>(apiBase, `/api/v1/providers/${provider.id}/endpoints`, adminToken),
-        fetchJson<UpstreamKeyMeta[]>(apiBase, `/api/v1/providers/${provider.id}/keys`, adminToken),
-      ]);
-
-      return {
-        provider,
-        endpoints,
-        keys,
-      };
-    }),
-  );
+  return fetchJson<ProviderWorkspace[]>(apiBase, '/api/v1/upstreams', adminToken);
 }
 
 export async function loadProviderGroups(settings: ConnectionSettings): Promise<ProviderGroup[]> {
@@ -541,26 +526,26 @@ export async function loadApiKeyWorkspace(settings: ConnectionSettings): Promise
   }));
 }
 
-export async function createProvider(settings: ConnectionSettings, payload: CreateProviderInput) {
+export async function createProvider(settings: ConnectionSettings, payload: Pick<CreateProviderInput, 'name' | 'provider_type'> & Partial<Omit<CreateProviderInput,'name' | 'provider_type'>>) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return postJson<{ id: number; endpoint_ids: number[]; key_ids: number[] }>(apiBase, '/api/v1/providers', adminToken, payload);
+  return postJson<{ id: number; endpoint_ids: number[]; key_ids: number[] }>(apiBase, '/api/v1/upstreams', adminToken, payload);
 }
 
 export async function updateProvider(settings: ConnectionSettings, providerId: number, payload: UpdateProviderInput) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return patchJson<{ ok: boolean }>(apiBase, `/api/v1/providers/${providerId}`, adminToken, payload);
+  return patchJson<{ ok: boolean }>(apiBase, `/api/v1/upstreams/${providerId}`, adminToken, payload);
 }
 
 export async function deleteProvider(settings: ConnectionSettings, providerId: number) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return deleteJson<void>(apiBase, `/api/v1/providers/${providerId}`, adminToken);
+  return deleteJson<void>(apiBase, `/api/v1/upstreams/${providerId}`, adminToken);
 }
 
 export async function resetProviderCircuit(settings: ConnectionSettings, providerId: number) {
   const { apiBase, adminToken } = requireConnection(settings);
   return postJson<{ ok: boolean }>(
     apiBase,
-    `/api/v1/providers/${providerId}/circuit/reset`,
+    `/api/v1/upstreams/${providerId}/circuit/reset`,
     adminToken,
     {},
   );
@@ -568,14 +553,14 @@ export async function resetProviderCircuit(settings: ConnectionSettings, provide
 
 export async function reorderProviderChildren(settings: ConnectionSettings, providerId: number, kind: 'endpoints' | 'keys', ids: number[]) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return requestJson<{ ok: boolean }>(apiBase, `/api/v1/providers/${providerId}/${kind}/order`, adminToken, {
+  return requestJson<{ ok: boolean }>(apiBase, `/api/v1/upstreams/${providerId}/${kind}/order`, adminToken, {
     method: 'PUT', body: JSON.stringify({ ids }),
   });
 }
 
 export async function createEndpoint(settings: ConnectionSettings, providerId: number, payload: CreateEndpointInput) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return postJson<{ id: number }>(apiBase, `/api/v1/providers/${providerId}/endpoints`, adminToken, payload);
+  return postJson<{ id: number }>(apiBase, `/api/v1/upstreams/${providerId}/endpoints`, adminToken, payload);
 }
 
 export async function updateEndpoint(settings: ConnectionSettings, endpointId: number, payload: UpdateEndpointInput) {
@@ -590,7 +575,7 @@ export async function deleteEndpoint(settings: ConnectionSettings, endpointId: n
 
 export async function createProviderKey(settings: ConnectionSettings, providerId: number, payload: CreateProviderKeyInput) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return postJson<{ id: number }>(apiBase, `/api/v1/providers/${providerId}/keys`, adminToken, payload);
+  return postJson<{ id: number }>(apiBase, `/api/v1/upstreams/${providerId}/keys`, adminToken, payload);
 }
 
 export async function updateProviderKey(settings: ConnectionSettings, keyId: number, payload: UpdateProviderKeyInput) {
@@ -612,7 +597,7 @@ export async function startCodexOAuthSession(
   const { apiBase, adminToken } = requireConnection(settings);
   return postJson<CodexOAuthSession>(
     apiBase,
-    `/api/v1/providers/${providerId}/codex-oauth/sessions`,
+    `/api/v1/upstreams/${providerId}/codex-oauth/sessions`,
     adminToken,
     { replace_key_id: replaceKeyId, flow },
   );
@@ -756,7 +741,7 @@ export async function deleteUpstreamKeyModel(settings: ConnectionSettings, model
 
 export async function loadProviderModels(settings: ConnectionSettings, providerId: number) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return fetchJson<ProviderModel[]>(apiBase, `/api/v1/providers/${providerId}/models`, adminToken);
+  return fetchJson<ProviderModel[]>(apiBase, `/api/v1/upstreams/${providerId}/models`, adminToken);
 }
 
 export async function loadProviderModelInventory(settings: ConnectionSettings) {
@@ -766,7 +751,7 @@ export async function loadProviderModelInventory(settings: ConnectionSettings) {
 
 export async function syncProviderModels(settings: ConnectionSettings, providerId: number) {
   const { apiBase, adminToken } = requireConnection(settings);
-  return postJson<ProviderModel[]>(apiBase, `/api/v1/providers/${providerId}/models/sync`, adminToken, {});
+  return postJson<ProviderModel[]>(apiBase, `/api/v1/upstreams/${providerId}/models/sync`, adminToken, {});
 }
 
 export async function updateProviderModel(
@@ -830,4 +815,26 @@ export function loadPriceSyncJob(settings: ConnectionSettings, id: string): Prom
 }
 export function applyPriceSync(settings: ConnectionSettings, job: PriceSyncJob, useCloud: string[]): Promise<PriceSyncJob> {
   return requestJson(settings.apiBase, `/api/v1/price-sync/apply/${encodeURIComponent(job.id)}`, settings.adminToken, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_version: job.source_version, use_cloud: useCloud }) });
+}
+
+export async function loadUpstreamConfig(settings: ConnectionSettings, id:number) {
+  const {apiBase,adminToken}=requireConnection(settings);
+  return fetchJson<ProviderWorkspace>(apiBase, `/api/v1/upstreams/${id}`, adminToken);
+}
+export async function loadUpstreamRuntime(settings: ConnectionSettings, id:number) {
+  const {apiBase,adminToken}=requireConnection(settings);
+  return fetchJson<import('./types').UpstreamRuntimeState>(apiBase, `/api/v1/upstreams/${id}/runtime`, adminToken);
+}
+export async function loadModelRoutePolicies(settings: ConnectionSettings) {
+  const {apiBase,adminToken}=requireConnection(settings);
+  return fetchJson<import('./types').ModelRoutePolicy[]>(apiBase, '/api/v1/model-route-policies', adminToken);
+}
+export async function saveModelRoutePolicy(settings: ConnectionSettings, policy:import('./types').ModelRoutePolicy) {
+  const {apiBase,adminToken}=requireConnection(settings);
+  return requestJson<import('./types').ModelRoutePolicy>(apiBase, '/api/v1/model-route-policies', adminToken,{method:'PUT',body:JSON.stringify(policy)});
+}
+
+export async function resetModelRoutePolicy(settings: ConnectionSettings, model_name: string) {
+  const {apiBase,adminToken}=requireConnection(settings);
+  return requestJson(apiBase, '/api/v1/model-route-policies', adminToken, {method:'DELETE',body:JSON.stringify({model_name})});
 }

@@ -1,0 +1,32 @@
+{
+  "screenshots": [
+    "docs/evidence/upstream-refactor/before-desktop-light.png",
+    "docs/evidence/upstream-refactor/before-mobile-light.png"
+  ],
+  "errors": [],
+  "checks": [],
+  "requests": [
+    "GET /api/v1/system/config",
+    "GET /api/v1/providers",
+    "GET /api/v1/provider-groups",
+    "GET /api/v1/providers",
+    "GET /api/v1/provider-groups",
+    "GET /api/v1/providers/7/endpoints",
+    "GET /api/v1/providers/7/keys",
+    "GET /api/v1/providers/7/endpoints",
+    "GET /api/v1/providers/7/keys",
+    "GET /api/v1/keys/81/models",
+    "GET /api/v1/keys/81/models",
+    "GET /api/v1/system/config",
+    "GET /api/v1/providers",
+    "GET /api/v1/provider-groups",
+    "GET /api/v1/providers",
+    "GET /api/v1/provider-groups",
+    "GET /api/v1/providers/7/endpoints",
+    "GET /api/v1/providers/7/keys",
+    "GET /api/v1/providers/7/endpoints",
+    "GET /api/v1/providers/7/keys",
+    "GET /api/v1/keys/81/models",
+    "GET /api/v1/keys/81/models"
+  ]
+}

@@ -88,7 +88,7 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         Ok(v) => v,
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let Some(_api_key) = auth else {
+    let Some(api_key) = auth else {
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
     };
     let snap = match state
@@ -104,6 +104,27 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
     let data = snap
         .model_registry_ids
         .iter()
+        .filter(|model| {
+            [ApiFormat::ChatCompletions, ApiFormat::Responses]
+                .into_iter()
+                .any(|format| {
+                    collect_provider_routes(&snap, format, model, true).is_ok_and(|(routes, _)| {
+                        routes.iter().any(|r| {
+                            r.provider.enabled
+                                && api_key.allowed_provider_ids.contains(&r.provider.id)
+                                && snap
+                                    .keys_by_provider
+                                    .get(&r.provider.id)
+                                    .is_some_and(|keys| {
+                                        keys.iter().any(|k| {
+                                            k.enabled
+                                                && key_allows_model(&snap, k.id, &r.upstream_model)
+                                        })
+                                    })
+                        })
+                    })
+                })
+        })
         .map(|id| {
             serde_json::json!({
                 "id": id,
@@ -183,6 +204,7 @@ async fn proxy_openai(
     };
     let routing_trace = std::sync::Arc::new(parking_lot::Mutex::new(RoutingTrace {
         attempt_limit: crate::resilience::MAX_ATTEMPTS,
+        authorized_provider_ids: api_key.allowed_provider_ids.clone(),
         authorized_groups: api_key
             .provider_groups
             .iter()
@@ -314,7 +336,8 @@ async fn proxy_openai(
     let request_headers = parts.headers.clone();
     let request_path_and_query = parts.uri.path_and_query().cloned();
     let request_override_context = RequestOverrideContext::new();
-    let affinity_identity = extract_affinity_identity(&request_headers, &body_bytes, api_key.id);
+    let affinity_identity = extract_affinity_identity(&request_headers, &body_bytes, api_key.id)
+        .map(|i| i.for_model(&model_name));
     let existing_affinity_binding = affinity_identity
         .as_ref()
         .and_then(|identity| state.affinity.lookup(identity, util::now_ms()));
@@ -402,6 +425,8 @@ async fn proxy_openai(
             return route_resolution_error_response(&error, &model_name, api_format);
         }
     }
+    routing_trace.lock().model_route = plan.route_policy.clone();
+    let affinity_identity = if plan.sticky { affinity_identity } else { None };
     let affinity_binding = apply_affinity_to_plan(
         &state,
         affinity_identity.as_ref(),
@@ -791,7 +816,9 @@ async fn proxy_openai(
             &headers,
             out_body.clone(),
             upstream_uri.clone(),
-            budget.remaining(),
+            budget
+                .remaining()
+                .min(provider_timeout(&resolved.provider, &state)),
         )
         .await;
 
@@ -858,6 +885,13 @@ async fn proxy_openai(
             }
             routing_trace.lock().attempts_sent += 1;
             budget.note_send(resolved.provider.id);
+            state.provider_runtime.record_error(
+                resolved.provider.id,
+                resolved.endpoint.id,
+                resolved.key.id,
+                "OAuth authentication replay".into(),
+                Some(401),
+            );
             oauth_replayed = true;
             trace_attempt(
                 &routing_trace,
@@ -875,7 +909,9 @@ async fn proxy_openai(
                 &retry_headers,
                 out_body,
                 upstream_uri,
-                budget.remaining(),
+                budget
+                    .remaining()
+                    .min(provider_timeout(&resolved.provider, &state)),
             )
             .await;
         }
@@ -987,7 +1023,9 @@ async fn proxy_openai(
                 upstream_resp.body_mut(),
                 api_format_name(resolved.protocol.upstream_api_format),
                 is_sse,
-                budget.remaining(),
+                budget
+                    .remaining()
+                    .min(provider_timeout(&resolved.provider, &state)),
             )
             .await
         } else {
@@ -1124,8 +1162,11 @@ async fn proxy_openai(
             }),
             routing_trace: routing_trace.clone(),
             codex_state: is_codex_oauth.then(|| state.clone()),
-            read_timeout: state.config.upstream_request_timeout,
-            first_read_deadline: time::Instant::now() + budget.remaining(),
+            read_timeout: provider_timeout(&resolved.provider, &state),
+            first_read_deadline: time::Instant::now()
+                + budget
+                    .remaining()
+                    .min(provider_timeout(&resolved.provider, &state)),
             client_duration_ms: None,
             terminal_observed: false,
             requested_service_tier: serde_json::from_slice::<Value>(&body_bytes)
@@ -1193,7 +1234,8 @@ async fn proxy_openai(
                 state
                     .config
                     .stream_preflight_timeout
-                    .min(budget.remaining()),
+                    .min(budget.remaining())
+                    .min(provider_timeout(&resolved.provider, &state)),
                 state.config.stream_preflight_max_bytes,
                 &mut observed_service_tier,
             )
@@ -1281,7 +1323,9 @@ async fn proxy_openai(
             }
 
             let collected = match time::timeout(
-                budget.remaining(),
+                budget
+                    .remaining()
+                    .min(provider_timeout(&resolved.provider, &state)),
                 Limited::new(body, state.config.max_request_bytes).collect(),
             )
             .await
@@ -1810,6 +1854,8 @@ impl RouteResolutionError {
 
 #[derive(Default, Serialize)]
 struct RoutingTrace {
+    model_route: Option<Value>,
+    authorized_provider_ids: Vec<i64>,
     authorized_groups: Vec<Value>,
     affinity: Option<Value>,
     candidates: Vec<Value>,
@@ -1921,6 +1967,8 @@ impl AttemptFailure {
 }
 
 pub(crate) struct UpstreamPlan {
+    pub sticky: bool,
+    pub(crate) route_policy: Option<Value>,
     pub(crate) runtime: crate::runtime_settings::RuntimeSettingsSnapshot,
     pub(crate) attempts: Vec<ResolvedUpstream>,
     pub(crate) transient_spill_provider_ids: HashSet<i64>,
@@ -1960,6 +2008,9 @@ pub(crate) fn apply_affinity_to_plan(
     existing: Option<AffinityBinding>,
     plan: &mut UpstreamPlan,
 ) -> Option<AffinityBinding> {
+    if !plan.sticky {
+        return None;
+    }
     let identity = identity?;
     if let Some(binding) = existing {
         if plan.prefer_target(binding)
@@ -2005,9 +2056,6 @@ struct SchedulableProvider {
     keys: Vec<UpstreamKey>,
     endpoints: Vec<crate::types::UpstreamEndpoint>,
     price: Option<PriceVersion>,
-    in_flight: u32,
-    max_concurrency: Option<i32>,
-    latency_ewma_ms: Option<i64>,
 }
 
 pub(crate) async fn build_upstream_plan(
@@ -2038,25 +2086,26 @@ pub(crate) async fn build_upstream_plan(
     let (routes, mut diagnostics) =
         collect_provider_routes(&snap, api_format, requested_model, allow_responses_via_chat)?;
 
-    let authorized_group_ids = api_key
-        .provider_groups
-        .iter()
-        .map(|group| group.id)
-        .collect::<HashSet<_>>();
+    let policy = snap
+        .route_policies
+        .get(requested_model)
+        .or_else(|| snap.route_policies.get("*"));
+    let affinity = if policy.is_none_or(|p| p.sticky) {
+        affinity
+    } else {
+        None
+    };
     let mut authorized_routes = Vec::new();
     for route in routes {
-        if provider_matching_groups(&snap, route.provider.id, &authorized_group_ids)
-            .next()
-            .is_some()
-        {
+        if api_key.allowed_provider_ids.contains(&route.provider.id) {
             authorized_routes.push(route);
         } else {
             diagnostics.reject(
                 Some(route.provider.id),
                 &route.upstream_model,
                 "authorization",
-                "provider_group_denied",
-                "API key is not assigned to a Provider Group containing this provider",
+                "provider_denied",
+                "API key does not allow this upstream",
             );
         }
     }
@@ -2265,12 +2314,15 @@ pub(crate) async fn build_upstream_plan(
             continue;
         }
 
-        let ranked_endpoints = selector::rank_endpoint_refs_with_health(
+        let mut ranked_endpoints = selector::rank_endpoint_refs_with_health(
             &endpoints,
             &state.endpoint_health,
             runtime.endpoint_selector_strategy,
             now_ms,
         );
+        if !provider.endpoint_failover {
+            ranked_endpoints.truncate(1);
+        }
         if ranked_endpoints.is_empty() {
             diagnostics.reject(
                 Some(provider.id),
@@ -2282,17 +2334,37 @@ pub(crate) async fn build_upstream_plan(
             continue;
         }
 
-        let effective_priority = effective_provider_priority(
-            &snap,
-            provider,
-            &authorized_group_ids,
-            route.route_priority,
+        let target = policy.and_then(|p| p.targets.iter().find(|t| t.provider_id == provider.id));
+        if policy.is_some_and(|p| p.model_name != "*" && target.is_none()) {
+            continue;
+        }
+        let effective_priority = if policy.is_some_and(|p| p.model_name != "*") {
+            target.map_or(100, |t| t.priority)
+        } else {
+            route
+                .route_priority
+                .unwrap_or_else(|| target.map_or(100, |t| t.priority))
+        };
+        let explicit_policy = policy.filter(|p| p.model_name != "*");
+        let weighted = explicit_policy.map_or_else(
+            || {
+                snap.model_aliases_by_name.get(requested_model).map_or_else(
+                    || policy.is_some_and(|p| p.mode == "weighted"),
+                    |a| a.mode == "weighted",
+                )
+            },
+            |p| p.mode == "weighted",
         );
-        let effective_weight = provider
-            .weight
-            .max(0)
-            .saturating_mul(route.route_weight.unwrap_or(1).max(0))
-            .max(1);
+        let effective_weight = if !weighted {
+            0
+        } else if explicit_policy.is_some() {
+            target.map_or(1, |t| t.weight).max(1)
+        } else {
+            route
+                .route_weight
+                .unwrap_or_else(|| target.map_or(1, |t| t.weight))
+                .max(1)
+        };
         let price =
             snap.find_price_for_request(provider.id, requested_model, &route.upstream_model);
         diagnostics.candidates.push(RouteCandidateTrace {
@@ -2311,9 +2383,6 @@ pub(crate) async fn build_upstream_plan(
             keys: ranked_keys,
             endpoints: ranked_endpoints.into_iter().cloned().collect(),
             price,
-            in_flight: provider_runtime.in_flight,
-            max_concurrency: provider_runtime.max_concurrency,
-            latency_ewma_ms: provider_runtime.latency_ewma_ms,
         });
     }
 
@@ -2351,7 +2420,13 @@ pub(crate) async fn build_upstream_plan(
         return Err(error);
     }
 
-    let attempts = build_scheduled_attempts(schedulable, affinity_provider_id);
+    let mut attempts = build_scheduled_attempts(schedulable, affinity_provider_id);
+    if policy.is_some_and(|p| !p.failover)
+        && let Some(first) = attempts.first()
+    {
+        let id = first.provider.id;
+        attempts.retain(|a| a.provider.id == id);
+    }
 
     if attempts.is_empty() {
         let mut error = RouteResolutionError::new(
@@ -2368,6 +2443,8 @@ pub(crate) async fn build_upstream_plan(
     }
 
     Ok(UpstreamPlan {
+        route_policy: policy.and_then(|p| serde_json::to_value(p).ok()),
+        sticky: policy.is_none_or(|p| p.sticky),
         runtime,
         attempts,
         transient_spill_provider_ids,
@@ -2407,6 +2484,48 @@ fn build_scheduled_attempts(
 }
 
 fn collect_provider_routes(
+    snap: &UpstreamSnapshot,
+    api_format: ApiFormat,
+    requested_model: &str,
+    allow_responses_via_chat: bool,
+) -> Result<(Vec<ProviderRoute>, RouteDiagnostics), RouteResolutionError> {
+    let (mut routes, mut diagnostics) =
+        collect_provider_routes_inner(snap, api_format, requested_model, allow_responses_via_chat)?;
+    if let Some(policy) = snap
+        .route_policies
+        .get(requested_model)
+        .or_else(|| snap.route_policies.get("*"))
+    {
+        routes.retain(|route| {
+            let allowed = policy
+                .targets
+                .iter()
+                .any(|t| t.provider_id == route.provider.id);
+            if !allowed {
+                diagnostics.reject(
+                    Some(route.provider.id),
+                    &route.upstream_model,
+                    "model_route",
+                    "model_route_excluded",
+                    "model route excludes this upstream",
+                );
+            }
+            allowed
+        });
+        if routes.is_empty() {
+            return Err(RouteResolutionError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upstream_configuration_error",
+                "model_route_unavailable",
+                "model route has no eligible targets",
+                diagnostics,
+            ));
+        }
+    }
+    Ok((routes, diagnostics))
+}
+
+fn collect_provider_routes_inner(
     snap: &UpstreamSnapshot,
     api_format: ApiFormat,
     requested_model: &str,
@@ -2774,42 +2893,6 @@ fn finish_route_collection(
     ))
 }
 
-fn provider_matching_groups<'a>(
-    snap: &'a UpstreamSnapshot,
-    provider_id: i64,
-    authorized_group_ids: &'a HashSet<i64>,
-) -> impl Iterator<Item = &'a crate::types::ProviderGroupMembership> {
-    snap.groups_by_provider
-        .get(&provider_id)
-        .into_iter()
-        .flatten()
-        .filter(|membership| authorized_group_ids.contains(&membership.group_id))
-}
-
-fn effective_provider_priority(
-    snap: &UpstreamSnapshot,
-    provider: &UpstreamProvider,
-    authorized_group_ids: &HashSet<i64>,
-    route_priority: Option<i32>,
-) -> i32 {
-    effective_priority_from_memberships(
-        provider,
-        provider_matching_groups(snap, provider.id, authorized_group_ids),
-        route_priority,
-    )
-}
-
-fn effective_priority_from_memberships<'a>(
-    provider: &UpstreamProvider,
-    memberships: impl Iterator<Item = &'a crate::types::ProviderGroupMembership>,
-    route_priority: Option<i32>,
-) -> i32 {
-    memberships
-        .filter_map(|membership| membership.priority_override)
-        .min()
-        .unwrap_or_else(|| route_priority.unwrap_or(provider.priority))
-}
-
 fn order_schedulable_providers(
     mut providers: Vec<SchedulableProvider>,
     affinity_provider_id: Option<i64>,
@@ -2839,14 +2922,12 @@ fn order_schedulable_providers(
             }
         }
         while !priority_group.is_empty() {
-            let first = weighted_sample_provider(&priority_group);
-            let second = weighted_sample_provider(&priority_group);
-            let selected =
-                if provider_load_is_lower(&priority_group[second], &priority_group[first]) {
-                    second
-                } else {
-                    first
-                };
+            if priority_group.iter().all(|p| p.effective_weight == 0) {
+                priority_group.sort_by_key(|p| p.route.provider.id);
+                ordered.append(&mut priority_group);
+                break;
+            }
+            let selected = weighted_sample_provider(&priority_group);
             ordered.push(priority_group.swap_remove(selected));
         }
         providers = remaining;
@@ -2873,30 +2954,17 @@ fn weighted_sample_provider(providers: &[SchedulableProvider]) -> usize {
     providers.len() - 1
 }
 
-fn provider_load_is_lower(left: &SchedulableProvider, right: &SchedulableProvider) -> bool {
-    let utilization = |provider: &SchedulableProvider| {
-        provider
-            .max_concurrency
-            .map_or(provider.in_flight as f64, |limit| {
-                provider.in_flight as f64 / limit.max(1) as f64
-            })
-    };
-    utilization(left)
-        .total_cmp(&utilization(right))
-        .then_with(|| {
-            left.latency_ewma_ms
-                .unwrap_or(i64::MAX)
-                .cmp(&right.latency_ewma_ms.unwrap_or(i64::MAX))
-        })
-        .then_with(|| left.route.provider.id.cmp(&right.route.provider.id))
-        .is_lt()
-}
-
 fn route_allows_provider_for_model(
     snap: &UpstreamSnapshot,
     upstream_model: &str,
     provider_id: i64,
 ) -> bool {
+    if let Some(policy) = snap.route_policies.get(upstream_model) {
+        return policy.targets.iter().any(|t| t.provider_id == provider_id);
+    }
+    if snap.route_policies.contains_key("*") {
+        return true;
+    }
     let Some(route) = snap.routes_by_model.get(upstream_model) else {
         return true;
     };
@@ -3028,6 +3096,12 @@ pub(crate) enum AttemptReservationError {
 }
 
 pub(crate) struct UpstreamAttemptReservation {
+    error_book: Option<(
+        std::sync::Arc<crate::provider_runtime::ProviderRuntimeBook>,
+        i64,
+        i64,
+        i64,
+    )>,
     capacity: Option<ProviderCapacityPermit>,
     provider: Option<ProviderAttemptGuard>,
     endpoint: Option<RuntimeHealthAttemptGuard>,
@@ -3061,6 +3135,17 @@ impl UpstreamAttemptReservation {
         scope: FailureScope,
         metrics: &crate::metrics::Metrics,
     ) {
+        if scope != FailureScope::Success
+            && let Some((book, provider, endpoint, key)) = &self.error_book
+        {
+            book.record_error(
+                *provider,
+                *endpoint,
+                *key,
+                format!("{scope:?}"),
+                outcome.status,
+            );
+        }
         let now_ms = util::now_ms();
         let error_type = outcome.error_type.unwrap_or("upstream_error");
         let error_message = outcome.error_message.unwrap_or("upstream attempt failed");
@@ -3213,6 +3298,12 @@ fn reserve_attempt_inner(
         return Err(AttemptReservationError::Quota);
     }
     Ok(UpstreamAttemptReservation {
+        error_book: Some((
+            state.provider_runtime.clone(),
+            resolved.provider.id,
+            resolved.endpoint.id,
+            resolved.key.id,
+        )),
         capacity,
         provider: Some(provider),
         endpoint: Some(endpoint),
@@ -4446,14 +4537,7 @@ pub(crate) fn ws_target_still_routed(
     provider_id: i64,
     upstream_model: &str,
 ) -> bool {
-    let groups = api_key
-        .provider_groups
-        .iter()
-        .map(|group| group.id)
-        .collect::<HashSet<_>>();
-    provider_matching_groups(snap, provider_id, &groups)
-        .next()
-        .is_some()
+    api_key.allowed_provider_ids.contains(&provider_id)
         && collect_provider_routes(snap, ApiFormat::Responses, model, false).is_ok_and(
             |(routes, _)| {
                 routes.iter().any(|route| {
@@ -4463,16 +4547,26 @@ pub(crate) fn ws_target_still_routed(
         )
 }
 
+pub(crate) fn provider_timeout(
+    provider: &UpstreamProvider,
+    state: &SharedState,
+) -> std::time::Duration {
+    provider
+        .request_timeout_ms
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(state.config.upstream_request_timeout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AttemptOutcome, FailureScope, OutcomeOrigin, ProtocolPlan, ProviderRoute, RouteDiagnostics,
         SchedulableProvider, SseParser, UpstreamAttemptReservation, UsageCaptureBuffer,
         build_scheduled_attempts, build_upstream_headers, classify_failure_scope,
-        classify_failure_scope_with_body, collect_provider_routes,
-        effective_priority_from_memberships, extract_usage_from_capture, parse_chat_usage,
-        parse_responses_usage, provider_protocol_plan, responses_websocket_upgrade_required,
-        should_retry_response_status, upstream_path_and_query,
+        classify_failure_scope_with_body, collect_provider_routes, extract_usage_from_capture,
+        parse_chat_usage, parse_responses_usage, provider_protocol_plan,
+        responses_websocket_upgrade_required, should_retry_response_status,
+        upstream_path_and_query,
     };
     use crate::cache::upstream_cache::{ProviderModelState, UpstreamSnapshot};
     use crate::health::RuntimeHealthBook;
@@ -5110,6 +5204,8 @@ mod tests {
 
     fn test_provider(id: i64, priority: i32, max_attempts: i32) -> UpstreamProvider {
         UpstreamProvider {
+            request_timeout_ms: None,
+            endpoint_failover: true,
             id,
             name: format!("provider-{id}"),
             provider_type: "openai".to_string(),
@@ -5143,6 +5239,7 @@ mod tests {
         let key_book = Arc::new(RuntimeHealthBook::new(1, 30_000));
         let now_ms = 1_000;
         let reservation = UpstreamAttemptReservation {
+            error_book: None,
             capacity: None,
             provider: Some(
                 provider_book
@@ -5240,9 +5337,6 @@ mod tests {
                 weight: 1,
             }],
             price: None,
-            in_flight: 0,
-            max_concurrency: None,
-            latency_ewma_ms: None,
         }
     }
 
@@ -5281,32 +5375,22 @@ mod tests {
     }
 
     #[test]
-    fn matching_group_priority_should_override_route_and_global_priority() {
-        let provider = test_provider(1, 100, 2);
-        let memberships = [
-            crate::types::ProviderGroupMembership {
-                group_id: 1,
-                group_name: "one".to_string(),
-                priority_override: Some(20),
-            },
-            crate::types::ProviderGroupMembership {
-                group_id: 2,
-                group_name: "two".to_string(),
-                priority_override: Some(5),
-            },
-        ];
-
+    fn ordered_model_route_ignores_legacy_provider_weight_and_priority() {
+        let mut a = schedulable_provider(2, 10);
+        let mut b = schedulable_provider(1, 10);
+        a.effective_weight = 0;
+        b.effective_weight = 0;
+        a.route.provider.priority = 0;
+        a.route.provider.weight = i32::MAX;
+        b.route.provider.priority = 1000;
+        b.route.provider.weight = 1;
+        let ordered = super::order_schedulable_providers(vec![a, b], None);
         assert_eq!(
-            effective_priority_from_memberships(&provider, memberships.iter(), Some(50)),
-            5
-        );
-        assert_eq!(
-            effective_priority_from_memberships(
-                &provider,
-                std::iter::empty::<&crate::types::ProviderGroupMembership>(),
-                Some(50),
-            ),
-            50
+            ordered
+                .iter()
+                .map(|p| p.route.provider.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 

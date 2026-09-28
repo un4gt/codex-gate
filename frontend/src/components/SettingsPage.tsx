@@ -4,7 +4,7 @@ import { StatusBadge } from '@/components/console/StatusBadge';
 import { Link } from 'react-router';
 import { useI18n } from '@/lib/i18n';
 import { updateRuntimeSetting } from '../lib/api';
-import { formatBytes, formatCommitShort, formatMs, formatRoutingStrategy, formatVersionLabel } from '../lib/format';
+import { formatBytes, formatCommitShort, formatMs, formatVersionLabel } from '../lib/format';
 import type { ConnectionSettings, RuntimeEnvPreviewResponse, RuntimeSettingView, RuntimeSettingsResponse, SystemConfigResponse } from '../lib/types';
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -15,8 +15,6 @@ import FormControl from "@mui/material/FormControl";
 import FormHelperText from "@mui/material/FormHelperText";
 import FormLabel from "@mui/material/FormLabel";
 import InputBase from "@mui/material/InputBase";
-import MenuItem from "@mui/material/MenuItem";
-import Select from "@mui/material/Select";
 import Typography from "@mui/material/Typography";
 interface SettingsPageProps {
   settings: ConnectionSettings;
@@ -119,7 +117,7 @@ export function SettingsPage(props: SettingsPageProps) {
       <SettingsSection title="运行设置" description="常用设置可直接生效，资源类设置按建议调整后重启。" open={openSection === 'runtime'} onToggle={() => toggleSection('runtime')}>
         <Box className="grid gap-4">
           <Box className="grid gap-3 md:grid-cols-2">
-            {(props.runtimeSettings?.settings ?? []).filter(setting => setting.key !== 'price_sync').map(setting => <Box key={`${setting.key}:${String(setting.value)}`} className="surface-tile" onSubmit={event => void submitRuntimeSetting(event, setting)} component="form">
+            {(props.runtimeSettings?.settings ?? []).filter(setting => setting.key !== 'price_sync' && setting.key !== 'endpoint_selector_strategy').map(setting => <Box key={`${setting.key}:${String(setting.value)}`} className="surface-tile" onSubmit={event => void submitRuntimeSetting(event, setting)} component="form">
                   <Box className="mb-3 flex items-center justify-between gap-2.5">
                     <Box>
                       <Box className="text-[0.8125rem] font-medium text-foreground">{setting.label}</Box>
@@ -158,7 +156,7 @@ export function SettingsPage(props: SettingsPageProps) {
 
       <SettingsSection title="分配设置" description="查看请求分配策略。" open={openSection === 'routing'} onToggle={() => toggleSection('routing')}>
         <Box className="grid gap-4 md:grid-cols-2">
-          <InfoTile label="分配策略" value={formatRoutingStrategy(props.systemConfig?.routing.endpoint_selector_strategy)} />
+          <InfoTile label="地址选择" value="健康地址按顺序选择" />
           <InfoTile label="返回用量" value={props.systemConfig?.routing.inject_include_usage ? '开启' : '已关闭'} />
           <InfoTile label="上游刷新" value={props.systemConfig ? formatMs(props.systemConfig.routing.upstream_cache_ttl_ms) : '—'} />
           <InfoTile label="密钥刷新" value={props.systemConfig ? formatMs(props.systemConfig.routing.api_key_cache_ttl_ms) : '—'} />
@@ -238,12 +236,6 @@ function RuntimeSettingControl(props: {
         <Checkbox name={`runtime_${setting.key}`} defaultChecked={setting.value} disabled={!setting.editable} />
         <Box component="span">{t(setting.value ? '开启' : '关闭')}</Box>
       </Box>;
-  }
-  if (setting.key === 'endpoint_selector_strategy') {
-    return <Select name={`runtime_${setting.key}`} defaultValue={String(setting.value ?? 'weighted')} disabled={!setting.editable}>
-        <MenuItem value="weighted">按权重</MenuItem>
-        <MenuItem value="latency">低延迟</MenuItem>
-      </Select>;
   }
   if (typeof setting.value === 'number') {
     return <InputBase name={`runtime_${setting.key}`} type="number" defaultValue={String(setting.value)} disabled={!setting.editable} />;

@@ -449,7 +449,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='little-gate-metering-') as tmp:
         port = free_port()
         db = Path(tmp) / 'gateway.sqlite'
-        env = {**os.environ, 'LISTEN_ADDR': f'127.0.0.1:{port}', 'DB_DSN': f'sqlite://{db}', 'ADMIN_TOKEN': ADMIN,
+        env = {**os.environ, 'LISTEN_ADDR': f'127.0.0.1:{port}', 'PRICE_SYNC_ENABLED': 'false', 'DB_DSN': f'sqlite://{db}', 'ADMIN_TOKEN': ADMIN,
                'MASTER_KEY': 'offline-regression-master', 'STATS_FLUSH_INTERVAL_MS': '100', 'UPSTREAM_REQUEST_TIMEOUT_MS': '45000',
                'UPSTREAM_CACHE_TTL_MS': '1', 'UPSTREAM_CACHE_STALE_GRACE_MS': '0', 'STATIC_DIR': str(ROOT / 'frontend/dist')}
         with open(Path(tmp) / 'gateway.log', 'w+') as log:

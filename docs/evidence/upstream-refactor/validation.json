@@ -1,0 +1,92 @@
+{
+  "checked_at_utc": "2026-09-28T06:22:20.077943+00:00",
+  "baseline_commit": "4be1df7",
+  "scope": "working tree; no commit, push, deployment or production database migration",
+  "checks": [
+    {
+      "command": "bash scripts/run-prek-checks.sh pre-push",
+      "status": "passed",
+      "evidence": "pre-push.txt",
+      "frontend_tests": 85,
+      "rust_tests": {
+        "passed": 262,
+        "ignored": 2,
+        "note": "Both PostgreSQL-only tests were also run separately on isolated empty databases."
+      }
+    },
+    {
+      "command": "cargo fmt --manifest-path backend/Cargo.toml --all -- --check",
+      "status": "passed"
+    },
+    {
+      "command": "cargo clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings",
+      "status": "passed",
+      "evidence": "clippy.txt"
+    },
+    {
+      "command": "python3 scripts/run_upstream_config_regression.py",
+      "database": "SQLite",
+      "status": "passed",
+      "evidence": "upstream-regression.json"
+    },
+    {
+      "command": "UPSTREAM_TEST_DSN=<isolated PostgreSQL DSN> python3 scripts/run_upstream_config_regression.py",
+      "database": "PostgreSQL 16",
+      "status": "passed",
+      "evidence": "postgres-api-regression.json"
+    },
+    {
+      "command": "cargo test --manifest-path backend/Cargo.toml --locked postgres_permission_migration_is_atomic_and_idempotent -- --ignored",
+      "database": "PostgreSQL 16",
+      "status": "passed",
+      "evidence": "postgres-migration.txt"
+    },
+    {
+      "command": "cargo test --manifest-path backend/Cargo.toml --locked postgres_service_tiers_migrate_legacy_rows_and_round_trip -- --ignored",
+      "database": "PostgreSQL 16",
+      "status": "passed",
+      "evidence": "postgres-legacy-migration.txt"
+    },
+    {
+      "command": "python3 scripts/run_regression.py --archive-compress",
+      "status": "passed",
+      "evidence": "routing-archive-regression.json"
+    },
+    {
+      "command": "python3 scripts/run_resilience_regression.py",
+      "status": "passed",
+      "evidence": "resilience-regression.json"
+    },
+    {
+      "command": "python3 scripts/run_oauth_metering_regression.py",
+      "status": "passed",
+      "evidence": "oauth-metering.txt"
+    },
+    {
+      "command": "node scripts/upstream-ui-smoke.cjs",
+      "status": "passed",
+      "evidence": "after-acceptance.json",
+      "viewports": [
+        "1920x1080",
+        "390x844"
+      ],
+      "console_errors": []
+    },
+    {
+      "command": "node scripts/console-ui-smoke.cjs",
+      "status": "passed",
+      "console_errors": []
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "explicitly_deferred": [
+    "random API-key selection",
+    "HTTP-to-upstream-WebSocket conversion",
+    "response rewrite engine",
+    "removal of one-version legacy management compatibility"
+  ],
+  "test_environment": "Synthetic credentials and local mock upstreams; pricing auto-download disabled in routing/metering regressions. Fixed light theme. Temporary gateway processes, baseline worktree and PostgreSQL container cleaned up."
+}

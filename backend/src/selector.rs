@@ -37,47 +37,16 @@ pub fn rank_key_refs_with_health<'a>(
 pub fn rank_endpoint_refs_with_health<'a>(
     items: &'a [&'a UpstreamEndpoint],
     health: &EndpointHealthBook,
-    strategy: EndpointSelectorStrategy,
+    _strategy: EndpointSelectorStrategy,
     now_ms: i64,
 ) -> Vec<&'a UpstreamEndpoint> {
-    let prioritized = order_by_priority_weight_refs(items, |endpoint| {
-        (endpoint.enabled, endpoint.priority, endpoint.weight)
-    });
-    if prioritized.is_empty() {
-        return Vec::new();
-    }
-
-    let mut ordered_endpoints = Vec::new();
-    let mut start = 0usize;
-    while start < prioritized.len() {
-        let priority = prioritized[start].priority;
-        let mut end = start + 1;
-        while end < prioritized.len() && prioritized[end].priority == priority {
-            end += 1;
-        }
-
-        let mut closed = Vec::new();
-        let mut half_open = Vec::new();
-
-        for endpoint in &prioritized[start..end] {
-            let snapshot = health.snapshot(endpoint.id, now_ms);
-            match snapshot.state {
-                CircuitState::Closed => closed.push(*endpoint),
-                CircuitState::HalfOpen if snapshot.available => half_open.push(*endpoint),
-                _ => {}
-            }
-        }
-
-        ordered_endpoints.extend(order_endpoints_by_strategy(
-            &closed, health, strategy, now_ms,
-        ));
-        ordered_endpoints.extend(order_endpoints_by_strategy(
-            &half_open, health, strategy, now_ms,
-        ));
-        start = end;
-    }
-
-    ordered_endpoints
+    let mut endpoints = items
+        .iter()
+        .copied()
+        .filter(|e| e.enabled && health.snapshot(e.id, now_ms).available)
+        .collect::<Vec<_>>();
+    endpoints.sort_by_key(|e| (e.priority, e.id));
+    endpoints
 }
 
 fn rank_by_priority_and_health<'a, T, F>(items: &'a [&'a T], describe: F) -> Vec<&'a T>
@@ -127,40 +96,6 @@ where
     out
 }
 
-fn order_endpoints_by_strategy<'a>(
-    items: &[&'a UpstreamEndpoint],
-    health: &EndpointHealthBook,
-    strategy: EndpointSelectorStrategy,
-    now_ms: i64,
-) -> Vec<&'a UpstreamEndpoint> {
-    match strategy {
-        EndpointSelectorStrategy::Weighted => {
-            weighted_order_refs(items, |endpoint| endpoint.weight)
-        }
-        EndpointSelectorStrategy::Latency => latency_order_refs(items, health, now_ms),
-    }
-}
-
-fn latency_order_refs<'a>(
-    items: &[&'a UpstreamEndpoint],
-    health: &EndpointHealthBook,
-    now_ms: i64,
-) -> Vec<&'a UpstreamEndpoint> {
-    let mut ordered = items.to_vec();
-    ordered.sort_by(|left, right| {
-        let left_snapshot = health.snapshot(left.id, now_ms);
-        let right_snapshot = health.snapshot(right.id, now_ms);
-
-        left_snapshot
-            .latency_ewma_ms
-            .unwrap_or(i64::MAX)
-            .cmp(&right_snapshot.latency_ewma_ms.unwrap_or(i64::MAX))
-            .then_with(|| right.weight.cmp(&left.weight))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    ordered
-}
-
 fn order_by_priority_weight_refs<'a, T, F>(items: &'a [&'a T], f: F) -> Vec<&'a T>
 where
     F: Fn(&T) -> (bool, i32, i32) + Copy,
@@ -200,17 +135,6 @@ where
     }
 
     out
-}
-
-fn weighted_order_refs<'a, T, F>(items: &[&'a T], weight: F) -> Vec<&'a T>
-where
-    F: Fn(&T) -> i32 + Copy,
-{
-    let pairs = items
-        .iter()
-        .map(|item| (*item, weight(item)))
-        .collect::<Vec<_>>();
-    weighted_order_pairs(pairs)
 }
 
 fn weighted_order_pairs<T>(mut items: Vec<(&T, i32)>) -> Vec<&T> {

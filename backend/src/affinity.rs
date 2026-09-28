@@ -37,11 +37,21 @@ impl Hash for AffinityKey {
 #[derive(Clone, Debug)]
 pub struct AffinityIdentity {
     key: AffinityKey,
+    routing_key: AffinityKey,
     pub source: AffinitySource,
     pub log_hash: String,
 }
 
 impl AffinityIdentity {
+    pub fn for_model(mut self, model: &str) -> Self {
+        let mut h = blake3::Hasher::new();
+        h.update(&self.key.0);
+        h.update(&[0]);
+        h.update(model.as_bytes());
+        self.routing_key = AffinityKey(*h.finalize().as_bytes());
+        self
+    }
+
     pub fn derived_prompt_cache_key(&self) -> String {
         format!("lg_{}", hex::encode(self.key.0))
     }
@@ -88,6 +98,9 @@ pub struct AffinityBook {
 }
 
 impl AffinityBook {
+    pub fn clear(&self) {
+        *self.state.write() = AffinityState::default();
+    }
     pub fn new(ttl: Duration, max_entries: usize) -> Self {
         Self {
             ttl_ms: ttl.as_millis().min(i64::MAX as u128) as i64,
@@ -100,13 +113,13 @@ impl AffinityBook {
         let mut state = self.state.write();
         if state
             .entries
-            .get(&identity.key)
+            .get(&identity.routing_key)
             .is_some_and(|entry| entry.expires_at_ms <= now_ms)
         {
-            state.entries.remove(&identity.key);
+            state.entries.remove(&identity.routing_key);
             return None;
         }
-        let entry = state.entries.get_mut(&identity.key)?;
+        let entry = state.entries.get_mut(&identity.routing_key)?;
         entry.expires_at_ms = now_ms.saturating_add(self.ttl_ms);
         entry.last_seen_ms = now_ms;
         Some(AffinityBinding {
@@ -138,12 +151,12 @@ impl AffinityBook {
         let mut state = self.state.write();
         if state
             .entries
-            .get(&identity.key)
+            .get(&identity.routing_key)
             .is_some_and(|entry| entry.expires_at_ms <= now_ms)
         {
-            state.entries.remove(&identity.key);
+            state.entries.remove(&identity.routing_key);
         }
-        if let Some(entry) = state.entries.get_mut(&identity.key) {
+        if let Some(entry) = state.entries.get_mut(&identity.routing_key) {
             entry.expires_at_ms = now_ms.saturating_add(self.ttl_ms);
             entry.last_seen_ms = now_ms;
             return AffinityBinding {
@@ -159,7 +172,7 @@ impl AffinityBook {
         state.next_generation = state.next_generation.wrapping_add(1).max(1);
         let generation = state.next_generation;
         state.entries.insert(
-            identity.key,
+            identity.routing_key,
             AffinityEntry {
                 provider_id,
                 upstream_key_id,
@@ -186,7 +199,7 @@ impl AffinityBook {
         now_ms: i64,
     ) -> bool {
         let mut state = self.state.write();
-        let Some(entry) = state.entries.get_mut(&identity.key) else {
+        let Some(entry) = state.entries.get_mut(&identity.routing_key) else {
             return false;
         };
         if entry.provider_id != binding.provider_id || entry.generation != binding.generation {
@@ -195,7 +208,7 @@ impl AffinityBook {
         entry.confirmed = true;
         entry.expires_at_ms = now_ms.saturating_add(self.ttl_ms);
         entry.last_seen_ms = now_ms;
-        state.avoided.remove(&identity.key);
+        state.avoided.remove(&identity.routing_key);
         true
     }
 
@@ -217,13 +230,13 @@ impl AffinityBook {
         now_ms: i64,
     ) -> AffinityBinding {
         let mut state = self.state.write();
-        if !state.entries.contains_key(&identity.key) {
+        if !state.entries.contains_key(&identity.routing_key) {
             ensure_entry_capacity(&mut state, self.max_entries, now_ms);
         }
         state.next_generation = state.next_generation.wrapping_add(1).max(1);
         let generation = state.next_generation;
         state.entries.insert(
-            identity.key,
+            identity.routing_key,
             AffinityEntry {
                 provider_id,
                 upstream_key_id,
@@ -234,7 +247,7 @@ impl AffinityBook {
                 last_seen_ms: now_ms,
             },
         );
-        state.avoided.remove(&identity.key);
+        state.avoided.remove(&identity.routing_key);
         AffinityBinding {
             provider_id,
             upstream_key_id,
@@ -251,7 +264,7 @@ impl AffinityBook {
         now_ms: i64,
     ) -> bool {
         let mut state = self.state.write();
-        let Some(entry) = state.entries.get_mut(&identity.key) else {
+        let Some(entry) = state.entries.get_mut(&identity.routing_key) else {
             return false;
         };
         if entry.provider_id != provider_id {
@@ -270,7 +283,7 @@ impl AffinityBook {
         now_ms: i64,
     ) -> bool {
         let mut state = self.state.write();
-        let Some(entry) = state.entries.get_mut(&identity.key) else {
+        let Some(entry) = state.entries.get_mut(&identity.routing_key) else {
             return false;
         };
         if entry.provider_id != binding.provider_id
@@ -290,10 +303,10 @@ impl AffinityBook {
         let mut state = self.state.write();
         let matches = state
             .entries
-            .get(&identity.key)
+            .get(&identity.routing_key)
             .is_some_and(|entry| entry.provider_id == provider_id);
         if matches {
-            state.entries.remove(&identity.key);
+            state.entries.remove(&identity.routing_key);
         }
         matches
     }
@@ -309,16 +322,16 @@ impl AffinityBook {
         let mut state = self.state.write();
         if state
             .entries
-            .get(&identity.key)
+            .get(&identity.routing_key)
             .is_some_and(|entry| entry.provider_id == provider_id)
         {
-            state.entries.remove(&identity.key);
+            state.entries.remove(&identity.routing_key);
         }
-        if !state.avoided.contains_key(&identity.key) {
+        if !state.avoided.contains_key(&identity.routing_key) {
             ensure_avoid_capacity(&mut state, self.max_entries, now_ms);
         }
         state.avoided.insert(
-            identity.key,
+            identity.routing_key,
             AvoidEntry {
                 provider_id,
                 until_ms: now_ms.saturating_add(avoid_ms),
@@ -334,11 +347,11 @@ impl AffinityBook {
         now_ms: i64,
     ) -> bool {
         let mut state = self.state.write();
-        let Some(entry) = state.avoided.get_mut(&identity.key) else {
+        let Some(entry) = state.avoided.get_mut(&identity.routing_key) else {
             return false;
         };
         if entry.until_ms <= now_ms {
-            state.avoided.remove(&identity.key);
+            state.avoided.remove(&identity.routing_key);
             return false;
         }
         entry.last_seen_ms = now_ms;
@@ -464,6 +477,7 @@ fn build_identity(api_key_id: i64, session_id: &str, source: AffinitySource) -> 
     let hash = *hasher.finalize().as_bytes();
     AffinityIdentity {
         key: AffinityKey(hash),
+        routing_key: AffinityKey(hash),
         source,
         log_hash: hex::encode(&hash[..6]),
     }
@@ -639,5 +653,25 @@ mod tests {
         }
 
         assert_eq!(book.state.read().avoided.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod model_scope_tests {
+    use super::*;
+    #[test]
+    fn model_bindings_are_isolated_without_changing_prompt_cache_identity() {
+        let base = build_identity(1, "session", AffinitySource::SessionId);
+        let first = base.clone().for_model("a");
+        let second = base.clone().for_model("b");
+        assert_eq!(
+            first.derived_prompt_cache_key(),
+            base.derived_prompt_cache_key()
+        );
+        let book = AffinityBook::new(Duration::from_secs(60), 100);
+        let binding = book.claim(&first, 11, 1000);
+        book.confirm(&first, binding, 1000);
+        assert_eq!(book.lookup(&first, 1001).unwrap().provider_id, 11);
+        assert!(book.lookup(&second, 1001).is_none());
     }
 }

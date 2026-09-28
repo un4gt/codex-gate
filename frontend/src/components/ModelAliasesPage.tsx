@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Plus, Search, Trash2 } from 'lucide-react';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
@@ -28,6 +28,8 @@ import { useI18n } from '@/lib/i18n';
 import { paginate, useListQuery } from '@/lib/useListQuery';
 import type { ConnectionSettings, ModelAlias, ModelAliasTarget, ProviderWorkspace } from '@/lib/types';
 
+const ModelRoutesEditor = lazy(() => import('./ModelRoutesEditor'));
+
 interface ModelAliasesPageProps {
   settings: ConnectionSettings;
   providers: ProviderWorkspace[];
@@ -49,6 +51,7 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
     .sort((a, b) => a.name.localeCompare(b.name));
   const close = () => update({ alias_id: null }, true);
   return <Box sx={{ display: 'grid', gap: 2, minWidth: 0 }}>
+    <Suspense fallback={<CircularProgress size={24}/>}><ModelRoutesEditor settings={props.settings} providers={props.providers}/></Suspense>
     <FilterBar primary={<InputBase value={search} placeholder={t('搜索路由别名')} inputProps={{ 'aria-label': t('搜索路由别名') }} onChange={event => filter('q', event.target.value, true)} sx={{ gridColumn: '1 / -1' }} startAdornment={<Search size={16} />} />} actions={<Button disabled={props.loading || !!props.error} onClick={() => update({ alias_id: 'new' })}><Plus size={16} />{t('新增路由别名')}</Button>} />
     <Typography variant="body2" color="text.secondary">{t('通过一个调用名称，按顺序或权重选择多个上游模型。显示名称在模型详情中管理。')}</Typography>
     {providerId ? <Alert severity="info" action={<Button onClick={() => filter('provider_id', '')}>{t('清除筛选')}</Button>}>{t('只显示包含所选上游的路由别名。')}</Alert> : null}

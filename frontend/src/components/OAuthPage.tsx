@@ -15,18 +15,16 @@ import Typography from '@mui/material/Typography';
 import { CodexOAuthLoginDialog, CodexOAuthPanel } from '@/components/CodexOAuthPanel';
 import { EmptyState } from '@/components/console/EmptyState';
 import { StatusBadge } from '@/components/console/StatusBadge';
-import { createEndpoint, createProvider, deleteProvider } from '@/lib/api';
+import { createProvider, deleteProvider, loadUpstreamConfig } from '@/lib/api';
 import { useI18n } from '@/lib/i18n';
 import type { ConnectionSettings, CreateProviderInput, ProviderWorkspace } from '@/lib/types';
 
 const CODEX_PROVIDER_TYPE = 'openai_codex_oauth';
 const CODEX_DEFAULT_BASE_URL = 'https://chatgpt.com/backend-api/codex';
-const DEFAULT_CODEX_PROVIDER: CreateProviderInput = {
+const DEFAULT_CODEX_PROVIDER: Omit<CreateProviderInput,'priority'|'weight'> = {
   name: 'OpenAI Codex OAuth',
   provider_type: CODEX_PROVIDER_TYPE,
   enabled: true,
-  priority: 100,
-  weight: 1,
   supports_include_usage: true,
   websocket_enabled: true,
   beta_features: ['responses-http-to-ws'],
@@ -76,6 +74,8 @@ export function OAuthPage(props: OAuthPageProps) {
     setSearchParams(next, { replace: true });
   }, [searchParams, selected, setSearchParams]);
 
+  const [details,setDetails]=useState<ProviderWorkspace|null>(null);
+  useEffect(()=>{let active=true;setDetails(null);if(selected)void loadUpstreamConfig(props.settings,selected.provider.id).then(v=>{if(active)setDetails(v);}).catch(e=>{if(active)setCreateError(String(e));});return()=>{active=false;};},[selected,props.settings]);
   const selectProvider = (providerId: number) => {
     const next = new URLSearchParams(searchParams);
     next.set('provider', String(providerId));
@@ -87,15 +87,8 @@ export function OAuthPage(props: OAuthPageProps) {
     setCreateError(null);
     let providerId: number | null = null;
     try {
-      const provider = await createProvider(props.settings, DEFAULT_CODEX_PROVIDER);
+      const provider = await createProvider(props.settings, {...DEFAULT_CODEX_PROVIDER,endpoints:[{name:"Codex",base_url:CODEX_DEFAULT_BASE_URL,enabled:true,priority:100,weight:1}]});
       providerId = provider.id;
-      await createEndpoint(props.settings, provider.id, {
-        name: 'Codex',
-        base_url: CODEX_DEFAULT_BASE_URL,
-        enabled: true,
-        priority: 100,
-        weight: 1,
-      });
       await props.onRefresh(t('Codex OAuth 上游已创建。'));
       selectProvider(provider.id);
       loginSequenceRef.current += 1;
@@ -179,12 +172,12 @@ export function OAuthPage(props: OAuthPageProps) {
             ) : null}
           </Box>
 
-          <CodexOAuthPanel
+          {details ? <CodexOAuthPanel
             settings={props.settings}
-            item={selected}
+            item={details}
             onRefresh={props.onRefresh}
             onMessage={props.onMessage}
-          />
+          /> : <LinearProgress/>}
         </Box>
       ) : null}
 

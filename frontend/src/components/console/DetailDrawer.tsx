@@ -12,6 +12,7 @@ interface DetailDrawerProps {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  subheader?: ReactNode;
 }
 export function DetailDrawer(props: DetailDrawerProps) {
   const { t } = useI18n();
@@ -51,6 +52,7 @@ export function DetailDrawer(props: DetailDrawerProps) {
           <X className="size-4" />
         </Button>
       </Box>
+      {props.subheader}
       <Box className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-6">{props.children}</Box>
       {props.footer ? <Box className="border-t border-border bg-background px-5 py-4 sm:px-6">{props.footer}</Box> : null}
     </Drawer>

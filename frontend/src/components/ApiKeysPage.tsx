@@ -10,7 +10,7 @@ import { StatusBadge } from '@/components/console/StatusBadge';
 import { useI18n } from '@/lib/i18n';
 import { createApiKey, deleteApiKey, updateApiKey } from '../lib/api';
 import { formatCompactInteger, formatDateTime, formatDateTimeLocalInput, parseDateTimeLocalInput } from '../lib/format';
-import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, ProviderGroup, UpdateApiKeyInput } from '../lib/types';
+import type { ApiKeyWorkspace, ConnectionSettings, CreateApiKeyInput, CreatedApiKey, ProviderWorkspace, UpdateApiKeyInput } from '../lib/types';
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -33,7 +33,7 @@ import Typography from "@mui/material/Typography";
 interface ApiKeysPageProps {
   settings: ConnectionSettings;
   items: ApiKeyWorkspace[];
-  groups: ProviderGroup[];
+  providers: ProviderWorkspace[];
   onRefresh: (successMessage?: string) => Promise<void>;
   onMessage: (message: string) => void;
 }
@@ -75,13 +75,13 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
   const openCreateDrawer = () => {
     setCreated(null);
     setFormError(null);
-    setCreateGroupIds(props.groups.filter(group => group.is_default).map(group => group.id));
+    setCreateGroupIds([]);
     setCreateOpen(true);
   };
   const openDetails = (item: ApiKeyWorkspace) => {
     setFormError(null);
     setSelectedId(item.apiKey.id);
-    setEditGroupIds(item.apiKey.provider_groups.map(group => group.id));
+    setEditGroupIds(item.apiKey.allowed_provider_ids ?? []);
   };
   const closeCreateDrawer = () => {
     setCreateOpen(false);
@@ -103,10 +103,10 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       enabled: readBool(formData, 'enabled'),
       log_enabled: readBool(formData, 'log_enabled'),
       expires_at_ms: parseDateTimeLocalInput(readString(formData, 'expires_at')),
-      provider_group_ids: createGroupIds
+      allowed_provider_ids: createGroupIds
     };
-    if (!payload.name || payload.provider_group_ids.length === 0) {
-      props.onMessage(!payload.name ? '密钥名称不能为空。' : '请至少选择一个调度组。');
+    if (!payload.name) {
+      props.onMessage('密钥名称不能为空。');
       return;
     }
     setBusy('create');
@@ -132,10 +132,10 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
       enabled: readBool(formData, 'enabled'),
       log_enabled: readBool(formData, 'log_enabled'),
       expires_at_ms: parseDateTimeLocalInput(readString(formData, 'expires_at')),
-      provider_group_ids: editGroupIds
+      allowed_provider_ids: editGroupIds
     };
-    if (!payload.name || editGroupIds.length === 0) {
-      props.onMessage(!payload.name ? '密钥名称不能为空。' : '请至少选择一个调度组。');
+    if (!payload.name) {
+      props.onMessage('密钥名称不能为空。');
       return;
     }
     setBusy(`update-${current.apiKey.id}`);
@@ -216,7 +216,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 <TableRow>
                   <TableCell>{t("密钥")}</TableCell>
                   <TableCell>{t("状态")}</TableCell>
-                  <TableCell>{t("调度组")}</TableCell>
+                  <TableCell>{t("允许使用的上游")}</TableCell>
                   <TableCell>{t("日志")}</TableCell>
                   <TableCell>{t("到期")}</TableCell>
                   <TableCell className="text-right">{t("操作")}</TableCell>
@@ -236,7 +236,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                           <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
-                          {item.apiKey.provider_groups.map(group => group.name).join(', ') || '—'}
+                          {props.providers.filter(p => item.apiKey.allowed_provider_ids?.includes(p.provider.id)).map(p => p.provider.name).join(', ') || '—'}
                         </TableCell>
                         <TableCell>{t(item.apiKey.log_enabled ? '开启' : '关闭')}</TableCell>
                         <TableCell>{item.apiKey.expires_at_ms ? formatDateTime(item.apiKey.expires_at_ms) : t('不过期')}</TableCell>
@@ -274,8 +274,8 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
               <InputBase name="expires_at" type="datetime-local" />
               <FormHelperText>{t("留空表示不过期。")}</FormHelperText>
             </FormControl>
-            <Box component="details"><Box component="summary" sx={{ cursor: 'pointer', mb: 1 }}>{t('高级：调度组权限')}</Box><FormControl>
-              <FormLabel>{t('调度组')}</FormLabel>
+            <Box><FormControl fullWidth>
+              <FormLabel>{t('允许使用的上游')}</FormLabel>
               <Select
                 multiple
                 value={createGroupIds}
@@ -287,17 +287,17 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       .filter(Number.isFinite),
                   );
                 }}
-                renderValue={selectedIds => props.groups
+                renderValue={selectedIds => props.providers.map(item => item.provider)
                   .filter(group => selectedIds.includes(group.id))
                   .map(group => group.name)
                   .join(', ')}
               >
-                {props.groups.map(group => <MenuItem key={group.id} value={group.id}>
+                {props.providers.map(item => item.provider).map(group => <MenuItem key={group.id} value={group.id}>
                     <Checkbox checked={createGroupIds.includes(group.id)} />
                     <ListItemText primary={group.name} />
                   </MenuItem>)}
               </Select>
-              <FormHelperText>{t('仅路由到所选组中的上游。')}</FormHelperText>
+              <FormHelperText>{t('仅允许所选上游；空列表表示无权限，新上游不会自动加入。')}</FormHelperText>
             </FormControl></Box>
           </Box>
           <Box className="grid gap-3 md:grid-cols-2">
@@ -359,8 +359,8 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       <FormLabel>{t("到期时间")}</FormLabel>
                       <InputBase name="expires_at" type="datetime-local" defaultValue={formatDateTimeLocalInput(data.apiKey.expires_at_ms)} />
                     </FormControl>
-                    <Box component="details"><Box component="summary" sx={{ cursor: 'pointer', mb: 1 }}>{t('高级：调度组权限')}</Box><FormControl>
-                      <FormLabel>{t('调度组')}</FormLabel>
+                    <Box><FormControl fullWidth>
+                      <FormLabel>{t('允许使用的上游')}</FormLabel>
                       <Select
                         multiple
                         value={editGroupIds}
@@ -372,12 +372,12 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                               .filter(Number.isFinite),
                           );
                         }}
-                        renderValue={selectedIds => props.groups
+                        renderValue={selectedIds => props.providers.map(item => item.provider)
                           .filter(group => selectedIds.includes(group.id))
                           .map(group => group.name)
                           .join(', ')}
                       >
-                        {props.groups.map(group => <MenuItem key={group.id} value={group.id}>
+                        {props.providers.map(item => item.provider).map(group => <MenuItem key={group.id} value={group.id}>
                             <Checkbox checked={editGroupIds.includes(group.id)} />
                             <ListItemText primary={group.name} />
                           </MenuItem>)}

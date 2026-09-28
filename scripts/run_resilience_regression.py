@@ -385,7 +385,7 @@ def main():
     threading.Thread(target=mock.serve_forever, daemon=True).start()
     port = free_port()
     with tempfile.TemporaryDirectory(prefix='little-gate-resilience-') as directory:
-        env = os.environ | {'ADMIN_TOKEN': ADMIN, 'MASTER_KEY': ADMIN, 'DB_DSN': f'sqlite://{directory}/test.sqlite', 'LISTEN_ADDR': f'127.0.0.1:{port}', 'STATS_FLUSH_INTERVAL_MS': '100', 'UPSTREAM_REQUEST_TIMEOUT_MS': '10000', 'REQUEST_LOG_ARCHIVE_ENABLED': 'false'}
+        env = os.environ | {'ADMIN_TOKEN': ADMIN, 'MASTER_KEY': ADMIN, 'PRICE_SYNC_ENABLED': 'false', 'DB_DSN': f'sqlite://{directory}/test.sqlite', 'LISTEN_ADDR': f'127.0.0.1:{port}', 'STATS_FLUSH_INTERVAL_MS': '100', 'UPSTREAM_REQUEST_TIMEOUT_MS': '10000', 'REQUEST_LOG_ARCHIVE_ENABLED': 'false'}
         with open(Path(directory) / 'gateway.log', 'w+') as log:
             process = subprocess.Popen([str(ROOT / 'backend/target/debug/backend')], cwd=ROOT, env=env, stdout=log, stderr=log)
             try:

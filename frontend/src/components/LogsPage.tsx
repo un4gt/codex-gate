@@ -720,9 +720,10 @@ export function LogsPage(props: LogsPageProps) {
                     </Box>
                     <CardContent className="border-t border-border/40 p-0">
                       <Box className="grid gap-1.5 border-b border-border/40 px-4 py-3 text-[0.6875rem] text-muted-foreground md:grid-cols-2">
-                        <Box>{t('授权组：{{groups}}', {
-                          groups: row.routing_trace.authorized_groups.map(group => group.name).join(', ') || '—'
-                        })}</Box>
+                        <Box>{row.routing_trace.authorized_provider_ids
+                          ? t('允许使用的上游：{{upstreams}}', { upstreams: row.routing_trace.authorized_provider_ids.map(id => providerNameMap.get(id) ?? `#${id}`).join(', ') || '—' })
+                          : t('授权组：{{groups}}', { groups: row.routing_trace.authorized_groups.map(group => group.name).join(', ') || '—' })}</Box>
+                        {row.routing_trace.model_route ? <Box>{t('模型路由')}：{row.routing_trace.model_route.model_name === '*' ? t('默认路由') : row.routing_trace.model_route.model_name} · {t(row.routing_trace.model_route.mode === 'weighted' ? '同优先级内加权' : '按顺序')}</Box> : null}
                         <Box>{row.routing_trace.affinity
                           ? t('亲和：{{state}} · {{hash}}', {
                               state: row.routing_trace.affinity.hit ? '命中' : '新建',

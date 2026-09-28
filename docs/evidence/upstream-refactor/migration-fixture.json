@@ -1,0 +1,89 @@
+{
+  "created_at_ms": 1790576355232,
+  "endpoint_selection": "healthy endpoints ordered by priority, id; weighted/latency deprecated",
+  "legacy_alias_targets": [
+    {
+      "alias_id": 1,
+      "priority": 100,
+      "provider_id": 1,
+      "target_id": 1,
+      "weight": 4
+    }
+  ],
+  "legacy_default_route": {
+    "failover": true,
+    "mode": "weighted",
+    "model_name": "*",
+    "sticky": true,
+    "targets": [
+      {
+        "priority": 100,
+        "provider_id": 1,
+        "weight": 3
+      },
+      {
+        "priority": 200,
+        "provider_id": 2,
+        "weight": 2
+      }
+    ]
+  },
+  "legacy_endpoint_selector_setting": null,
+  "model_inventory_at_migration": [],
+  "ordering_changes": [
+    {
+      "api_key_id": 1,
+      "candidates": [
+        {
+          "models": [],
+          "new_priority": 100,
+          "old_priority": 2,
+          "provider_id": 1
+        },
+        {
+          "models": [],
+          "new_priority": 200,
+          "old_priority": 200,
+          "provider_id": 2
+        }
+      ],
+      "model_route": "*",
+      "new_priority_order": [
+        1,
+        2
+      ],
+      "old_priority_order": [
+        1,
+        2
+      ]
+    },
+    {
+      "api_key_id": 1,
+      "candidates": [
+        {
+          "models": [],
+          "new_priority": 100,
+          "old_priority": 2,
+          "provider_id": 1
+        }
+      ],
+      "model_route": "explicit-model",
+      "new_priority_order": [
+        1
+      ],
+      "old_priority_order": [
+        1
+      ]
+    }
+  ],
+  "removed_priority_overrides": [
+    {
+      "api_key_id": 1,
+      "old_priority": 2,
+      "provider_id": 1
+    }
+  ],
+  "retry_limit": "legacy values retained; effective maximum is 3 attempts",
+  "rollback": "restore the pre-upgrade database backup",
+  "version": 1
+}

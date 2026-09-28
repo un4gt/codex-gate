@@ -12,10 +12,13 @@ pub struct ApiKeyAuth {
     pub log_enabled: bool,
     pub name: String,
     pub provider_groups: Vec<ProviderGroupRef>,
+    pub allowed_provider_ids: Vec<i64>,
 }
 
 #[derive(Clone, Debug)]
 pub struct UpstreamProvider {
+    pub request_timeout_ms: Option<u64>,
+    pub endpoint_failover: bool,
     pub id: i64,
     pub name: String,
     pub provider_type: String,

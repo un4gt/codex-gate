@@ -1,0 +1,16 @@
+{
+  "http": {
+    "attempt_limit": 3,
+    "retry_gaps_seconds": [
+      0.552,
+      1.018
+    ],
+    "cooldown_seconds": 30,
+    "retry_after_seconds": 3600
+  },
+  "websocket": "passed",
+  "oauth_replay_budget": "passed",
+  "disconnect": "passed",
+  "atomic_configuration": "passed",
+  "attempt_logs": "passed"
+}

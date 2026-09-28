@@ -1,6 +1,7 @@
 use super::*;
 
 pub struct ProviderBundle<'a> {
+    pub legacy_route_weighted: bool,
     pub provider: &'a UpstreamProvider,
     pub groups: &'a [(i64, Option<i32>)],
     pub endpoints: &'a [UpstreamEndpoint],
@@ -16,6 +17,8 @@ mod tests {
         let db = Database::connect("sqlite::memory:", 1).await.unwrap();
         db.migrate().await.unwrap();
         let provider = UpstreamProvider {
+            request_timeout_ms: None,
+            endpoint_failover: true,
             id: 0,
             name: "test".into(),
             provider_type: "openai".into(),
@@ -56,6 +59,7 @@ mod tests {
         let failed = db
             .insert_provider_bundle(
                 ProviderBundle {
+                    legacy_route_weighted: false,
                     provider: &provider,
                     groups: &[(group, None), (group, None)],
                     endpoints: &endpoints,
@@ -73,6 +77,7 @@ mod tests {
         let created = db
             .insert_provider_bundle(
                 ProviderBundle {
+                    legacy_route_weighted: false,
                     provider: &provider,
                     groups: &[(group, None)],
                     endpoints: &endpoints,
@@ -169,6 +174,9 @@ impl Database {
                 });
                 query.push(" RETURNING id");
                 let id: i64 = query.build_query_scalar().fetch_one(&mut *tx).await?;
+                let mut options=QueryBuilder::<$db>::new("INSERT INTO upstream_request_options (provider_id,timeout_ms,endpoint_failover) ");
+                options.push_values([()],|mut row,()| { row.push_bind(id).push_bind(p.request_timeout_ms.map(|n|n as i64)).push_bind(p.endpoint_failover); });
+                options.build().execute(&mut *tx).await?;
                 for (group_id, priority) in bundle.groups {
                     let mut query = QueryBuilder::<$db>::new("INSERT INTO provider_group_providers (group_id, provider_id, priority_override, created_at_ms, updated_at_ms) ");
                     query.push_values([()], |mut row, ()| {
@@ -196,6 +204,25 @@ impl Database {
                     query.push(" RETURNING id");
                     key_ids.push(query.build_query_scalar().fetch_one(&mut *tx).await?);
                 }
+                // A newly created upstream must enter the default route and legacy authorization
+                // in the same commit as its connection and credentials.
+                let route_query = if stringify!($db) == "Postgres" {
+                    "SELECT data_json FROM model_route_policies WHERE model_name='*' FOR UPDATE"
+                } else {
+                    "SELECT data_json FROM model_route_policies WHERE model_name='*'"
+                };
+                let mut query = QueryBuilder::<$db>::new(route_query);
+                let data: String = query.build_query_scalar().fetch_one(&mut *tx).await?;
+                let mut policy: super::upstream_config::RoutePolicy = serde_json::from_str(&data).map_err(|e|DbError::new(e.to_string()))?;
+                policy.targets.push(super::upstream_config::RouteTarget { provider_id:id, priority:p.priority, weight:p.weight });
+                if bundle.legacy_route_weighted { policy.mode="weighted".into(); }
+                let data=serde_json::to_string(&policy).map_err(|e|DbError::new(e.to_string()))?;
+                let mut query=QueryBuilder::<$db>::new("UPDATE model_route_policies SET data_json=");
+                query.push_bind(data).push(" WHERE model_name='*'");
+                query.build().execute(&mut *tx).await?;
+                let mut query=QueryBuilder::<$db>::new("INSERT INTO api_key_allowed_providers (api_key_id,provider_id) SELECT DISTINCT k.api_key_id,p.provider_id FROM provider_group_api_keys k JOIN provider_group_providers p ON p.group_id=k.group_id JOIN api_key_authorization a ON a.api_key_id=k.api_key_id WHERE a.direct=FALSE AND p.provider_id=");
+                query.push_bind(id).push(" ON CONFLICT(api_key_id,provider_id) DO NOTHING");
+                query.build().execute(&mut *tx).await?;
                 tx.commit().await?;
                 Ok(CreatedProviderBundle { id, endpoint_ids, key_ids })
             }};

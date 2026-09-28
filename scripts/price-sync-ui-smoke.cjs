@@ -17,7 +17,7 @@ try {
  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
  await page.route('**/api/**',async route=>{const path=new URL(route.request().url()).pathname;let body=[];
  if(path==='/api/v1/system/config')body={build:{version:'test'}};
- else if(path==='/api/v1/providers')body=[provider];
+ else if(path==='/api/v1/upstreams')body=[{provider,endpoints:[],keys:[]}];
  else if(path==='/api/v1/provider-models')body=models;
  else if(path==='/api/v1/prices')body=prices;
  else if(path==='/api/v1/console-preferences')body={model_column_widths:{},log_column_widths:{},log_visible_columns:['time']};

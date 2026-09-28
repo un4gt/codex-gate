@@ -17,6 +17,7 @@ use crate::types::{
 #[derive(Clone, Debug, Default)]
 pub struct UpstreamSnapshot {
     pub providers: Vec<UpstreamProvider>,
+    pub route_policies: HashMap<String, crate::db::upstream_config::RoutePolicy>,
     pub keys_by_provider: HashMap<i64, Vec<UpstreamKey>>,
     pub endpoints_by_provider: HashMap<i64, Vec<UpstreamEndpoint>>,
     pub groups_by_provider: HashMap<i64, Vec<ProviderGroupMembership>>,
@@ -461,6 +462,7 @@ impl UpstreamCache {
         }
 
         let mut snapshot = UpstreamSnapshot {
+            route_policies: db.route_policies().await.map_err(|e| e.to_string())?,
             providers,
             keys_by_provider,
             endpoints_by_provider,
@@ -477,6 +479,13 @@ impl UpstreamCache {
             provider_prices_by_model,
             global_prices_by_model,
         };
+        let options = db.request_options().await.map_err(|e| e.to_string())?;
+        for provider in &mut snapshot.providers {
+            if let Some((timeout, failover)) = options.get(&provider.id) {
+                provider.request_timeout_ms = *timeout;
+                provider.endpoint_failover = *failover;
+            }
+        }
         snapshot.rebuild_model_registry_ids();
         Ok(Arc::new(snapshot))
     }
@@ -511,6 +520,7 @@ mod tests {
         let global_prices_by_model = HashMap::from([("gateway-alias".to_string(), price(3))]);
 
         UpstreamSnapshot {
+            route_policies: HashMap::new(),
             providers: Vec::new(),
             keys_by_provider: HashMap::new(),
             endpoints_by_provider: HashMap::new(),
@@ -531,6 +541,8 @@ mod tests {
 
     fn provider(id: i64, enabled: bool) -> UpstreamProvider {
         UpstreamProvider {
+            request_timeout_ms: None,
+            endpoint_failover: true,
             id,
             name: format!("provider-{id}"),
             provider_type: "openai_compatible".to_string(),

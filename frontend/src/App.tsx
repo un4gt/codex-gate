@@ -3,7 +3,7 @@ import { RestrictToVerticalAxis } from '@dnd-kit/abstract/modifiers';
 import { KeyboardSensor, PointerActivationConstraints, PointerSensor } from '@dnd-kit/dom';
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
-import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router';
+import { createBrowserRouter, RouterProvider, Link, Navigate, Route, Routes, useLocation } from 'react-router';
 import { Activity, ArrowRight, Bell, Boxes, Check, Copy, Cpu, Database, Eye, EyeOff, Fingerprint, GripVertical, KeyRound, ListFilter, LogOut, Menu, RefreshCw, Server, Settings, ShieldCheck, SquareTerminal, Timer, Wallet, X, Zap, type LucideIcon } from "lucide-react";
 import { PageHeader } from '@/components/console/PageHeader';
 import { StatsGrid, type StatItem } from '@/components/console/StatsGrid';
@@ -18,7 +18,7 @@ import { ProvidersPage } from '@/components/ProvidersPage';
 import { SettingsPage } from '@/components/SettingsPage';
 import { t, useI18n } from '@/lib/i18n';
 import { useRemoteResource } from '@/lib/useRemoteResource';
-import { ApiRequestError, subscribeAuthenticationFailures, loadApiKeyWorkspace, loadProviderGroups, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
+import { ApiRequestError, subscribeAuthenticationFailures, loadApiKeyWorkspace, loadProviderWorkspace, loadRuntimeSettings, loadStatsOverview, loadSystemConfig, previewRuntimeEnv } from '@/lib/api';
 import { formatBytes, formatCommitShort, formatCompactInteger, formatMs, formatVersionLabel } from '@/lib/format';
 import { calculateOverviewPricing, formatUsd } from '@/lib/pricing';
 import type { ApiKeyWorkspace, ConnectionSettings, ProviderGroup, ProviderWorkspace, RuntimeEnvPreviewResponse, RuntimeSettingsResponse, StatsOverviewResponse, StatsPeriod, SystemConfigResponse } from '@/lib/types';
@@ -795,7 +795,7 @@ function UpstreamsPage(props: {
     if (!props.data.providersLoaded) void props.data.loadProviders();
   }, [props.data.loadProviders]);
   return <Box className="section-stack">
-      <ProvidersPage loading={!props.data.providersLoaded} settings={props.data.settings} items={props.data.providers} groups={props.data.providerGroups} onRefresh={props.data.loadProviders} onMessage={props.data.onMessage} />
+      <ProvidersPage loading={!props.data.providersLoaded} settings={props.data.settings} items={props.data.providers} onRefresh={props.data.loadProviders} onMessage={props.data.onMessage} />
     </Box>;
 }
 function OAuthRoutePage(props: {
@@ -820,7 +820,7 @@ function KeysRoutePage(props: {
       void props.data.loadApiKeys();
     }
   }, [props.data.apiKeys.length, props.data.loadApiKeys]);
-  return <ApiKeysPage settings={props.data.settings} items={props.data.apiKeys} groups={props.data.providerGroups} onRefresh={props.data.loadApiKeys} onMessage={props.data.onMessage} />;
+  return <ApiKeysPage settings={props.data.settings} items={props.data.apiKeys} providers={props.data.providers} onRefresh={props.data.loadApiKeys} onMessage={props.data.onMessage} />;
 }
 function LogsRoutePage(props: {
   data: AppDataContext;
@@ -894,13 +894,10 @@ function ConsoleRoot() {
     setStatus('loading');
     setProvidersLoaded(false);
     try {
-      const [providerWorkspace, groups] = await Promise.all([
-        loadProviderWorkspace(current),
-        loadProviderGroups(current),
-      ]);
+      const providerWorkspace = await loadProviderWorkspace(current);
       if (generation !== workspaceVersion.current) return;
       setProviders(providerWorkspace);
-      setProviderGroups(groups);
+      setProviderGroups([]);
       setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
@@ -922,13 +919,12 @@ function ConsoleRoot() {
     }
     setStatus('loading');
     try {
-      const [apiKeyWorkspace, groups] = await Promise.all([
-        loadApiKeyWorkspace(current),
-        loadProviderGroups(current),
-      ]);
+      const [apiKeyWorkspace, providerWorkspace] = await Promise.all([loadApiKeyWorkspace(current),loadProviderWorkspace(current)]);
+      setProviders(providerWorkspace);
+      setProvidersLoaded(true);
       if (generation !== workspaceVersion.current) return;
       setApiKeys(apiKeyWorkspace);
-      setProviderGroups(groups);
+      setProviderGroups([]);
       setLinkOk(true);
       if (successMessage) setMessage(t(successMessage));
     } catch (error) {
@@ -1177,5 +1173,11 @@ function LegacyPricesRedirect() {
   return <Navigate to={`/models/prices${search}`} replace />;
 }
 export default function Root() {
-  return <BrowserRouter><ConsoleRoot /></BrowserRouter>;
+  const [router, setRouter] = useState<ReturnType<typeof createBrowserRouter> | null>(null);
+  useEffect(() => {
+    const instance = createBrowserRouter([{ path: "*", element: <ConsoleRoot /> }]);
+    setRouter(instance);
+    return () => instance.dispose();
+  }, []);
+  return router ? <RouterProvider router={router} /> : null;
 }

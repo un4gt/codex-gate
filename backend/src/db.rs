@@ -1,5 +1,6 @@
 mod price_sync;
 mod provider_config;
+pub mod upstream_config;
 pub use provider_config::ProviderBundle;
 
 use std::collections::HashMap;
@@ -175,7 +176,8 @@ impl Database {
             Database::Sqlite(pool) => migrate_sqlite(pool).await,
             Database::Postgres(pool) => migrate_postgres(pool).await,
         }?;
-        self.migrate_price_sync().await
+        self.migrate_price_sync().await?;
+        self.migrate_upstream_config().await
     }
 
     pub async fn find_api_key_by_hash(
@@ -207,6 +209,7 @@ LIMIT 1
                     log_enabled: row.get::<i64, _>("log_enabled") != 0,
                     name: row.get::<String, _>("name"),
                     provider_groups: Vec::new(),
+                    allowed_provider_ids: Vec::new(),
                 })
             }
             Database::Postgres(pool) => {
@@ -233,11 +236,13 @@ LIMIT 1
                     log_enabled: row.get::<bool, _>("log_enabled"),
                     name: row.get::<String, _>("name"),
                     provider_groups: Vec::new(),
+                    allowed_provider_ids: Vec::new(),
                 })
             }
         };
         if let Some(value) = item.as_mut() {
             value.provider_groups = self.list_api_key_provider_groups(value.id).await?;
+            value.allowed_provider_ids = self.allowed_provider_ids(value.id).await?;
         }
         Ok(item)
     }
@@ -312,6 +317,7 @@ ORDER BY id DESC
                         log_enabled: row.get::<i64, _>("log_enabled") != 0,
                         name: row.get::<String, _>("name"),
                         provider_groups: Vec::new(),
+                        allowed_provider_ids: Vec::new(),
                     })
                     .collect()
             }
@@ -333,6 +339,7 @@ ORDER BY id DESC
                         log_enabled: row.get::<bool, _>("log_enabled"),
                         name: row.get::<String, _>("name"),
                         provider_groups: Vec::new(),
+                        allowed_provider_ids: Vec::new(),
                     })
                     .collect()
             }
@@ -340,6 +347,7 @@ ORDER BY id DESC
         let groups_by_key = self.list_all_api_key_provider_groups().await?;
         for item in &mut items {
             item.provider_groups = groups_by_key.get(&item.id).cloned().unwrap_or_default();
+            item.allowed_provider_ids = self.allowed_provider_ids(item.id).await?;
         }
         Ok(items)
     }
@@ -368,6 +376,7 @@ LIMIT 1
                     log_enabled: row.get::<i64, _>("log_enabled") != 0,
                     name: row.get::<String, _>("name"),
                     provider_groups: Vec::new(),
+                    allowed_provider_ids: Vec::new(),
                 })
             }
             Database::Postgres(pool) => {
@@ -392,11 +401,13 @@ LIMIT 1
                     log_enabled: row.get::<bool, _>("log_enabled"),
                     name: row.get::<String, _>("name"),
                     provider_groups: Vec::new(),
+                    allowed_provider_ids: Vec::new(),
                 })
             }
         };
         if let Some(value) = item.as_mut() {
             value.provider_groups = self.list_api_key_provider_groups(value.id).await?;
+            value.allowed_provider_ids = self.allowed_provider_ids(value.id).await?;
         }
         Ok(item)
     }
@@ -654,23 +665,6 @@ WHERE id = $18
         }
     }
 
-    pub async fn delete_upstream_provider(&self, id: i64) -> Result<bool, DbError> {
-        let rows_affected = match self {
-            Database::Sqlite(pool) => sqlx::query("DELETE FROM upstream_providers WHERE id = ?")
-                .bind(id)
-                .execute(pool)
-                .await?
-                .rows_affected(),
-            Database::Postgres(pool) => sqlx::query("DELETE FROM upstream_providers WHERE id = $1")
-                .bind(id)
-                .execute(pool)
-                .await?
-                .rows_affected(),
-        };
-
-        Ok(rows_affected > 0)
-    }
-
     pub async fn list_provider_groups(&self) -> Result<Vec<ProviderGroup>, DbError> {
         let rows = match self {
             Database::Sqlite(pool) => {
@@ -900,6 +894,7 @@ ORDER BY membership.provider_id ASC, provider_groups.name ASC, membership.group_
                     .await?;
                 }
                 tx.commit().await?;
+                self.refresh_compat_authorizations().await?;
             }
             Database::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -920,6 +915,7 @@ ORDER BY membership.provider_id ASC, provider_groups.name ASC, membership.group_
                     .await?;
                 }
                 tx.commit().await?;
+                self.refresh_compat_authorizations().await?;
             }
         }
         Ok(())
@@ -949,6 +945,7 @@ ORDER BY membership.provider_id ASC, provider_groups.name ASC, membership.group_
                     .await?;
                 }
                 tx.commit().await?;
+                self.refresh_compat_authorizations().await?;
             }
             Database::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -967,6 +964,7 @@ ORDER BY membership.provider_id ASC, provider_groups.name ASC, membership.group_
                     .await?;
                 }
                 tx.commit().await?;
+                self.refresh_compat_authorizations().await?;
             }
         }
         Ok(())
@@ -1750,6 +1748,8 @@ ORDER BY priority ASC, id ASC
                 Ok(rows
                     .into_iter()
                     .map(|row| UpstreamProvider {
+                        request_timeout_ms: None,
+                        endpoint_failover: true,
                         id: row.get::<i64, _>("id"),
                         name: row.get::<String, _>("name"),
                         provider_type: row.get::<String, _>("provider_type"),
@@ -1794,6 +1794,8 @@ ORDER BY priority ASC, id ASC
                 Ok(rows
                     .into_iter()
                     .map(|row| UpstreamProvider {
+                        request_timeout_ms: None,
+                        endpoint_failover: true,
                         id: row.get::<i64, _>("id"),
                         name: row.get::<String, _>("name"),
                         provider_type: row.get::<String, _>("provider_type"),

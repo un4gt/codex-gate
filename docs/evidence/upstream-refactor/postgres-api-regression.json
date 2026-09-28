@@ -1,0 +1,14 @@
+{
+  "direct_authorization": "HTTP / WS next turn / models",
+  "combined_failures": [
+    401,
+    503,
+    200
+  ],
+  "intermediate_errors": 2,
+  "failed_sync_inventory_preserved": true,
+  "route_failover": true,
+  "endpoint_failover": true,
+  "timeout_override": true,
+  "overview_requests": 1
+}

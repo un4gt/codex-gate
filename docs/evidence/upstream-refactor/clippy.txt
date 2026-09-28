@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking backend v0.1.0 (/mnt/data/rust_workspace/codex-gate/backend)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 55.98s

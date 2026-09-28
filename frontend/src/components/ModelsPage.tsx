@@ -69,7 +69,7 @@ export function ModelsPage(props: ModelsPageProps) {
     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, minWidth: 0, borderBottom: 1, borderColor: 'divider' }}>
       <Tabs value={tab} variant="scrollable" scrollButtons="auto" aria-label={t('模型中心')} sx={{ minWidth: 0 }}>
         <Tab value="inventory" label={t('模型列表')} component={Link} to={`/models${providerQuery}`} />
-        <Tab value="aliases" label={t('路由别名')} component={Link} to={`/models/aliases${providerQuery}`} />
+        <Tab value="aliases" label={t('路由与别名')} component={Link} to={`/models/aliases${providerQuery}`} />
         <Tab value="prices" label={t('价格管理')} component={Link} to={`/models/prices${providerQuery}`} />
       </Tabs>
       <Button variant="outline" disabled={refreshing} onClick={() => void refresh()} sx={{ flexShrink: 0 }}><RefreshCw size={16} />{t('刷新')}</Button>

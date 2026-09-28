@@ -64,6 +64,7 @@ struct WsContext {
 
 #[derive(Default)]
 struct WsRoutingTrace {
+    model_route: Option<Value>,
     attempts: Vec<Value>,
     last_number: usize,
     started: Option<Instant>,
@@ -102,8 +103,8 @@ fn finish_ws_trace(ctx: &WsContext, status: StatusCode, error_type: Option<&str>
 fn ws_trace_value(ctx: &WsContext) -> Value {
     let trace = ctx.trace.lock();
     json!({ "attempt_limit": crate::resilience::MAX_ATTEMPTS, "attempts_sent": trace.attempts.len(),
-        "backoff_ms": trace.backoff_ms, "attempts": trace.attempts, "authorized_groups": ctx.api_key.provider_groups,
-        "affinity": null, "candidates": [], "rejections": [], "terminal": null,
+        "backoff_ms": trace.backoff_ms, "attempts": trace.attempts, "authorized_groups": ctx.api_key.provider_groups, "authorized_provider_ids":ctx.api_key.allowed_provider_ids,
+        "model_route":trace.model_route, "affinity": null, "candidates": [], "rejections": [], "terminal": null,
         "provider_switches": trace.attempts.windows(2).filter(|pair| pair[0]["provider_id"] != pair[1]["provider_id"]).count() })
 }
 
@@ -458,6 +459,35 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     continue;
                 }
 
+                // An open socket is not a permanent grant: every response.create reloads authorization.
+                match ctx.state.db.find_api_key_by_id(ctx.api_key.id).await {
+                    Ok(Some(key))
+                        if key.enabled
+                            && key.expires_at_ms.is_none_or(|at| at > util::now_ms()) =>
+                    {
+                        ctx.api_key = key
+                    }
+                    Ok(_) => {
+                        let _ = send_ws_error(
+                            &mut downstream,
+                            StatusCode::UNAUTHORIZED,
+                            "invalid_api_key",
+                            "API key expired, disabled or removed",
+                        )
+                        .await;
+                        break;
+                    }
+                    Err(_) => {
+                        let _ = send_ws_error(
+                            &mut downstream,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "authorization_unavailable",
+                            "Unable to refresh authorization",
+                        )
+                        .await;
+                        break;
+                    }
+                }
                 let turn_start = Instant::now();
                 ctx.trace = Default::default();
                 ctx.budget = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -787,6 +817,11 @@ async fn refresh_active_upstream(
         .upstream
         .get(&ctx.state.db, &ctx.state.config.master_key)
         .await?;
+    ctx.trace.lock().model_route = snap
+        .route_policies
+        .get(&active.requested_model)
+        .or_else(|| snap.route_policies.get("*"))
+        .and_then(|policy| serde_json::to_value(policy).ok());
     let provider = snap
         .providers
         .iter()
@@ -814,7 +849,7 @@ async fn refresh_active_upstream(
     if !provider.websocket_enabled || !snap.is_model_globally_enabled(&active.requested_model) {
         return Err("websocket or requested model disabled; reconnect required".into());
     }
-    // Re-resolve aliases and group authorization without reserving another concurrency slot.
+    // Re-resolve aliases and direct authorization without reserving another concurrency slot.
     if !proxy::ws_target_still_routed(
         &snap,
         &ctx.api_key,
@@ -852,7 +887,8 @@ async fn connect_selected_upstream(
     requested_model: &str,
     provider_budget: &mut WsProviderBudget,
 ) -> Result<ActiveUpstream, WsBridgeError> {
-    let affinity = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id);
+    let affinity = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id)
+        .map(|i| i.for_model(requested_model));
     let existing_affinity_binding = affinity
         .as_ref()
         .and_then(|identity| ctx.state.affinity.lookup(identity, util::now_ms()));
@@ -882,6 +918,7 @@ async fn connect_selected_upstream(
             ),
         }
     })?;
+    ctx.trace.lock().model_route = plan.route_policy.clone();
     let affinity_binding = proxy::apply_affinity_to_plan(
         &ctx.state,
         affinity.as_ref(),
@@ -1211,7 +1248,7 @@ async fn connect_upstream_ws_once(
         return NativeWsConnectOutcome::Unavailable(target_unavailable_error());
     }
     note_ws_send(ctx, resolved).await;
-    let mut connected = connect_upstream_ws(ctx, resolved.key.id, &ws_url, &headers).await;
+    let mut connected = connect_upstream_ws(ctx, resolved, &ws_url, &headers).await;
     let mut oauth_replayed = false;
     if connected
         .as_ref()
@@ -1246,8 +1283,15 @@ async fn connect_upstream_ws_once(
         {
             finish_ws_trace(ctx, StatusCode::UNAUTHORIZED, Some("oauth_token_refresh"));
             note_ws_send(ctx, resolved).await;
+            ctx.state.provider_runtime.record_error(
+                resolved.provider.id,
+                resolved.endpoint.id,
+                resolved.key.id,
+                "OAuth authentication replay".into(),
+                Some(401),
+            );
             oauth_replayed = true;
-            connected = connect_upstream_ws(ctx, resolved.key.id, &ws_url, &retry_headers).await;
+            connected = connect_upstream_ws(ctx, resolved, &ws_url, &retry_headers).await;
         }
     }
     if oauth_replayed
@@ -1363,10 +1407,11 @@ async fn begin_ws_attempt(ctx: &WsContext, resolved: &ResolvedUpstream, turn: bo
 
 async fn connect_upstream_ws(
     ctx: &WsContext,
-    key_id: i64,
+    resolved: &ResolvedUpstream,
     ws_url: &str,
     headers: &HeaderMap,
 ) -> Result<UpstreamWs, WsBridgeError> {
+    let key_id = resolved.key.id;
     let mut request = ws_url.into_client_request().map_err(|err| WsBridgeError {
         status: StatusCode::BAD_REQUEST,
         error_type: "invalid_upstream_uri",
@@ -1395,7 +1440,8 @@ async fn connect_upstream_ws(
         state
             .config
             .upstream_connect_timeout
-            .min(ctx.budget.lock().await.remaining()),
+            .min(ctx.budget.lock().await.remaining())
+            .min(proxy::provider_timeout(&resolved.provider, &ctx.state)),
         connect_async(request),
     )
     .await
@@ -1610,7 +1656,7 @@ where
     let mut first_token_ms = None;
     let mut emitted_event = false;
     let (status, error_type, error_message) = loop {
-        match read_with_disconnect_grace(ctx, ws.next(), emitted_event).await {
+        match read_with_disconnect_grace(ctx, resolved, ws.next(), emitted_event).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 first_byte_ms.get_or_insert_with(|| turn_start.elapsed().as_millis() as i64);
                 if let Ok(event) = serde_json::from_str::<Value>(&text) {
@@ -1699,14 +1745,19 @@ where
 
 async fn read_with_disconnect_grace<T>(
     ctx: &WsContext,
+    resolved: &ResolvedUpstream,
     read: impl std::future::Future<Output = T>,
     emitted_event: bool,
 ) -> Result<T, ()> {
     let mut disconnected = ctx.disconnected_at.subscribe();
     let timeout = if emitted_event {
-        ctx.state.config.upstream_request_timeout
+        proxy::provider_timeout(&resolved.provider, &ctx.state)
     } else {
-        ctx.budget.lock().await.remaining()
+        ctx.budget
+            .lock()
+            .await
+            .remaining()
+            .min(proxy::provider_timeout(&resolved.provider, &ctx.state))
     };
     let read_deadline = tokio::time::Instant::now() + timeout;
     tokio::pin!(read);
@@ -2020,7 +2071,12 @@ where
         reservation.neutral();
         return ForwardResult::RetryableBeforeEvent(target_unavailable_error());
     }
-    let remaining = ctx.budget.lock().await.remaining();
+    let remaining = ctx
+        .budget
+        .lock()
+        .await
+        .remaining()
+        .min(proxy::provider_timeout(&resolved.provider, &ctx.state));
     note_ws_send(ctx, resolved).await;
     let mut response = proxy::dispatch_upstream_request_with_timeout(
         &ctx.state,
@@ -2090,9 +2146,21 @@ where
             reservation.neutral();
             return ForwardResult::RetryableBeforeEvent(target_unavailable_error());
         }
-        let remaining = ctx.budget.lock().await.remaining();
+        let remaining = ctx
+            .budget
+            .lock()
+            .await
+            .remaining()
+            .min(proxy::provider_timeout(&resolved.provider, &ctx.state));
         finish_ws_trace(ctx, StatusCode::UNAUTHORIZED, Some("oauth_token_refresh"));
         note_ws_send(ctx, resolved).await;
+        ctx.state.provider_runtime.record_error(
+            resolved.provider.id,
+            resolved.endpoint.id,
+            resolved.key.id,
+            "OAuth authentication replay".into(),
+            Some(401),
+        );
         oauth_replayed = true;
         response = proxy::dispatch_upstream_request_with_timeout(
             &ctx.state,
@@ -2185,26 +2253,27 @@ where
     let mut capture = BytesMut::new();
     let mut emitted_event = false;
     loop {
-        let frame = match read_with_disconnect_grace(ctx, body.frame(), emitted_event).await {
-            Ok(Some(Ok(frame))) => Some(frame),
-            Ok(None) => None,
-            Ok(Some(Err(error))) => {
-                terminal = Some((
-                    StatusCode::BAD_GATEWAY,
-                    Some("upstream_body_error".into()),
-                    Some(error.to_string()),
-                ));
-                None
-            }
-            Err(()) => {
-                terminal = Some((
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Some("upstream_timeout".into()),
-                    Some("upstream read deadline exceeded".into()),
-                ));
-                None
-            }
-        };
+        let frame =
+            match read_with_disconnect_grace(ctx, resolved, body.frame(), emitted_event).await {
+                Ok(Some(Ok(frame))) => Some(frame),
+                Ok(None) => None,
+                Ok(Some(Err(error))) => {
+                    terminal = Some((
+                        StatusCode::BAD_GATEWAY,
+                        Some("upstream_body_error".into()),
+                        Some(error.to_string()),
+                    ));
+                    None
+                }
+                Err(()) => {
+                    terminal = Some((
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Some("upstream_timeout".into()),
+                        Some("upstream read deadline exceeded".into()),
+                    ));
+                    None
+                }
+            };
         let eof = frame.is_none();
         let events = if let Some(data) = frame.as_ref().and_then(|frame| frame.data_ref()) {
             first_byte_ms.get_or_insert_with(|| turn_start.elapsed().as_millis() as i64);
@@ -2457,8 +2526,15 @@ fn record_turn(
             );
         }
     }
-    if attempted_upstream && scope == proxy::FailureScope::Success {
+    let sticky = ctx
+        .trace
+        .lock()
+        .model_route
+        .as_ref()
+        .is_none_or(|p| p["sticky"] != false);
+    if sticky && attempted_upstream && scope == proxy::FailureScope::Success {
         if let Some(identity) = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id)
+            .map(|i| i.for_model(requested_model))
         {
             if let Some(binding) = ctx.state.affinity.lookup(&identity, now_ms) {
                 if binding.provider_id == resolved.provider.id {
@@ -2487,9 +2563,11 @@ fn record_turn(
                 }
             }
         }
-    } else if attempted_upstream
+    } else if sticky
+        && attempted_upstream
         && scope.should_avoid_affinity_immediately()
         && let Some(identity) = extract_affinity_identity(&ctx.request_headers, &[], ctx.api_key.id)
+            .map(|i| i.for_model(requested_model))
     {
         ctx.state.affinity.mark_provider_failed(
             &identity,

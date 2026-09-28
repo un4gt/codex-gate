@@ -14,6 +14,7 @@ export function ConfirmAction(props: {
   description?: string;
   error?: string | null;
   busy: boolean;
+  confirmLabel?: string;
   onClose: () => void;
   onConfirm: () => void;
 }) {
@@ -27,7 +28,7 @@ export function ConfirmAction(props: {
     </DialogContent> : null}
     <DialogActions>
       <Button autoFocus variant="outline" disabled={props.busy} onClick={props.onClose}>{t('取消')}</Button>
-      <Button color="error" disabled={props.busy} onClick={props.onConfirm}>{t(props.busy ? '删除中…' : '确认删除')}</Button>
+      <Button color="error" disabled={props.busy} onClick={props.onConfirm}>{t(props.confirmLabel ?? (props.busy ? '删除中…' : '确认删除'))}</Button>
     </DialogActions>
   </Dialog>;
 }

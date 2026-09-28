@@ -475,93 +475,48 @@ describe('admin console smoke test', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
-  it('renders upstream statistics as a compact responsive summary', () => {
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: '' }}
-        items={[]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    const summary = screen.getByRole('list', { name: 'Provider summary' });
-    expect(summary.getAttribute('data-variant')).toBe('compact');
-    expect(summary.className).toContain('xl:grid-cols-4');
-    expect(within(summary).getAllByRole('listitem')).toHaveLength(4);
-    expect(summary.querySelectorAll('dt')).toHaveLength(4);
-    expect(summary.querySelectorAll('dd')).toHaveLength(4);
+  function upstreamFixture() {
+    const data=providerWorkspaceWithConnection();
+    fetchRequest.mockImplementation(async (input,init) => {
+      const path=new URL(String(input)).pathname;
+      if (path==='/api/v1/system/config') return jsonResponse({capabilities:{websocket:true,websocket_to_http:true,request_rewrite:true},stability:{upstream_request_timeout_ms:60000}});
+      if(path.endsWith('/runtime'))return jsonResponse({...data,recent_errors:[]});
+      if((init?.method??'GET')==='GET')return jsonResponse(data);
+      return jsonResponse({ok:true});
+    });
+    window.localStorage.setItem('little_gate_locale','zh');initializeI18n();
+    return data;
+  }
+  function renderUpstream(data=providerWorkspaceWithConnection()) {
+    return renderWithTheme(<ProvidersPage settings={{apiBase:'http://127.0.0.1:8080',adminToken:'test-token'}} items={[data]} onRefresh={async()=>{}} onMessage={()=>{}}/>);
+  }
+  it('loads connection details only after opening an upstream', async()=>{
+    const data=upstreamFixture();renderUpstream(data);
+    expect(fetchRequest).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button',{name:'管理'}));
+    expect(await screen.findByRole('tab',{name:'连接'})).toBeTruthy();
+    expect(await screen.findByRole('textbox',{name:'名称'})).toBeTruthy();
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(screen.queryByRole('spinbutton',{name:'优先级'})).toBeNull();
     expect(consoleError).not.toHaveBeenCalled();
   });
 
-  it('creates connection resources and syncs models in one provider workflow', async () => {
-    let providerPayload: Record<string, unknown> | null = null;
-    const requests: string[] = [];
-    fetchRequest.mockImplementation(async (input, init) => {
-      const url = String(input);
-      const method = init?.method ?? 'GET';
-      requests.push(`${method} ${new URL(url).pathname}`);
-      if (method === 'GET') return jsonResponse([]);
-      if (method === 'POST' && url.endsWith('/api/v1/providers')) {
-        providerPayload = JSON.parse(String(init?.body));
-        return jsonResponse({ id: 9, endpoint_ids: [10], key_ids: [20] });
-      }
-      if (method === 'POST' && url.endsWith('/models/sync')) return jsonResponse([{ id: 101 }]);
-      if (method === 'POST') return jsonResponse({ id: url.endsWith('/endpoints') ? 10 : 20 });
-      return jsonResponse([]);
-    });
+  it('creates connection resources atomically without upstream scheduling fields', async()=>{
+    const data=upstreamFixture();const writes:Array<any>=[];
+    fetchRequest.mockImplementation(async(input,init)=>{if(init?.method==='POST'){writes.push({path:new URL(String(input)).pathname,body:JSON.parse(String(init.body))});return jsonResponse({id:7,endpoint_ids:[71],key_ids:[72]});}return jsonResponse(String(input).endsWith('/config')?{}:data);});
+    renderWithTheme(<ProvidersPage settings={{apiBase:'http://127.0.0.1:8080',adminToken:'test-token'}} items={[]} onRefresh={async()=>{}} onMessage={()=>{}}/>);
+    fireEvent.click(screen.getByRole('button',{name:'新增上游'}));
+    fireEvent.change(screen.getByLabelText(/^名称/),{target:{value:'New upstream'}});
+    fireEvent.change(screen.getByLabelText(/^服务地址（每行一个）/),{target:{value:'https://example.test/v1'}});
+    fireEvent.change(screen.getByLabelText(/^API Key（每行一个）/),{target:{value:'synthetic-key'}});
+    fireEvent.click(screen.getByRole('button',{name:'创建上游'}));
+    await waitFor(()=>expect(writes).toHaveLength(2));
+    expect(writes[0].body).toMatchObject({name:'New upstream',endpoints:[expect.objectContaining({base_url:'https://example.test/v1'})],keys:[expect.objectContaining({secret:'synthetic-key'})]});
+    expect(writes[0].body).not.toHaveProperty('priority');expect(writes[0].body).not.toHaveProperty('groups');
+    expect(writes[1].path).toBe('/api/v1/upstreams/7/models/sync');
+  });
 
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
-    fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider B' } });
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://api.example.test' } });
-    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
-    fireEvent.click(screen.getByText('Advanced Settings'));
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Priority' }), { target: { value: '25' } });
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '4' } });
-    fireEvent.click(screen.getByText('Request Overrides (Optional)'));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply Codex Client Compatibility Preset' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
-
-    await waitFor(() => expect(providerPayload).toBeTruthy());
-    expect(providerPayload).toMatchObject({
-      priority: 25,
-      weight: 4,
-      request_overrides: {
-        headers: expect.arrayContaining([
-          expect.objectContaining({
-            scope: 'all',
-            operation: 'set',
-            name: 'User-Agent',
-            value: 'codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color',
-          }),
-          expect.objectContaining({ name: 'x-codex-window-id', value: '{{request_id}}' }),
-        ]),
-        body: expect.arrayContaining([
-          expect.objectContaining({
-            scope: 'responses',
-            path: 'client_metadata.x-codex-window-id',
-            value: '{{request_id}}',
-          }),
-        ]),
-      },
-    });
-    expect(await screen.findByText('Model Sync Complete')).toBeTruthy();
-    expect(providerPayload).toMatchObject({ endpoints: [expect.objectContaining({ base_url: 'https://api.example.test' })], keys: [expect.objectContaining({ secret: 'sk-test' })] });
-    expect(requests.filter(request => request.startsWith('POST'))).toEqual(['POST /api/v1/providers', 'POST /api/v1/providers/9/models/sync']);
-    expect(requests).toContain('POST /api/v1/providers/9/models/sync');
-    expect(consoleError).not.toHaveBeenCalled();
-  }, 10_000);
-
-  it('creates a Codex OAuth provider and completes the default browser callback flow', async () => {
+  it('completes the Codex OAuth browser callback flow', async () => {
     let providerPayload: Record<string, unknown> | null = null;
     let endpointPayload: Record<string, unknown> | null = null;
     let sessionPayload: Record<string, unknown> | null = null;
@@ -575,16 +530,16 @@ describe('admin console smoke test', () => {
       const path = new URL(url).pathname;
       const method = init?.method ?? 'GET';
       requests.push(`${method} ${path}`);
-      if (method === 'POST' && path === '/api/v1/providers') {
+      if (method === 'POST' && path === '/api/v1/upstreams') {
         providerPayload = JSON.parse(String(init?.body));
         endpointPayload = (providerPayload?.endpoints as Record<string, unknown>[])[0];
         return jsonResponse({ id: 19, endpoint_ids: [191], key_ids: [] });
       }
-      if (method === 'POST' && path === '/api/v1/providers/19/endpoints') {
+      if (method === 'POST' && path === '/api/v1/upstreams/19/endpoints') {
         endpointPayload = JSON.parse(String(init?.body));
         return jsonResponse({ id: 191 });
       }
-      if (method === 'POST' && path === '/api/v1/providers/19/codex-oauth/sessions') {
+      if (method === 'POST' && path === '/api/v1/upstreams/19/codex-oauth/sessions') {
         sessionStarts += 1;
         sessionPayload = JSON.parse(String(init?.body));
         return jsonResponse({
@@ -627,26 +582,7 @@ describe('admin console smoke test', () => {
       return jsonResponse([]);
     });
 
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[]}
-        onRefresh={async message => {
-          refreshMessages.push(message ?? '');
-        }}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
-    fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Codex Prod' } });
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Type' }));
-    fireEvent.click(await screen.findByRole('option', { name: 'OpenAI Codex OAuth' }));
-
-    expect(screen.queryByPlaceholderText('sk-...')).toBeNull();
-    expect((screen.getByPlaceholderText('https://api.example.com/v1') as HTMLInputElement).value)
-      .toBe('https://chatgpt.com/backend-api/codex');
-    fireEvent.click(screen.getByRole('button', { name: 'Create and Sign In' }));
+    renderWithTheme(<CodexOAuthLoginDialog open attemptId={1} settings={{apiBase:'http://127.0.0.1:8080',adminToken:'test-token'}} providerId={19} replaceKeyId={null} onClose={()=>{}} onMessage={()=>{}} onCompleted={async()=>{}}/>);
 
     expect(await screen.findByRole('link', { name: 'Open OpenAI Sign-In' })).toBeTruthy();
     const callbackUrl = 'http://localhost:1455/auth/callback?code=code-1&state=test';
@@ -654,24 +590,12 @@ describe('admin console smoke test', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit Callback URL' }));
     expect(await screen.findByText('Sign-In Complete')).toBeTruthy();
     expect(await screen.findByText('Post-Login Checks Reported Warnings')).toBeTruthy();
-    expect(providerPayload).toMatchObject({
-      provider_type: 'openai_codex_oauth',
-      websocket_enabled: true,
-      beta_features: ['responses-http-to-ws'],
-    });
-    expect(endpointPayload).toMatchObject({
-      base_url: 'https://chatgpt.com/backend-api/codex',
-    });
     expect(sessionPayload).toEqual({ replace_key_id: null, flow: 'browser' });
     expect(callbackPayload).toEqual({ redirect_url: callbackUrl });
     expect(sessionStarts).toBe(1);
     expect(sessionPolls).toBe(1);
     expect(requests.some(request => request.endsWith('/keys'))).toBe(false);
     expect(requests.some(request => request.endsWith('/models/sync'))).toBe(false);
-    expect(refreshMessages).toEqual(expect.arrayContaining([
-      'Provider Codex Prod was created. Complete Codex OAuth sign-in to continue.',
-      'The Codex OAuth account was created.',
-    ]));
     expect(consoleError).not.toHaveBeenCalled();
   });
 
@@ -794,15 +718,16 @@ describe('admin console smoke test', () => {
     fetchRequest.mockImplementation(async (input, init) => {
       const path = new URL(String(input)).pathname;
       const method = init?.method ?? 'GET';
-      if (method === 'POST' && path === '/api/v1/providers') {
+      if (method === 'POST' && path === '/api/v1/upstreams') {
         providerPayload = JSON.parse(String(init?.body));
+        endpointPayload=(providerPayload?.endpoints as Record<string,unknown>[])[0];
         return jsonResponse({ id: 31 });
       }
-      if (method === 'POST' && path === '/api/v1/providers/31/endpoints') {
+      if (method === 'POST' && path === '/api/v1/upstreams/31/endpoints') {
         endpointPayload = JSON.parse(String(init?.body));
         return jsonResponse({ id: 311 });
       }
-      if (method === 'POST' && path === '/api/v1/providers/31/codex-oauth/sessions') {
+      if (method === 'POST' && path === '/api/v1/upstreams/31/codex-oauth/sessions') {
         sessionPayload = JSON.parse(String(init?.body));
         return jsonResponse({
           session_id: 'oauth-page-session',
@@ -847,13 +772,13 @@ describe('admin console smoke test', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   });
 
-  it('rolls back the OAuth page provider when its default endpoint cannot be created', async () => {
+  it('keeps OAuth creation atomic when the default endpoint cannot be stored', async () => {
     const deleted: string[] = [];
     fetchRequest.mockImplementation(async (input, init) => {
       const path = new URL(String(input)).pathname;
       const method = init?.method ?? 'GET';
-      if (method === 'POST' && path === '/api/v1/providers') return jsonResponse({ id: 32 });
-      if (method === 'POST' && path === '/api/v1/providers/32/endpoints') {
+      if (method === 'POST' && path === '/api/v1/upstreams') return jsonResponse({error:'endpoint failed'},500);
+      if (method === 'POST' && path === '/api/v1/upstreams/32/endpoints') {
         return jsonResponse({ error: 'endpoint failed' }, 500);
       }
       if (method === 'DELETE') {
@@ -877,7 +802,7 @@ describe('admin console smoke test', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Create and Sign In' }));
     expect(await screen.findByText('Failed to create provider.')).toBeTruthy();
-    expect(deleted).toEqual(['/api/v1/providers/32']);
+    expect(deleted).toEqual([]);
   });
 
   it('renders Codex accounts without batch controls and calls per-account APIs', async () => {
@@ -885,6 +810,7 @@ describe('admin console smoke test', () => {
     fetchRequest.mockImplementation(async (input, init) => {
       const path = new URL(String(input)).pathname;
       const method = init?.method ?? 'GET';
+      if(method==='GET' && path==='/api/v1/upstreams/17')return jsonResponse(codexProviderWorkspace());
       requests.push(`${method} ${path}`);
       if (method === 'POST' && path.endsWith('/quota/refresh')) return jsonResponse({});
       if (method === 'PATCH') return jsonResponse({ ok: true });
@@ -901,7 +827,7 @@ describe('admin console smoke test', () => {
       />,
     );
 
-    fireEvent.click(screen.getByText('Codex Accounts'));
+    fireEvent.click(screen.getByRole('button', {name:'Manage'}));
     expect(await screen.findByRole('heading', { name: 'OAuth Accounts' })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'API Keys' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Key Model Restrictions' })).toBeNull();
@@ -953,121 +879,29 @@ describe('admin console smoke test', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
-  it('reuses the created provider when model sync is retried', async () => {
-    let providerCreates = 0;
-    let syncAttempts = 0;
-    const patches: string[] = [];
-    fetchRequest.mockImplementation(async (input, init) => {
-      const url = String(input);
-      const path = new URL(url).pathname;
-      const method = init?.method ?? 'GET';
-      if (method === 'GET') return jsonResponse([]);
-      if (method === 'POST' && path === '/api/v1/providers') {
-        providerCreates += 1;
-        return jsonResponse({ id: 9, endpoint_ids: [10], key_ids: [20] });
-      }
-      if (method === 'POST' && path.endsWith('/endpoints')) return jsonResponse({ id: 10 });
-      if (method === 'POST' && path.endsWith('/keys')) return jsonResponse({ id: 20 });
-      if (method === 'POST' && path.endsWith('/models/sync')) {
-        syncAttempts += 1;
-        return syncAttempts === 1 ? new Response('sync failed', { status: 502 }) : jsonResponse([{ id: 101 }]);
-      }
-      if (method === 'PATCH') {
-        patches.push(path);
-        return jsonResponse({ ok: true });
-      }
-      return jsonResponse([]);
-    });
-
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
-    fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider Retry' } });
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://old.example.test' } });
-    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-old' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
-
-    expect(await screen.findByText('Sync Failed')).toBeTruthy();
-    expect((screen.getByPlaceholderText('https://api.example.com/v1') as HTMLInputElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Retry Sync' }));
-
-    expect(await screen.findByText('Model Sync Complete')).toBeTruthy();
-    expect(providerCreates).toBe(1);
-    expect(syncAttempts).toBe(2);
-    expect(patches).toEqual([]);
+  it('retries synchronization without recreating an upstream',async()=>{
+    const data=upstreamFixture();let creates=0;let syncs=0;
+    fetchRequest.mockImplementation(async(input,init)=>{const path=new URL(String(input)).pathname;if(init?.method==='POST'&&path==='/api/v1/upstreams'){creates++;return jsonResponse({id:7,endpoint_ids:[],key_ids:[]});}if(init?.method==='POST'&&path.endsWith('/sync')){syncs++;return syncs===1?new Response('sync failed',{status:502}):jsonResponse([]);}return jsonResponse(path.endsWith('/config')?{}:data);});
+    renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'新增上游'}));
+    fireEvent.change(screen.getByLabelText(/^名称/),{target:{value:'Retry'}});fireEvent.change(screen.getByLabelText(/^服务地址（每行一个）/),{target:{value:'https://example.test'}});fireEvent.change(screen.getByLabelText(/^API Key（每行一个）/),{target:{value:'synthetic'}});fireEvent.click(screen.getByRole('button',{name:'创建上游'}));
+    fireEvent.click(await screen.findByRole('button',{name:'重试同步'}));await waitFor(()=>expect(syncs).toBe(2));expect(creates).toBe(1);
   });
 
-  it('keeps the complete draft after atomic provider creation fails', async () => {
-    const deleted: string[] = [];
-    fetchRequest.mockImplementation(async (input, init) => {
-      const url = String(input);
-      const path = new URL(url).pathname;
-      const method = init?.method ?? 'GET';
-      if (method === 'GET') return jsonResponse([]);
-      if (method === 'POST' && path === '/api/v1/providers') return new Response('atomic save failed', { status: 500 });
-      if (method === 'POST' && path.endsWith('/endpoints')) return new Response('endpoint failed', { status: 500 });
-      if (method === 'POST' && path.endsWith('/keys')) return jsonResponse({ id: 20 });
-      if (method === 'DELETE') {
-        deleted.push(path);
-        return new Response(null, { status: 204 });
-      }
-      return jsonResponse([]);
-    });
-
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getAllByRole('button', { name: /create provider/i })[0]);
-    fireEvent.change(screen.getByPlaceholderText('openai-prod'), { target: { value: 'Provider Rollback' } });
-    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://api.example.test' } });
-    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create and Sync' }));
-
-    expect(await screen.findByText(/atomic save failed/i)).toBeTruthy();
-    expect(deleted).toEqual([]);
-    expect((screen.getByPlaceholderText('sk-...') as HTMLInputElement).value).toBe('sk-test');
-    expect(screen.getByRole('button', { name: 'Create and Sync' }).hasAttribute('disabled')).toBe(false);
+  it('preserves connection drafts after a failed atomic creation',async()=>{
+    upstreamFixture();fetchRequest.mockResolvedValue(new Response('atomic save failed',{status:500}));renderUpstream();
+    fireEvent.click(screen.getByRole('button',{name:'新增上游'}));fireEvent.change(screen.getByLabelText(/^名称/),{target:{value:'Draft'}});fireEvent.change(screen.getByLabelText(/^服务地址（每行一个）/),{target:{value:'https://example.test'}});fireEvent.change(screen.getByLabelText(/^API Key（每行一个）/),{target:{value:'synthetic'}});fireEvent.click(screen.getByRole('button',{name:'创建上游'}));
+    expect(await screen.findByText(/atomic save failed/)).toBeTruthy();expect((screen.getByLabelText(/^API Key（每行一个）/) as HTMLInputElement).value).toBe('synthetic');
   });
 
-  it('offers key ordering only in primary/backup mode and preserves hidden provider settings', async () => {
-    const workspace = providerWorkspaceWithConnection();
-    const writes: Array<{ path: string; body: any }> = [];
-    fetchRequest.mockImplementation(async (input, init) => {
-      if (init?.method === 'PATCH') writes.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init.body)) });
-      return jsonResponse(init?.method === 'PATCH' ? { ok: true } : []);
-    });
-    renderWithTheme(<ProvidersPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} items={[workspace]} onRefresh={async () => undefined} onMessage={() => undefined} />);
-    fireEvent.click(screen.getByText('Provider A'));
-    expect(screen.getByRole('combobox', { name: 'Key Selection' }).textContent).toContain('Round Robin');
-    expect(screen.queryByText('Primary Key')).toBeNull();
-    // Wait for saving to finish so the key strategy select is enabled again.
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save Provider' })); });
-    expect(writes).toHaveLength(1);
-    expect(writes[0].body).toMatchObject({ max_attempts: 2, circuit_breaker_enabled: true, circuit_breaker_open_ms: 30_000, circuit_breaker_half_open_success_threshold: 2 });
-    expect(writes[0].body).not.toHaveProperty('key_selection_strategy');
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Key Selection' }));
-    const primaryAndBackup = await screen.findByRole('option', { name: 'Primary and Backup' });
-    await act(async () => { fireEvent.click(primaryAndBackup); });
-    expect(writes).toHaveLength(2);
-    expect(writes[1]).toEqual({ path: '/api/v1/providers/7', body: { key_selection_strategy: 'ordered' } });
-    expect(consoleError).not.toHaveBeenCalled();
+  it('saves basic connection settings without overwriting advanced configuration',async()=>{
+    const data=upstreamFixture();renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'管理'}));await screen.findByLabelText(/^名称/);
+    fireEvent.change(screen.getByLabelText(/^名称/),{target:{value:'Renamed'}});fireEvent.click(screen.getByRole('button',{name:'保存基础信息'}));
+    await waitFor(()=>expect(fetchRequest.mock.calls.some(([,i])=>i?.method==='PATCH')).toBe(true));
+    const patch=fetchRequest.mock.calls.find(([,i])=>i?.method==='PATCH')!;expect(JSON.parse(String(patch[1]?.body))).toEqual({name:'Renamed',provider_type:data.provider.provider_type,enabled:true});
   });
 
   it('marks an expired access key as expired and excludes it from usable keys', () => {
-    renderWithTheme(<ApiKeysPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} groups={[]} items={[{
+    renderWithTheme(<ApiKeysPage settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }} providers={[]} items={[{
       apiKey: { id: 1, name: 'expired-client', enabled: true, log_enabled: true, expires_at_ms: Date.now() - 1000, provider_groups: [] },
       totals: { requests: 0, success: 0, failed: 0, tokens: 0, averageWaitMs: 0, activeDays: 0 }, recentModels: [],
     }]} onRefresh={async () => undefined} onMessage={() => undefined} />);
@@ -1077,181 +911,28 @@ describe('admin console smoke test', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
-  it('syncs models directly from the provider list', async () => {
-    let syncCount = 0;
-    fetchRequest.mockImplementation(async (input, init) => {
-      if (init?.method === 'POST' && String(input).endsWith('/api/v1/providers/7/models/sync')) {
-        syncCount += 1;
-        return jsonResponse([{ id: 101 }]);
-      }
-      return jsonResponse([]);
-    });
-
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[providerWorkspaceWithConnection()]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Sync models for provider Provider A' }));
-    await waitFor(() => expect(syncCount).toBe(1));
-    expect(screen.queryByRole('heading', { name: 'Provider A' })).toBeNull();
+  it('synchronizes models from the connection summary',async()=>{
+    const data=upstreamFixture();renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'管理'}));fireEvent.click(await screen.findByRole('button',{name:'同步模型'}));
+    await waitFor(()=>expect(fetchRequest.mock.calls.some(([u,i])=>String(u).endsWith('/upstreams/7/models/sync')&&i?.method==='POST')).toBe(true));
   });
 
-  it('sends edited provider routing and request overrides', async () => {
-    let patchPayload: Record<string, unknown> | null = null;
-    fetchRequest.mockImplementation(async (input, init) => {
-      const url = String(input);
-      const method = init?.method ?? 'GET';
-      if (method === 'PATCH' && url.endsWith('/api/v1/providers/7')) {
-        patchPayload = JSON.parse(String(init?.body));
-        return jsonResponse({ ok: true });
-      }
-      return jsonResponse([]);
-    });
-
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[providerWorkspace()]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getByText('Provider A'));
-    fireEvent.click(screen.getByText('Advanced Settings'));
-    fireEvent.change(await screen.findByRole('spinbutton', { name: 'Priority' }), { target: { value: '50' } });
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '3' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Apply Codex Client Compatibility Preset' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save Provider' }));
-
-    await waitFor(() => expect(patchPayload).toBeTruthy());
-    expect(patchPayload).toMatchObject({
-      priority: 50,
-      weight: 3,
-      request_overrides: {
-        headers: expect.arrayContaining([
-          expect.objectContaining({ name: 'originator', value: 'codex-tui' }),
-        ]),
-        body: expect.arrayContaining([
-          expect.objectContaining({
-            path: 'client_metadata.x-codex-installation-id',
-            value: '{{request_id}}',
-          }),
-        ]),
-      },
-    });
-    expect(consoleError).not.toHaveBeenCalled();
-  }, 10_000);
-
-  it('prevents saving an invalid provider weight', async () => {
-    let patchCount = 0;
-    fetchRequest.mockImplementation(async (_input, init) => {
-      if (init?.method === 'PATCH') patchCount += 1;
-      return jsonResponse([]);
-    });
-
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[providerWorkspace()]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getByText('Provider A'));
-    fireEvent.click(screen.getByText('Advanced Settings'));
-    fireEvent.change(await screen.findByRole('spinbutton', { name: 'Weight' }), { target: { value: '0' } });
-
-    expect(screen.getByText('Weight must be an integer from 1 to 2147483647.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Save Provider' }).hasAttribute('disabled')).toBe(true);
-    expect(patchCount).toBe(0);
+  it('keeps a connection draft while switching tabs and refreshing runtime',async()=>{
+    const data=upstreamFixture();renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'管理'}));await screen.findByLabelText(/^名称/);fireEvent.change(screen.getByLabelText(/^名称/),{target:{value:'Unsaved'}});
+    fireEvent.click(screen.getByRole('tab',{name:'状态 / 调试'}));fireEvent.click(await screen.findByRole('button',{name:'刷新状态'}));fireEvent.click(screen.getByRole('tab',{name:'连接'}));expect((screen.getByLabelText(/^名称/) as HTMLInputElement).value).toBe('Unsaved');
+    fireEvent.click(screen.getByRole('button',{name:'关闭'}));expect(await screen.findByRole('dialog',{name:'放弃未保存的修改？'})).toBeTruthy();
   });
 
-  it('cancels provider deletion without sending a request', async () => {
-    let deleteCount = 0;
-    fetchRequest.mockImplementation(async (_input, init) => {
-      if (init?.method === 'DELETE') deleteCount += 1;
-      return jsonResponse([]);
-    });
-
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[providerWorkspace()]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getByText('Provider A'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete Provider' }));
-    const dialog = screen.getByRole('dialog', { name: 'Delete provider “Provider A”?' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete provider “Provider A”?' })).toBeNull());
-    expect(deleteCount).toBe(0);
+  it('shows only supported protocol controls and defers the request rule editor',async()=>{
+    const data=upstreamFixture();renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'管理'}));await screen.findByLabelText(/^名称/);fireEvent.click(screen.getByRole('tab',{name:'高级设置'}));
+    expect(screen.queryByRole('spinbutton',{name:'权重'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'协议兼容'}));expect(await screen.findByLabelText('允许 WebSocket 请求回退到 HTTP 上游')).toBeTruthy();expect(screen.queryByText('HTTP→WS Beta')).toBeNull();
+    expect(screen.queryByRole('button',{name:'应用 Codex 客户端兼容预设'})).toBeNull();
   });
 
-  it('deletes a provider once and refreshes the list', async () => {
-    let deleteCount = 0;
-    const refreshMessages: string[] = [];
-    fetchRequest.mockImplementation(async (_input, init) => {
-      if (init?.method === 'DELETE') {
-        deleteCount += 1;
-        return new Response(null, { status: 204 });
-      }
-      return jsonResponse([]);
-    });
+  it('cancels provider deletion without sending a request',async()=>{const data=upstreamFixture();renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'管理'}));await screen.findByLabelText(/^名称/);fireEvent.click(screen.getByRole('button',{name:'更多操作'}));fireEvent.click(await screen.findByRole('menuitem',{name:'删除整个上游'}));const dialog=await screen.findByRole('dialog',{name:'确认删除整个上游？历史数据会保留。'});fireEvent.click(within(dialog).getByRole('button',{name:'取消'}));expect(fetchRequest.mock.calls.some(([,i])=>i?.method==='DELETE')).toBe(false);});
 
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[providerWorkspace()]}
-        onRefresh={async message => {
-          refreshMessages.push(message ?? '');
-        }}
-        onMessage={() => undefined}
-      />,
-    );
+  it('deletes a provider once and refreshes the list',async()=>{const data=upstreamFixture();renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'管理'}));await screen.findByLabelText(/^名称/);fireEvent.click(screen.getByRole('button',{name:'更多操作'}));fireEvent.click(await screen.findByRole('menuitem',{name:'删除整个上游'}));const dialog=await screen.findByRole('dialog',{name:'确认删除整个上游？历史数据会保留。'});fireEvent.click(within(dialog).getByRole('button',{name:'确认删除'}));await waitFor(()=>expect(fetchRequest.mock.calls.filter(([,i])=>i?.method==='DELETE')).toHaveLength(1));await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());});
 
-    fireEvent.click(screen.getByText('Provider A'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete Provider' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm Delete' }));
-
-    await waitFor(() => expect(deleteCount).toBe(1));
-    expect(refreshMessages).toEqual(['Provider Provider A deleted.']);
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete provider “Provider A”?' })).toBeNull());
-    expect(consoleError).not.toHaveBeenCalled();
-  });
-
-  it('keeps the confirmation open when provider deletion fails', async () => {
-    fetchRequest.mockImplementation(async (_input, init) => {
-      if (init?.method === 'DELETE') return new Response('delete failed', { status: 500 });
-      return jsonResponse([]);
-    });
-
-    renderWithTheme(
-      <ProvidersPage
-        settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
-        items={[providerWorkspace()]}
-        onRefresh={async () => undefined}
-        onMessage={() => undefined}
-      />,
-    );
-
-    fireEvent.click(screen.getByText('Provider A'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete Provider' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm Delete' }));
-
-    expect(await screen.findByText('Deletion Failed')).toBeTruthy();
-    expect(screen.getByRole('dialog', { name: 'Delete provider “Provider A”?' })).toBeTruthy();
-  });
+  it('keeps the confirmation open when provider deletion fails',async()=>{const data=upstreamFixture();fetchRequest.mockImplementation(async(input,init)=>init?.method==='DELETE'?new Response('delete failed',{status:500}):jsonResponse(String(input).endsWith('/config')?{}:data));renderUpstream(data);fireEvent.click(screen.getByRole('button',{name:'管理'}));await screen.findByLabelText(/^名称/);fireEvent.click(screen.getByRole('button',{name:'更多操作'}));fireEvent.click(await screen.findByRole('menuitem',{name:'删除整个上游'}));const dialog=await screen.findByRole('dialog',{name:'确认删除整个上游？历史数据会保留。'});fireEvent.click(within(dialog).getByRole('button',{name:'确认删除'}));expect(await within(dialog).findByText(/delete failed/)).toBeTruthy();expect(screen.getByRole('dialog',{name:'确认删除整个上游？历史数据会保留。'})).toBeTruthy();});
 
   it('makes every navigation row sortable while preserving link navigation', async () => {
     window.sessionStorage.setItem('little_gate_admin_token', 'test-token');
@@ -1305,7 +986,8 @@ describe('admin console smoke test', () => {
   const catalogResponse = (input: RequestInfo | URL) => {
     const path = new URL(String(input)).pathname;
     if (path === '/api/v1/system/config') return jsonResponse({});
-    if (path === '/api/v1/providers') return jsonResponse([providerWorkspace().provider]);
+    if (path === '/api/v1/upstreams') return jsonResponse([providerWorkspaceWithConnection()]);
+    if (path === '/api/v1/upstreams/7') return jsonResponse(providerWorkspaceWithConnection());
     if (path === '/api/v1/provider-models') return jsonResponse([{
       id: 11, provider_id: 7, provider_name: 'Provider A', provider_type: 'openai_compatible',
       upstream_model: 'model-a', alias: null, enabled: true, available: true,
@@ -1423,7 +1105,7 @@ describe('admin console smoke test', () => {
     renderWithTheme(<Root />);
     const provider = await screen.findByRole('dialog', { name: 'Provider A' });
     const validations = fetchRequest.mock.calls.filter(([input]) => String(input).endsWith('/system/config')).length;
-    fireEvent.click(within(provider).getByRole('link', { name: 'Manage in Models' }));
+    fireEvent.click(within(provider).getByRole('link', { name: 'Manage models →' }));
     expect(await screen.findByRole('table', { name: 'Model Inventory' })).toBeTruthy();
     expect(window.location.pathname + window.location.search).toBe('/models?provider_id=7');
     expect(fetchRequest.mock.calls.filter(([input]) => String(input).endsWith('/system/config'))).toHaveLength(validations);

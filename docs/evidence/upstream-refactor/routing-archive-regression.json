@@ -1,0 +1,824 @@
+{
+  "build_ok": true,
+  "bench": {
+    "url": "http://127.0.0.1:18082/v1/chat/completions",
+    "format": "chat",
+    "model": "gpt-4o-mini",
+    "mode": "duration",
+    "requests": 1575,
+    "concurrency": 4,
+    "warmup_requests": 8,
+    "success": 1575,
+    "failed": 0,
+    "throughput_rps": 314.657,
+    "elapsed_s": 5.005,
+    "latency_ms": {
+      "min": 3.584,
+      "mean": 12.667,
+      "p50": 11.183,
+      "p95": 23.65,
+      "p99": 33.325,
+      "max": 46.768
+    },
+    "status_counts": {
+      "200": 1575
+    },
+    "errors": [],
+    "memory_rss": {
+      "source": "metrics",
+      "samples": 10,
+      "min_bytes": 33542144,
+      "mean_bytes": 39811072.0,
+      "p95_bytes": 42684416,
+      "max_bytes": 42684416,
+      "delta_bytes": 9142272
+    },
+    "memory_samples_captured": 10,
+    "metrics_before": {
+      "little_gate_started_at_seconds": "1790576255.145",
+      "little_gate_db_ready": "1",
+      "little_gate_upstream_snapshot_loaded": "1",
+      "little_gate_inflight_requests": "0",
+      "little_gate_process_resident_memory_bytes": "33542144",
+      "little_gate_system_memory_working_set_bytes{scope=\"host\"}": "6905053184",
+      "little_gate_upstream_attempts_total": "14",
+      "little_gate_telemetry_dropped_total": "0",
+      "little_gate_failovers_total{scope=\"endpoint\"}": "0",
+      "little_gate_failovers_total{scope=\"key\"}": "0",
+      "little_gate_failovers_total{scope=\"generic\"}": "0",
+      "little_gate_affinity_total{result=\"hit\"}": "0",
+      "little_gate_affinity_total{result=\"miss\"}": "0",
+      "little_gate_affinity_total{result=\"migration\"}": "0",
+      "little_gate_provider_routing_total{result=\"selection\"}": "14",
+      "little_gate_provider_routing_total{result=\"switch\"}": "0",
+      "little_gate_provider_routing_total{result=\"capacity_skip\"}": "0",
+      "little_gate_provider_routing_total{result=\"quota_skip\"}": "0",
+      "little_gate_provider_routing_total{result=\"breaker_open\"}": "0",
+      "little_gate_provider_routing_total{result=\"breaker_probe\"}": "0",
+      "little_gate_provider_routing_total{result=\"breaker_reset\"}": "0",
+      "little_gate_requests_total{api_format=\"chat_completions\",result=\"ok\"}": "8",
+      "little_gate_requests_total{api_format=\"chat_completions\",result=\"error\"}": "0",
+      "little_gate_request_duration_ms_sum{api_format=\"chat_completions\"}": "50",
+      "little_gate_request_duration_ms_count{api_format=\"chat_completions\"}": "8",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"input\"}": "72",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"output\"}": "40",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"cache_read\"}": "16",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"cache_write\"}": "8",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"reasoning\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"chat_completions\",status=\"priced\"}": "8",
+      "little_gate_pricing_requests_total{api_format=\"chat_completions\",status=\"unpriced\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"chat_completions\",status=\"usage_missing\"}": "0",
+      "little_gate_cost_usd_total{api_format=\"chat_completions\",kind=\"in\"}": "0.000080",
+      "little_gate_cost_usd_total{api_format=\"chat_completions\",kind=\"out\"}": "0.000080",
+      "little_gate_cost_usd_total{api_format=\"chat_completions\",kind=\"total\"}": "0.000160",
+      "little_gate_requests_total{api_format=\"responses\",result=\"ok\"}": "2",
+      "little_gate_requests_total{api_format=\"responses\",result=\"error\"}": "6",
+      "little_gate_request_duration_ms_sum{api_format=\"responses\"}": "117",
+      "little_gate_request_duration_ms_count{api_format=\"responses\"}": "8",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"input\"}": "16",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"output\"}": "9",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"cache_read\"}": "3",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"cache_write\"}": "2",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"reasoning\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"responses\",status=\"priced\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"responses\",status=\"unpriced\"}": "2",
+      "little_gate_pricing_requests_total{api_format=\"responses\",status=\"usage_missing\"}": "6",
+      "little_gate_cost_usd_total{api_format=\"responses\",kind=\"in\"}": "0.000000",
+      "little_gate_cost_usd_total{api_format=\"responses\",kind=\"out\"}": "0.000000",
+      "little_gate_cost_usd_total{api_format=\"responses\",kind=\"total\"}": "0.000000",
+      "little_gate_provider_health_total{state=\"closed\"}": "6",
+      "little_gate_provider_health_total{state=\"half_open\"}": "0",
+      "little_gate_provider_health_total{state=\"open\"}": "0",
+      "little_gate_provider_health_total{state=\"disabled\"}": "0",
+      "little_gate_provider_health_total{state=\"available\"}": "6",
+      "little_gate_upstream_key_health_total{state=\"closed\"}": "6",
+      "little_gate_upstream_key_health_total{state=\"half_open\"}": "0",
+      "little_gate_upstream_key_health_total{state=\"open\"}": "0",
+      "little_gate_upstream_key_health_total{state=\"disabled\"}": "0",
+      "little_gate_upstream_key_health_total{state=\"available\"}": "6",
+      "little_gate_endpoint_health_total{state=\"closed\"}": "6",
+      "little_gate_endpoint_health_total{state=\"half_open\"}": "0",
+      "little_gate_endpoint_health_total{state=\"open\"}": "0",
+      "little_gate_endpoint_health_total{state=\"disabled\"}": "0",
+      "little_gate_endpoint_health_total{state=\"available\"}": "6"
+    },
+    "metrics_after": {
+      "little_gate_started_at_seconds": "1790576255.145",
+      "little_gate_db_ready": "1",
+      "little_gate_upstream_snapshot_loaded": "1",
+      "little_gate_inflight_requests": "0",
+      "little_gate_process_resident_memory_bytes": "42819584",
+      "little_gate_system_memory_working_set_bytes{scope=\"host\"}": "7208349696",
+      "little_gate_upstream_attempts_total": "1589",
+      "little_gate_telemetry_dropped_total": "0",
+      "little_gate_failovers_total{scope=\"endpoint\"}": "0",
+      "little_gate_failovers_total{scope=\"key\"}": "0",
+      "little_gate_failovers_total{scope=\"generic\"}": "0",
+      "little_gate_affinity_total{result=\"hit\"}": "0",
+      "little_gate_affinity_total{result=\"miss\"}": "0",
+      "little_gate_affinity_total{result=\"migration\"}": "0",
+      "little_gate_provider_routing_total{result=\"selection\"}": "1589",
+      "little_gate_provider_routing_total{result=\"switch\"}": "0",
+      "little_gate_provider_routing_total{result=\"capacity_skip\"}": "0",
+      "little_gate_provider_routing_total{result=\"quota_skip\"}": "0",
+      "little_gate_provider_routing_total{result=\"breaker_open\"}": "0",
+      "little_gate_provider_routing_total{result=\"breaker_probe\"}": "0",
+      "little_gate_provider_routing_total{result=\"breaker_reset\"}": "0",
+      "little_gate_requests_total{api_format=\"chat_completions\",result=\"ok\"}": "1581",
+      "little_gate_requests_total{api_format=\"chat_completions\",result=\"error\"}": "2",
+      "little_gate_request_duration_ms_sum{api_format=\"chat_completions\"}": "9728",
+      "little_gate_request_duration_ms_count{api_format=\"chat_completions\"}": "1583",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"input\"}": "14247",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"output\"}": "7915",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"cache_read\"}": "3166",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"cache_write\"}": "1583",
+      "little_gate_tokens_total{api_format=\"chat_completions\",kind=\"reasoning\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"chat_completions\",status=\"priced\"}": "1583",
+      "little_gate_pricing_requests_total{api_format=\"chat_completions\",status=\"unpriced\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"chat_completions\",status=\"usage_missing\"}": "0",
+      "little_gate_cost_usd_total{api_format=\"chat_completions\",kind=\"in\"}": "0.015830",
+      "little_gate_cost_usd_total{api_format=\"chat_completions\",kind=\"out\"}": "0.015830",
+      "little_gate_cost_usd_total{api_format=\"chat_completions\",kind=\"total\"}": "0.031660",
+      "little_gate_requests_total{api_format=\"responses\",result=\"ok\"}": "2",
+      "little_gate_requests_total{api_format=\"responses\",result=\"error\"}": "6",
+      "little_gate_request_duration_ms_sum{api_format=\"responses\"}": "117",
+      "little_gate_request_duration_ms_count{api_format=\"responses\"}": "8",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"input\"}": "16",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"output\"}": "9",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"cache_read\"}": "3",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"cache_write\"}": "2",
+      "little_gate_tokens_total{api_format=\"responses\",kind=\"reasoning\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"responses\",status=\"priced\"}": "0",
+      "little_gate_pricing_requests_total{api_format=\"responses\",status=\"unpriced\"}": "2",
+      "little_gate_pricing_requests_total{api_format=\"responses\",status=\"usage_missing\"}": "6",
+      "little_gate_cost_usd_total{api_format=\"responses\",kind=\"in\"}": "0.000000",
+      "little_gate_cost_usd_total{api_format=\"responses\",kind=\"out\"}": "0.000000",
+      "little_gate_cost_usd_total{api_format=\"responses\",kind=\"total\"}": "0.000000",
+      "little_gate_provider_health_total{state=\"closed\"}": "6",
+      "little_gate_provider_health_total{state=\"half_open\"}": "0",
+      "little_gate_provider_health_total{state=\"open\"}": "0",
+      "little_gate_provider_health_total{state=\"disabled\"}": "0",
+      "little_gate_provider_health_total{state=\"available\"}": "6",
+      "little_gate_upstream_key_health_total{state=\"closed\"}": "6",
+      "little_gate_upstream_key_health_total{state=\"half_open\"}": "0",
+      "little_gate_upstream_key_health_total{state=\"open\"}": "0",
+      "little_gate_upstream_key_health_total{state=\"disabled\"}": "0",
+      "little_gate_upstream_key_health_total{state=\"available\"}": "6",
+      "little_gate_endpoint_health_total{state=\"closed\"}": "6",
+      "little_gate_endpoint_health_total{state=\"half_open\"}": "0",
+      "little_gate_endpoint_health_total{state=\"open\"}": "0",
+      "little_gate_endpoint_health_total{state=\"disabled\"}": "0",
+      "little_gate_endpoint_health_total{state=\"available\"}": "6"
+    }
+  },
+  "failover_endpoint": {
+    "scenario": "endpoint",
+    "provider_ids": [
+      7
+    ],
+    "endpoint_ids": [
+      7,
+      8
+    ],
+    "key_ids": [
+      7
+    ],
+    "client_api_key_id": 3,
+    "proxy_response": {
+      "status": 200,
+      "duration_ms": 568.967,
+      "body": "{\"id\": \"chatcmpl-mock\", \"object\": \"chat.completion\", \"created\": 1790576263, \"model\": \"gpt-4o-mini\", \"choices\": [{\"index\": 0, \"finish_reason\": \"stop\", \"message\": {\"role\": \"assistant\", \"content\": \"good endpoint\"}}], \"usage\": {\"prompt_tokens\": 12, \"completion_tokens\": 5, \"total_tokens\": 17, \"prompt_tokens_details\": {\"cached_tokens\": 2, \"cache_creation_tokens\": 1}}}"
+    },
+    "metrics_delta": {
+      "upstream_attempts_total": 2.0,
+      "failovers_endpoint_total": 1.0,
+      "failovers_key_total": 0.0,
+      "chat_ok_total": 1.0,
+      "chat_error_total": 0.0
+    },
+    "provider_health": [
+      {
+        "provider_id": 7,
+        "health": {
+          "available": true,
+          "consecutive_failures": 1,
+          "endpoint_counts": {
+            "available": 1,
+            "closed": 1,
+            "disabled": 0,
+            "half_open": 0,
+            "open": 1,
+            "total": 2
+          },
+          "failure_count": 1,
+          "key_counts": {
+            "available": 1,
+            "closed": 1,
+            "disabled": 0,
+            "half_open": 0,
+            "open": 0,
+            "total": 1
+          },
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": 1790576263275,
+          "last_status": 200,
+          "last_success_at_ms": 1790576263835,
+          "latency_ewma_ms": 565,
+          "open_until_ms": 1790576293275,
+          "state": "closed",
+          "success_count": 2,
+          "updated_at_ms": 1790576263835
+        },
+        "runtime": {
+          "available": true,
+          "consecutive_failures": 0,
+          "failure_count": 1,
+          "half_open_successes": 0,
+          "in_flight": 0,
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": 1790576263275,
+          "last_status": 200,
+          "last_success_at_ms": 1790576263835,
+          "latency_ewma_ms": 565,
+          "max_concurrency": null,
+          "open_until_ms": null,
+          "state": "closed",
+          "success_count": 1
+        }
+      }
+    ],
+    "endpoints": [
+      {
+        "base_url": "http://127.0.0.1:19092/bad/api/coding/v3",
+        "enabled": true,
+        "health": {
+          "available": false,
+          "consecutive_failures": 1,
+          "failure_count": 1,
+          "last_error_message": "retryable upstream status 503",
+          "last_error_type": "upstream_retry_status",
+          "last_failure_at_ms": 1790576263275,
+          "last_status": 503,
+          "last_success_at_ms": null,
+          "latency_ewma_ms": null,
+          "open_until_ms": 1790576293275,
+          "state": "open",
+          "success_count": 0,
+          "updated_at_ms": 1790576263275
+        },
+        "id": 7,
+        "name": "endpoint-bad",
+        "priority": 10,
+        "provider_id": 7,
+        "weight": 1
+      },
+      {
+        "base_url": "http://127.0.0.1:19092/good/api/coding/v3",
+        "enabled": true,
+        "health": {
+          "available": true,
+          "consecutive_failures": 0,
+          "failure_count": 0,
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": null,
+          "last_status": 200,
+          "last_success_at_ms": 1790576263835,
+          "latency_ewma_ms": 565,
+          "open_until_ms": null,
+          "state": "closed",
+          "success_count": 1,
+          "updated_at_ms": 1790576263835
+        },
+        "id": 8,
+        "name": "endpoint-good",
+        "priority": 20,
+        "provider_id": 7,
+        "weight": 1
+      }
+    ],
+    "keys": [
+      {
+        "auth_kind": "api_key",
+        "codex_oauth": null,
+        "enabled": true,
+        "health": {
+          "available": true,
+          "consecutive_failures": 0,
+          "failure_count": 0,
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": null,
+          "last_status": 200,
+          "last_success_at_ms": 1790576263835,
+          "latency_ewma_ms": 565,
+          "open_until_ms": null,
+          "state": "closed",
+          "success_count": 1,
+          "updated_at_ms": 1790576263835
+        },
+        "id": 7,
+        "name": "key-main",
+        "priority": 10,
+        "provider_id": 7,
+        "quota": {
+          "consecutive_rate_limits": 0,
+          "cooldown_until_ms": null,
+          "remaining_requests": null,
+          "remaining_tokens": null,
+          "reset_at_ms": null,
+          "updated_at_ms": 1790576263834
+        },
+        "routing_availability": {
+          "available": true,
+          "reason": null,
+          "retry_at_ms": null
+        },
+        "weight": 1
+      }
+    ]
+  },
+  "failover_key": {
+    "scenario": "key",
+    "provider_ids": [
+      8
+    ],
+    "endpoint_ids": [
+      9
+    ],
+    "key_ids": [
+      8,
+      9
+    ],
+    "client_api_key_id": 4,
+    "proxy_response": {
+      "status": 200,
+      "duration_ms": 645.853,
+      "body": "{\"id\": \"chatcmpl-mock\", \"object\": \"chat.completion\", \"created\": 1790576265, \"model\": \"gpt-4o-mini\", \"choices\": [{\"index\": 0, \"finish_reason\": \"stop\", \"message\": {\"role\": \"assistant\", \"content\": \"key ok\"}}], \"usage\": {\"prompt_tokens\": 12, \"completion_tokens\": 5, \"total_tokens\": 17, \"prompt_tokens_details\": {\"cached_tokens\": 2, \"cache_creation_tokens\": 1}}}"
+    },
+    "metrics_delta": {
+      "upstream_attempts_total": 2.0,
+      "failovers_endpoint_total": 0.0,
+      "failovers_key_total": 1.0,
+      "chat_ok_total": 1.0,
+      "chat_error_total": 0.0
+    },
+    "provider_health": [
+      {
+        "provider_id": 8,
+        "health": {
+          "available": true,
+          "consecutive_failures": 1,
+          "endpoint_counts": {
+            "available": 1,
+            "closed": 1,
+            "disabled": 0,
+            "half_open": 0,
+            "open": 0,
+            "total": 1
+          },
+          "failure_count": 1,
+          "key_counts": {
+            "available": 1,
+            "closed": 1,
+            "disabled": 0,
+            "half_open": 0,
+            "open": 1,
+            "total": 2
+          },
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": 1790576264653,
+          "last_status": 200,
+          "last_success_at_ms": 1790576265289,
+          "latency_ewma_ms": 133,
+          "open_until_ms": 1790576294653,
+          "state": "closed",
+          "success_count": 3,
+          "updated_at_ms": 1790576265289
+        },
+        "runtime": {
+          "available": true,
+          "consecutive_failures": 0,
+          "failure_count": 0,
+          "half_open_successes": 0,
+          "in_flight": 0,
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": null,
+          "last_status": 200,
+          "last_success_at_ms": 1790576265289,
+          "latency_ewma_ms": 642,
+          "max_concurrency": null,
+          "open_until_ms": null,
+          "state": "closed",
+          "success_count": 1
+        }
+      }
+    ],
+    "endpoints": [
+      {
+        "base_url": "http://127.0.0.1:19092/key/api/coding/v3",
+        "enabled": true,
+        "health": {
+          "available": true,
+          "consecutive_failures": 0,
+          "failure_count": 0,
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": null,
+          "last_status": 200,
+          "last_success_at_ms": 1790576265289,
+          "latency_ewma_ms": 133,
+          "open_until_ms": null,
+          "state": "closed",
+          "success_count": 2,
+          "updated_at_ms": 1790576265289
+        },
+        "id": 9,
+        "name": "endpoint-main",
+        "priority": 10,
+        "provider_id": 8,
+        "weight": 1
+      }
+    ],
+    "keys": [
+      {
+        "auth_kind": "api_key",
+        "codex_oauth": null,
+        "enabled": true,
+        "health": {
+          "available": false,
+          "consecutive_failures": 1,
+          "failure_count": 1,
+          "last_error_message": "retryable upstream status 401",
+          "last_error_type": "upstream_retry_status",
+          "last_failure_at_ms": 1790576264653,
+          "last_status": 401,
+          "last_success_at_ms": null,
+          "latency_ewma_ms": null,
+          "open_until_ms": 1790576294653,
+          "state": "open",
+          "success_count": 0,
+          "updated_at_ms": 1790576264653
+        },
+        "id": 8,
+        "name": "key-bad",
+        "priority": 10,
+        "provider_id": 8,
+        "quota": {
+          "consecutive_rate_limits": 0,
+          "cooldown_until_ms": null,
+          "remaining_requests": null,
+          "remaining_tokens": null,
+          "reset_at_ms": null,
+          "updated_at_ms": 1790576264652
+        },
+        "routing_availability": {
+          "available": false,
+          "reason": "account_unhealthy",
+          "retry_at_ms": null
+        },
+        "weight": 1
+      },
+      {
+        "auth_kind": "api_key",
+        "codex_oauth": null,
+        "enabled": true,
+        "health": {
+          "available": true,
+          "consecutive_failures": 0,
+          "failure_count": 0,
+          "last_error_message": null,
+          "last_error_type": null,
+          "last_failure_at_ms": null,
+          "last_status": 200,
+          "last_success_at_ms": 1790576265289,
+          "latency_ewma_ms": 642,
+          "open_until_ms": null,
+          "state": "closed",
+          "success_count": 1,
+          "updated_at_ms": 1790576265289
+        },
+        "id": 9,
+        "name": "key-good",
+        "priority": 20,
+        "provider_id": 8,
+        "quota": {
+          "consecutive_rate_limits": 0,
+          "cooldown_until_ms": null,
+          "remaining_requests": null,
+          "remaining_tokens": null,
+          "reset_at_ms": null,
+          "updated_at_ms": 1790576265285
+        },
+        "routing_availability": {
+          "available": true,
+          "reason": null,
+          "retry_at_ms": null
+        },
+        "weight": 1
+      }
+    ]
+  },
+  "upstream_requests": [
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/bad/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/good/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/key/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    },
+    {
+      "method": "POST",
+      "path": "/key/api/coding/v3/chat/completions",
+      "model": "gpt-4o-mini",
+      "stream": false,
+      "prompt_cache_key": null,
+      "session_id": null
+    }
+  ],
+  "model_sync_passthrough": {
+    "errors": [
+      {
+        "path": "/api/v1/providers/2/models/sync",
+        "status": 401,
+        "body": {
+          "error": {
+            "message": "invalid upstream credential",
+            "type": "invalid_api_key"
+          }
+        }
+      },
+      {
+        "path": "/api/v1/keys/2/models/sync",
+        "status": 401,
+        "body": {
+          "error": {
+            "message": "invalid upstream credential",
+            "type": "invalid_api_key"
+          }
+        }
+      }
+    ],
+    "recovered_model_count": 5
+  },
+  "responses_via_chat": {
+    "success_status": 200,
+    "success_stream_completed": true,
+    "success_log_error_type": null,
+    "success_upstream_path": "/bridge/api/coding/v3/chat/completions",
+    "model_registry_protocol_independent": true,
+    "disabled_conversion_error": {
+      "error": {
+        "code": "model_protocol_unsupported",
+        "details": {
+          "client_api_format": "responses",
+          "model": "kimi-k3-no-conversion",
+          "reasons": [
+            {
+              "code": "responses_via_chat_disabled",
+              "count": 1
+            }
+          ],
+          "retry_at_ms": null
+        },
+        "message": "Model \"kimi-k3-no-conversion\" is registered, but no matching provider supports the requested API format or conversion",
+        "type": "invalid_request_error"
+      }
+    },
+    "error_statuses": [
+      502,
+      502,
+      502,
+      502
+    ],
+    "error_body": {
+      "error": {
+        "message": "Model \"kimi-k3-error\" is not supported by any configured account in this group",
+        "type": "model_not_found"
+      }
+    },
+    "error_upstream_path": "/model-error/api/coding/v3/chat/completions",
+    "error_provider_runtime": {
+      "available": true,
+      "consecutive_failures": 0,
+      "failure_count": 0,
+      "half_open_successes": 0,
+      "in_flight": 0,
+      "last_error_message": null,
+      "last_error_type": null,
+      "last_failure_at_ms": null,
+      "last_status": null,
+      "last_success_at_ms": null,
+      "latency_ewma_ms": null,
+      "max_concurrency": null,
+      "open_until_ms": null,
+      "state": "closed",
+      "success_count": 0
+    }
+  },
+  "global_model_registry": {
+    "model": "isolated-responses-model",
+    "registry_count": 5,
+    "authorization_filtered_registry": true,
+    "unauthorized_status": 403,
+    "unauthorized_error": {
+      "error": {
+        "code": "model_not_authorized",
+        "details": {
+          "client_api_format": "responses",
+          "model": "isolated-responses-model",
+          "reasons": [
+            {
+              "code": "provider_denied",
+              "count": 1
+            }
+          ],
+          "retry_at_ms": null
+        },
+        "message": "Model \"isolated-responses-model\" is registered, but this API key is not authorized for any matching provider",
+        "type": "permission_error"
+      }
+    },
+    "authorized_status": 200
+  },
+  "pricing_contract": {
+    "logs_have_pricing": true,
+    "logs_have_cost_fields": false,
+    "overview_has_pricing": true,
+    "overview_kpis_have_cost": false
+  },
+  "archive": {
+    "archive_files": [
+      "data/archive/request_logs_regression/_index.jsonl",
+      "data/archive/request_logs_regression/20260928/request_logs_1790576266316_01M3KAK32CYPHF76JGGHFHT7A9.jsonl.gz"
+    ],
+    "archive_preview": "{\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"time_ms\":1790317065806,\"api_key_id\":999,\"provider_id\":1,\"endpoint_id\":1,\"upstream_key_id\":1,\"api_format\":\"chat_completions\",\"upstream_api_format\":null,\"model\":\"archive-model\",\"http_status\":200,\"error_type\":null,\"error_message\":null,\"input_tokens\":11,\"output_tokens\":7,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2,\"reasoning_output_tokens\":1,\"usage_observed\":true,\"price_version_id\":3,\"price_tier_index\":0,\"t_stream_ms\":12,\"t_first_byte_ms\":14,\"t_first_token_ms\":15,\"duration_ms\":18,\"span_kind\":\"request\",\"transport\":\"http\",\"parent_id\":null,\"ws_session_id\":null,\"requested_service_tier\":null,\"upstream_service_tier\":null,\"service_tier\":null,\"routing_trace\":null,\"created_at_ms\":1790317065806}",
+    "index_entries": [
+      "{\"created_at_ms\":1790576266323,\"relative_path\":\"20260928/request_logs_1790576266316_01M3KAK32CYPHF76JGGHFHT7A9.jsonl.gz\",\"row_count\":1,\"file_size_bytes\":421,\"uncompressed_bytes\":743,\"min_time_ms\":1790317065806,\"max_time_ms\":1790317065806,\"compressed\":true}"
+    ],
+    "request_logs_after": 0,
+    "stats_daily_after": 0,
+    "monetary_columns": {
+      "request_logs": [],
+      "stats_events": [],
+      "stats_daily": [],
+      "stats_hourly": []
+    },
+    "archive_has_cost_fields": false,
+    "archive_price_version_id": 3,
+    "archive_price_tier_index": 0
+  },
+  "logs": {
+    "mock": "data/tmp/regression_mock.log",
+    "gateway": "data/tmp/regression_gateway.log"
+  }
+}

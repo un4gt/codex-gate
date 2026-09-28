@@ -63,7 +63,9 @@ const config = {
         if (holdOverview) { const held = holdOverview; await held; }
         body = failOverview ? { error: 'overview temporarily unavailable' } : { ...overview, period: url.searchParams.get('period') };
         status = failOverview ? 503 : 200;
-      } else if (path === '/api/v1/providers') body = [provider];
+      } else if (path === '/api/v1/upstreams') body = [{provider,endpoints:[],keys:[]}];
+      else if (path === '/api/v1/upstreams/7') body = {provider,endpoints:[],keys:[]};
+      else if (path === '/api/v1/model-route-policies') body = [{model_name:'*',mode:'ordered',sticky:true,failover:true,targets:[]}];
       else if (path === '/api/v1/providers/7/endpoints') body = [{ id: 71, provider_id: 7, base_url: 'https://api.example.com/v1', enabled: true, priority: 100, weight: 1 }];
       else if (path === '/api/v1/providers/7/keys') body = [{ id: 72, provider_id: 7, name: 'Production', enabled: true, priority: 100, weight: 1, routing_availability: { available: true, reason: null } }];
       else if (path === '/api/v1/provider-models') body = models;

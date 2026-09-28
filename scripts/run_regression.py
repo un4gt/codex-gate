@@ -597,9 +597,9 @@ def verify_global_model_registry(admin_token, default_api_key):
     isolated_models = request_json('GET', f'{BASE_URL}/v1/models', isolated_api_key)
     default_ids = {item.get('id') for item in default_models.get('data', [])}
     isolated_ids = {item.get('id') for item in isolated_models.get('data', [])}
-    if default_ids != isolated_ids or model not in default_ids:
+    if model in default_ids or model not in isolated_ids:
         raise RuntimeError(
-            f'global model registry differs by API key group: '
+            f'model registry does not respect upstream authorization: '
             f'default={default_models!r} isolated={isolated_models!r}'
         )
 
@@ -630,7 +630,7 @@ def verify_global_model_registry(admin_token, default_api_key):
     return {
         'model': model,
         'registry_count': len(default_ids),
-        'same_registry_for_distinct_groups': default_ids == isolated_ids,
+        'authorization_filtered_registry': model not in default_ids and model in isolated_ids,
         'unauthorized_status': denied_status,
         'unauthorized_error': denied_error,
         'authorized_status': allowed_status,

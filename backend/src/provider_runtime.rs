@@ -83,14 +83,40 @@ struct ProviderAttemptToken {
 }
 
 pub struct ProviderRuntimeBook {
+    errors: RwLock<HashMap<i64, std::collections::VecDeque<serde_json::Value>>>,
     ewma_alpha: f64,
     by_provider: RwLock<HashMap<i64, ProviderRuntimeState>>,
 }
 
 impl ProviderRuntimeBook {
+    pub fn recent_errors(&self, id: i64) -> Vec<serde_json::Value> {
+        self.errors
+            .read()
+            .get(&id)
+            .map(|v| v.iter().rev().cloned().collect())
+            .unwrap_or_default()
+    }
+    pub fn record_error(
+        &self,
+        id: i64,
+        endpoint: i64,
+        key: i64,
+        category: String,
+        status: Option<i32>,
+    ) {
+        let mut errors = self.errors.write();
+        let entries = errors.entry(id).or_default();
+        if entries.len() == 50 {
+            entries.pop_front();
+        }
+        // Never retain remote bodies or credentials in the runtime timeline.
+        entries.push_back(serde_json::json!({"time_ms":crate::util::now_ms(),"endpoint_id":endpoint,"key_id":key,"category":category,"status":status,"summary":"Upstream attempt failed"}));
+    }
+
     pub fn new() -> Self {
         Self {
             ewma_alpha: 0.2,
+            errors: RwLock::new(HashMap::new()),
             by_provider: RwLock::new(HashMap::new()),
         }
     }
@@ -284,6 +310,7 @@ impl ProviderRuntimeBook {
     }
 
     pub fn purge_provider(&self, provider_id: i64) {
+        self.errors.write().remove(&provider_id);
         self.by_provider.write().remove(&provider_id);
     }
 
@@ -715,11 +742,28 @@ fn parse_relative_duration_ms(value: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recent_errors_are_bounded_and_reset_does_not_erase_timeline() {
+        let book = super::ProviderRuntimeBook::new();
+        for id in 0..60 {
+            book.record_error(1, id, 3, "endpoint".into(), Some(503));
+        }
+        book.reset(1);
+        let errors = book.recent_errors(1);
+        assert_eq!(errors.len(), 50);
+        assert_eq!(errors[0]["endpoint_id"], 59);
+        assert_eq!(errors[49]["endpoint_id"], 10);
+        book.purge_provider(1);
+        assert!(book.recent_errors(1).is_empty());
+    }
+
     use super::*;
     use hyper::header::HeaderValue;
 
     fn provider() -> UpstreamProvider {
         UpstreamProvider {
+            request_timeout_ms: None,
+            endpoint_failover: true,
             id: 7,
             name: "provider-a".to_string(),
             provider_type: "openai".to_string(),
