@@ -251,7 +251,7 @@ pub struct StatsEventRow {
     pub created_at_ms: i64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatsOverviewAggRow {
     pub request_success: i64,
     pub request_failed: i64,
@@ -268,6 +268,26 @@ pub struct StatsOverviewAggRow {
     pub latency_lt_5000ms: i64,
     pub latency_lt_15000ms: i64,
     pub latency_gte_15000ms: i64,
+}
+
+impl StatsOverviewAggRow {
+    pub fn accumulate(&mut self, row: &Self) {
+        self.request_success += row.request_success;
+        self.request_failed += row.request_failed;
+        self.input_tokens += row.input_tokens;
+        self.output_tokens += row.output_tokens;
+        self.cache_read_input_tokens += row.cache_read_input_tokens;
+        self.cache_creation_input_tokens += row.cache_creation_input_tokens;
+        self.reasoning_output_tokens += row.reasoning_output_tokens;
+        self.usage_observed_requests += row.usage_observed_requests;
+        self.wait_time_ms += row.wait_time_ms;
+        self.latency_lt_500ms += row.latency_lt_500ms;
+        self.latency_lt_1000ms += row.latency_lt_1000ms;
+        self.latency_lt_2000ms += row.latency_lt_2000ms;
+        self.latency_lt_5000ms += row.latency_lt_5000ms;
+        self.latency_lt_15000ms += row.latency_lt_15000ms;
+        self.latency_gte_15000ms += row.latency_gte_15000ms;
+    }
 }
 
 #[derive(Clone, Debug)]

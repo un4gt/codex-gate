@@ -57,3 +57,10 @@ refrence/
 
 # Local documentation and evidence
 /docs/
+
+# Local screenshots and browser verification artifacts
+**/screenshots/
+**/playwright-report/
+**/test-results/
+/upstream.png
+/usage.png

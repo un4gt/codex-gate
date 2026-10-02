@@ -1582,6 +1582,24 @@ WHERE id = $7
         }
     }
 
+    /// Aggregate the whole window in one query, grouping by Beijing-aligned buckets.
+    pub async fn aggregate_stats_series(
+        &self,
+        time_from_ms: i64,
+        time_to_ms: i64,
+        interval_ms: i64,
+    ) -> Result<Vec<(i64, StatsOverviewAggRow)>, DbError> {
+        match self {
+            Database::Sqlite(pool) => {
+                aggregate_stats_series_sqlite(pool, time_from_ms, time_to_ms, interval_ms).await
+            }
+            Database::Postgres(pool) => {
+                aggregate_stats_series_postgres(pool, time_from_ms, time_to_ms, interval_ms).await
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub async fn aggregate_stats_events_range(
         &self,
         time_from_ms: i64,
@@ -3643,6 +3661,7 @@ fn row_to_stats_overview_agg_postgres(row: sqlx::postgres::PgRow) -> StatsOvervi
     }
 }
 
+#[cfg(test)]
 async fn aggregate_stats_events_range_sqlite(
     pool: &SqlitePool,
     time_from_ms: i64,
@@ -3677,6 +3696,7 @@ WHERE time_ms >= ? AND time_ms <= ?
     Ok(row_to_stats_overview_agg_sqlite(row))
 }
 
+#[cfg(test)]
 async fn aggregate_stats_events_range_postgres(
     pool: &PgPool,
     time_from_ms: i64,
@@ -7659,6 +7679,97 @@ CREATE TABLE stats_events (
         assert_eq!(event.get::<Option<i32>, _>("price_tier_index"), None);
     }
 
+    async fn verify_stats_series(db: &Database) -> Vec<(i64, StatsOverviewAggRow)> {
+        let midnight = 1_787_068_800_000;
+        let hour = 3_600_000;
+        let mut missing = stats_event("series-missing", midnight, Some(400));
+        missing.usage_observed = false;
+        missing.input_tokens = 0;
+        missing.output_tokens = 0;
+        missing.cache_read_input_tokens = 0;
+        missing.cache_creation_input_tokens = 0;
+        missing.reasoning_output_tokens = 0;
+        let mut zero = missing.clone();
+        zero.id = "series-zero".into();
+        zero.time_ms = midnight + 2 * hour;
+        zero.http_status = Some(200);
+        zero.usage_observed = true;
+        db.insert_stats_events(&[
+            stats_event("series-before", midnight - hour - 1, Some(200)),
+            stats_event("series-from", midnight - hour, Some(200)),
+            missing,
+            zero,
+            stats_event("series-to", midnight + 3 * hour, Some(502)),
+            stats_event("series-after", midnight + 3 * hour + 1, Some(200)),
+        ])
+        .await
+        .expect("insert series fixtures");
+        let hourly = db
+            .aggregate_stats_series(midnight - hour, midnight + 3 * hour, hour)
+            .await
+            .expect("hourly series");
+        assert_eq!(
+            hourly.iter().map(|(time, _)| *time).collect::<Vec<_>>(),
+            vec![
+                midnight - hour,
+                midnight,
+                midnight + 2 * hour,
+                midnight + 3 * hour
+            ]
+        );
+        assert_eq!(hourly[1].1.usage_observed_requests, 0);
+        assert_eq!(hourly[2].1.usage_observed_requests, 1);
+        let summary = db
+            .aggregate_stats_events_range(midnight - hour, midnight + 3 * hour)
+            .await
+            .expect("summary");
+        let mut sum = StatsOverviewAggRow::default();
+        for (_, bucket) in &hourly {
+            sum.accumulate(bucket);
+        }
+        assert_eq!(sum, summary);
+        let daily = db
+            .aggregate_stats_series(midnight - hour, midnight + 3 * hour, 24 * hour)
+            .await
+            .expect("daily series");
+        assert_eq!(
+            daily.iter().map(|(time, _)| *time).collect::<Vec<_>>(),
+            vec![midnight - 24 * hour, midnight]
+        );
+        let mut day_sum = StatsOverviewAggRow::default();
+        for (_, bucket) in &daily {
+            day_sum.accumulate(bucket);
+        }
+        assert_eq!(day_sum, summary);
+        assert!(
+            db.aggregate_stats_series(midnight + 4 * hour, midnight + 5 * hour, hour)
+                .await
+                .expect("empty series")
+                .is_empty()
+        );
+        hourly
+    }
+
+    #[tokio::test]
+    async fn stats_series_respects_beijing_boundaries_missing_usage_and_summary() {
+        verify_stats_series(&sqlite_memory_db().await).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated TEST_POSTGRES_DSN database"]
+    async fn postgres_stats_series_matches_sqlite() {
+        let dsn = std::env::var("TEST_POSTGRES_DSN").expect("isolated PostgreSQL DSN");
+        let postgres = Database::connect(&dsn, 2)
+            .await
+            .expect("connect PostgreSQL");
+        postgres.migrate().await.expect("migrate isolated database");
+        let sqlite = sqlite_memory_db().await;
+        assert_eq!(
+            verify_stats_series(&postgres).await,
+            verify_stats_series(&sqlite).await
+        );
+    }
+
     #[tokio::test]
     async fn aggregate_stats_events_range_should_include_only_exact_window_boundaries() {
         let db = sqlite_memory_db().await;
@@ -9001,4 +9112,98 @@ fn parse_model_price_data(json: &str) -> Result<PriceCard, DbError> {
     let v: Value = serde_json::from_str(json)
         .map_err(|e| DbError::new(format!("invalid price_data_json: {e}")))?;
     PriceCard::from_json(&v).map_err(DbError::new)
+}
+
+async fn aggregate_stats_series_sqlite(
+    pool: &SqlitePool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+    interval_ms: i64,
+) -> Result<Vec<(i64, StatsOverviewAggRow)>, DbError> {
+    let rows = sqlx::query(
+        r#"
+SELECT
+  ((time_ms + 28800000) / ?3) * ?3 - 28800000 AS bucket_start_ms,
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) < 400 AND error_type IS NULL THEN 1 ELSE 0 END), 0) AS request_success,
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) >= 400 OR error_type IS NOT NULL THEN 1 ELSE 0 END), 0) AS request_failed,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+  COALESCE(SUM(reasoning_output_tokens), 0) AS reasoning_output_tokens,
+  COALESCE(SUM(CASE WHEN usage_observed != 0 THEN 1 ELSE 0 END), 0) AS usage_observed_requests,
+  COALESCE(SUM(COALESCE(duration_ms, 0)), 0) AS wait_time_ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) < 500 THEN 1 ELSE 0 END), 0) AS latency_lt_500ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 500 AND COALESCE(duration_ms, 0) < 1000 THEN 1 ELSE 0 END), 0) AS latency_lt_1000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 1000 AND COALESCE(duration_ms, 0) < 2000 THEN 1 ELSE 0 END), 0) AS latency_lt_2000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 2000 AND COALESCE(duration_ms, 0) < 5000 THEN 1 ELSE 0 END), 0) AS latency_lt_5000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 5000 AND COALESCE(duration_ms, 0) < 15000 THEN 1 ELSE 0 END), 0) AS latency_lt_15000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 15000 THEN 1 ELSE 0 END), 0) AS latency_gte_15000ms
+FROM stats_events
+WHERE time_ms >= ?1 AND time_ms <= ?2
+GROUP BY bucket_start_ms
+ORDER BY bucket_start_ms
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .bind(interval_ms)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("bucket_start_ms"),
+                row_to_stats_overview_agg_sqlite(row),
+            )
+        })
+        .collect())
+}
+
+async fn aggregate_stats_series_postgres(
+    pool: &PgPool,
+    time_from_ms: i64,
+    time_to_ms: i64,
+    interval_ms: i64,
+) -> Result<Vec<(i64, StatsOverviewAggRow)>, DbError> {
+    let rows = sqlx::query(
+        r#"
+SELECT
+  ((time_ms + 28800000) / $3) * $3 - 28800000 AS bucket_start_ms,
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) < 400 AND error_type IS NULL THEN 1 ELSE 0 END), 0)::BIGINT AS request_success,
+  COALESCE(SUM(CASE WHEN COALESCE(http_status, 500) >= 400 OR error_type IS NOT NULL THEN 1 ELSE 0 END), 0)::BIGINT AS request_failed,
+  COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0)::BIGINT AS cache_read_input_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens,
+  COALESCE(SUM(reasoning_output_tokens), 0)::BIGINT AS reasoning_output_tokens,
+  COALESCE(SUM(CASE WHEN usage_observed THEN 1 ELSE 0 END), 0)::BIGINT AS usage_observed_requests,
+  COALESCE(SUM(COALESCE(duration_ms, 0)), 0)::BIGINT AS wait_time_ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) < 500 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_500ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 500 AND COALESCE(duration_ms, 0) < 1000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_1000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 1000 AND COALESCE(duration_ms, 0) < 2000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_2000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 2000 AND COALESCE(duration_ms, 0) < 5000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_5000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 5000 AND COALESCE(duration_ms, 0) < 15000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_lt_15000ms,
+  COALESCE(SUM(CASE WHEN COALESCE(duration_ms, 0) >= 15000 THEN 1 ELSE 0 END), 0)::BIGINT AS latency_gte_15000ms
+FROM stats_events
+WHERE time_ms >= $1 AND time_ms <= $2
+GROUP BY bucket_start_ms
+ORDER BY bucket_start_ms
+"#,
+    )
+    .bind(time_from_ms)
+    .bind(time_to_ms)
+    .bind(interval_ms)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("bucket_start_ms"),
+                row_to_stats_overview_agg_postgres(row),
+            )
+        })
+        .collect())
 }

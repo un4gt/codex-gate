@@ -24,7 +24,7 @@ describe('log column preferences', () => {
 
   it('falls back to the default columns when no valid saved columns remain', () => {
     expect(sanitizeLogColumns(['future_column'])).toEqual(DEFAULT_LOG_COLUMNS);
-    expect(DEFAULT_LOG_COLUMNS).toHaveLength(8);
+    expect(DEFAULT_LOG_COLUMNS).toHaveLength(7);
   });
 });
 
@@ -52,6 +52,6 @@ describe('actual service tier display', () => {
   });
   it('does not infer a tier when the upstream omitted it', () => {
     expect(formatServiceTier(null)).toBe('未确认');
-    expect(DEFAULT_LOG_COLUMNS).toContain('service_tier');
+    expect(DEFAULT_LOG_COLUMNS).toContain('provider');
   });
 });

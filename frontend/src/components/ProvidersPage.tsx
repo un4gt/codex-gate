@@ -1,65 +1,72 @@
+import CloseOutlined from "@mui/icons-material/CloseOutlined";
+import Accordion from "@mui/material/Accordion";
+import AccordionDetails from "@mui/material/AccordionDetails";
+import AccordionSummary from "@mui/material/AccordionSummary";
+import Alert from "@mui/material/Alert";
+import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
+import Checkbox from "@mui/material/Checkbox";
+import Chip from "@mui/material/Chip";
+import CircularProgress from "@mui/material/CircularProgress";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
+import Drawer from "@mui/material/Drawer";
+import FormControlLabel from "@mui/material/FormControlLabel";
+import IconButton from "@mui/material/IconButton";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
+import Paper from "@mui/material/Paper";
+import Stack from "@mui/material/Stack";
+import Tab from "@mui/material/Tab";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import Tabs from "@mui/material/Tabs";
+import TextField from "@mui/material/TextField";
+import Typography from "@mui/material/Typography";
 import {
-  lazy,
-  Suspense,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent,
-  type ReactNode,
+lazy,
+Suspense,
+useContext,
+useEffect,
+useRef,
+useState,
+type FormEvent,
 } from "react";
 import {
-  Link,
-  useSearchParams,
-  useBlocker,
-  UNSAFE_DataRouterContext,
+Link,
+UNSAFE_DataRouterContext,
+useBlocker,
+useSearchParams,
 } from "react-router";
+
+import Plus from "@mui/icons-material/AddOutlined";
+import ArrowDown from "@mui/icons-material/ArrowDownwardOutlined";
+import ArrowUp from "@mui/icons-material/ArrowUpwardOutlined";
+import ChevronDown from "@mui/icons-material/ExpandMoreOutlined";
+import MoreHorizontal from "@mui/icons-material/MoreHorizOutlined";
+import RefreshCw from "@mui/icons-material/RefreshOutlined";
+
+import * as api from "@/lib/api";
+import { formatDateTime,formatMs } from "@/lib/format";
+import { useI18n } from "@/lib/i18n";
 import {
-  Alert,
-  Accordion,
-  AccordionDetails,
-  AccordionSummary,
-  Box,
-  Button,
-  Checkbox,
-  CircularProgress,
-  FormControlLabel,
-  IconButton,
-  Menu,
-  MenuItem,
-  Stack,
-  Tab,
-  Tabs,
-  TextField,
-  Typography,
-} from "@mui/material";
-import {
-  ArrowDown,
-  ArrowUp,
-  ChevronDown,
-  MoreHorizontal,
-  Plus,
-  RefreshCw,
-} from "lucide-react";
-import { DetailDrawer } from "./console/DetailDrawer";
-import { ConfirmAction } from "./console/ConfirmAction";
-import { PageHeader } from "./console/PageHeader";
-import { EmptyState } from "./console/EmptyState";
+createRequestOverridesDraft,
+parseRequestOverridesDraft,
+} from "@/lib/requestOverridesDraft";
+import type {
+ConnectionSettings,
+ProviderWorkspace,
+SystemConfigResponse,
+UpstreamRuntimeState,
+} from "@/lib/types";
 import { CodexOAuthPanel } from "./CodexOAuthPanel";
 import { UpstreamKeyModels } from "./UpstreamKeyModels";
-import {
-  createRequestOverridesDraft,
-  parseRequestOverridesDraft,
-} from "@/lib/requestOverridesDraft";
-import * as api from "@/lib/api";
-import type {
-  ConnectionSettings,
-  ProviderWorkspace,
-  UpstreamRuntimeState,
-  SystemConfigResponse,
-} from "@/lib/types";
-import { formatDateTime, formatMs } from "@/lib/format";
-import { useI18n } from "@/lib/i18n";
 
 const RulesEditor = lazy(() =>
   import("./console/RequestOverridesEditor").then((m) => ({
@@ -116,69 +123,100 @@ export function ProvidersPage(props: Props) {
     });
   return (
     <Stack spacing={2}>
-      <PageHeader
-        actions={
+      <Stack
+        component="header"
+        direction="row"
+        sx={{ justifyContent: "flex-end", flexWrap: "wrap", gap: 1.5 }}
+      >
+        {
           <>
             <Button
               variant="text"
               onClick={() => void props.onRefresh()}
               disabled={props.loading}
             >
-              <RefreshCw size={16} />
+              <RefreshCw fontSize="small" />
               {t("刷新")}
             </Button>
             <Button variant="contained" onClick={() => setCreate(true)}>
-              <Plus size={16} />
+              <Plus fontSize="small" />
               {t("新增上游")}
             </Button>
           </>
         }
-      />
+      </Stack>
       {props.loading && !props.items.length ? (
         <CircularProgress size={24} />
       ) : null}
       {!props.loading && !props.items.length ? (
-        <EmptyState
-          title={t("暂无上游")}
-          description={t("添加服务地址和凭据以连接模型服务。")}
-        />
+        <Box sx={{ py: 6, px: 2, textAlign: "center" }}>
+          <Typography variant="subtitle1">{t("暂无上游")}</Typography>
+          <Typography color="text.secondary" sx={{ mt: 1 }}>
+            {t("添加服务地址和凭据以连接模型服务。")}
+          </Typography>
+        </Box>
       ) : null}
-      <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1 }}>
-        {props.items.map(({ provider: p }) => (
-          <Box
-            key={p.id}
-            sx={{ ...row, p: 2, borderBottom: 1, borderColor: "divider" }}
-          >
-            <Box sx={{ flex: "1 1 220px", minWidth: 0 }}>
-              <Typography sx={{ fontWeight: 600, overflowWrap: "anywhere" }}>
-                {p.name}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                {p.provider_type}
-              </Typography>
-            </Box>
-            <Typography variant="body2">
-              {p.endpoint_count ?? 0} {t("个地址")} · {p.key_count ?? 0}{" "}
-              {t("个凭据")} · {p.model_count ?? 0} {t("个模型")}
-            </Typography>
-            <Typography
-              variant="body2"
-              color={p.enabled ? "text.secondary" : "warning.main"}
-            >
-              {t(
-                !p.enabled
-                  ? "停用"
-                  : p.routing_availability?.available
-                    ? "可用"
-                    : "暂不可用",
-              )}
-            </Typography>
-            <Button variant="text" onClick={() => open(p.id)}>
-              {t("管理")}
-            </Button>
-          </Box>
-        ))}
-      </Box>
+      <TableContainer component={Paper} variant="outlined">
+        <Table aria-label={t("上游列表")} sx={{ minWidth: 720 }}>
+          <TableHead>
+            <TableRow>
+              {[
+                "名称",
+                "协议",
+                "地址数",
+                "凭据数",
+                "模型数",
+                "状态",
+                "管理",
+              ].map((label) => (
+                <TableCell key={label}>{t(label)}</TableCell>
+              ))}
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {props.items.map(({ provider: p }) => (
+              <TableRow key={p.id} hover>
+                <TableCell
+                  sx={{
+                    fontWeight: 600,
+                    maxWidth: 320,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {p.name}
+                </TableCell>
+                <TableCell>{p.provider_type}</TableCell>
+                <TableCell align="right">{p.endpoint_count ?? 0}</TableCell>
+                <TableCell align="right">{p.key_count ?? 0}</TableCell>
+                <TableCell align="right">{p.model_count ?? 0}</TableCell>
+                <TableCell>
+                  <Chip
+                    color={
+                      !p.enabled
+                        ? "default"
+                        : p.routing_availability?.available
+                          ? "success"
+                          : "warning"
+                    }
+                    label={t(
+                      !p.enabled
+                        ? "停用"
+                        : p.routing_availability?.available
+                          ? "可用"
+                          : "暂不可用",
+                    )}
+                  />
+                </TableCell>
+                <TableCell>
+                  <Button variant="text" onClick={() => open(p.id)}>
+                    {t("管理")}
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
       {create ? (
         <CreateUpstream
           {...props}
@@ -278,89 +316,138 @@ function CreateUpstream(
     }
   };
   return (
-    <DetailDrawer
-      open
-      title="新增上游"
-      description="填写连接信息，创建后同步模型。"
+    <Drawer
+      anchor="right"
+      open={true}
       onClose={() => {
         if (!busy) props.onClose();
       }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-modal": true,
+          "aria-label": t("新增上游"),
+          sx: { width: { xs: "100%", sm: 720 }, maxWidth: "100%" },
+        },
+      }}
     >
-      <Stack component="form" spacing={2} onSubmit={submit}>
-        {error ? (
-          <Alert severity="error">
-            {created ? t("上游已创建，同步失败，可重试或稍后处理。") + " " : ""}
-            {error}
-          </Alert>
-        ) : null}
-        <TextField
-          label={t("名称")}
-          required
-          value={name}
-          disabled={busy || !!created}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <TextField
-          select
-          label={t("类型")}
-          value={type}
-          disabled={busy || !!created}
-          onChange={(e) => {
-            setType(e.target.value);
-            if (e.target.value === "openai_codex_oauth")
-              setUrls("https://chatgpt.com/backend-api/codex");
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 2,
+          p: 3,
+          borderBottom: 1,
+          borderColor: "divider",
+        }}
+      >
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography
+            component="h2"
+            variant="h2"
+            sx={{ overflowWrap: "anywhere" }}
+          >
+            {t("新增上游")}
+          </Typography>
+          <Typography color="text.secondary" sx={{ mt: 1 }}>
+            {"填写连接信息，创建后同步模型。"}
+          </Typography>
+        </Box>
+        <IconButton
+          aria-label={t("关闭")}
+          onClick={() => {
+            if (!busy) props.onClose();
           }}
         >
-          {providerTypes.map(([v, l]) => (
-            <MenuItem key={v} value={v}>
-              {l}
-            </MenuItem>
-          ))}
-        </TextField>
-        <Typography variant="body2" color="text.secondary">
-          {t(
-            type === "openai_codex_oauth"
-              ? "创建后登录 ChatGPT Codex 账号，仅支持 Responses 协议。"
-              : type === "openai_compatible_responses"
-                ? "仅支持 Responses 协议。"
-                : "支持 OpenAI 兼容协议。",
-          )}
-        </Typography>
-        <TextField
-          label={t("服务地址（每行一个）")}
-          multiline
-          minRows={2}
-          required
-          value={urls}
-          disabled={busy || !!created}
-          onChange={(e) => setUrls(e.target.value)}
-        />
-        {type !== "openai_codex_oauth" ? (
+          <CloseOutlined />
+        </IconButton>
+      </Box>
+      <Box
+        sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: { xs: 2, sm: 3 } }}
+      >
+        <Stack component="form" spacing={2} onSubmit={submit}>
+          {error ? (
+            <Alert severity="error">
+              {created
+                ? t("上游已创建，同步失败，可重试或稍后处理。") + " "
+                : ""}
+              {error}
+            </Alert>
+          ) : null}
           <TextField
-            label={t("API Key（每行一个）")}
+            label={t("名称")}
+            required
+            value={name}
+            disabled={busy || !!created}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <TextField
+            select
+            label={t("类型")}
+            value={type}
+            disabled={busy || !!created}
+            onChange={(e) => {
+              setType(e.target.value);
+              if (e.target.value === "openai_codex_oauth")
+                setUrls("https://chatgpt.com/backend-api/codex");
+            }}
+          >
+            {providerTypes.map(([v, l]) => (
+              <MenuItem key={v} value={v}>
+                {l}
+              </MenuItem>
+            ))}
+          </TextField>
+          <Typography variant="body2" color="text.secondary">
+            {t(
+              type === "openai_codex_oauth"
+                ? "创建后登录 ChatGPT Codex 账号，仅支持 Responses 协议。"
+                : type === "openai_compatible_responses"
+                  ? "仅支持 Responses 协议。"
+                  : "支持 OpenAI 兼容协议。",
+            )}
+          </Typography>
+          <TextField
+            label={t("服务地址（每行一个）")}
             multiline
             minRows={2}
-            required={!created}
-            value={secrets}
+            required
+            value={urls}
             disabled={busy || !!created}
-            autoComplete="off"
-            onChange={(e) => setSecrets(e.target.value)}
+            onChange={(e) => setUrls(e.target.value)}
           />
-        ) : null}
-        <Button type="submit" variant="contained" disabled={busy}>
-          {t(busy ? "处理中…" : created ? "重试同步" : "创建上游")}
-        </Button>
-        {created ? (
+          {type !== "openai_codex_oauth" ? (
+            <TextField
+              label={t("API Key（每行一个）")}
+              multiline
+              minRows={2}
+              required={!created}
+              value={secrets}
+              disabled={busy || !!created}
+              autoComplete="off"
+              onChange={(e) => setSecrets(e.target.value)}
+            />
+          ) : null}
           <Button
-            variant="text"
-            onClick={() => props.onCreated(created)}
+            loading={Boolean(busy)}
+            type="submit"
+            variant="contained"
             disabled={busy}
           >
-            {t("稍后同步，打开详情")}
+            {t(busy ? "处理中…" : created ? "重试同步" : "创建上游")}
           </Button>
-        ) : null}
-      </Stack>
-    </DetailDrawer>
+          {created ? (
+            <Button
+              variant="text"
+              onClick={() => props.onCreated(created)}
+              disabled={busy}
+            >
+              {t("稍后同步，打开详情")}
+            </Button>
+          ) : null}
+        </Stack>
+      </Box>
+    </Drawer>
   );
 }
 
@@ -440,16 +527,56 @@ function UpstreamDetail(
   const action = (operation: () => Promise<unknown>, section?: string) =>
     void run(operation, section).catch(() => {});
   return (
-    <DetailDrawer
-      open
-      title={config?.provider.name ?? "上游详情"}
+    <Drawer
+      anchor="right"
+      open={true}
       onClose={() => {
         if (!busy) {
           if (hasDirty && !dataRouter) setDiscard(true);
           else props.onClose();
         }
       }}
-      subheader={
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-modal": true,
+          "aria-label": t(config?.provider.name ?? "上游详情"),
+          sx: { width: { xs: "100%", sm: 720 }, maxWidth: "100%" },
+        },
+      }}
+    >
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 2,
+          p: 3,
+          borderBottom: 1,
+          borderColor: "divider",
+        }}
+      >
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography
+            component="h2"
+            variant="h2"
+            sx={{ overflowWrap: "anywhere" }}
+          >
+            {t(config?.provider.name ?? "上游详情")}
+          </Typography>
+        </Box>
+        <IconButton
+          aria-label={t("关闭")}
+          onClick={() => {
+            if (!busy) {
+              if (hasDirty && !dataRouter) setDiscard(true);
+              else props.onClose();
+            }
+          }}
+        >
+          <CloseOutlined />
+        </IconButton>
+      </Box>
+      {
         <Box sx={{ ...row, px: 2, borderBottom: 1, borderColor: "divider" }}>
           <Tabs
             value={props.tab}
@@ -490,84 +617,119 @@ function UpstreamDetail(
           </Menu>
         </Box>
       }
-    >
-      {dataRouter ? (
-        <UnsavedNavigationGuard dirty={hasDirty} busy={busy} id={props.id} />
-      ) : null}
-      {error ? (
-        <Alert severity="error" sx={{ mb: 2 }}>
-          {error}
-        </Alert>
-      ) : null}
-      {!config ? (
-        <CircularProgress size={24} />
-      ) : (
-        <>
-          <Box
-            role="tabpanel"
-            id="upstream-panel-connection"
-            aria-labelledby="upstream-tab-connection"
-            hidden={props.tab !== "connection"}
-          >
-            <ConnectionEditor
-              config={config}
-              settings={props.settings}
-              busy={busy}
-              run={run}
-              action={action}
-              mark={mark}
-              onMessage={props.onMessage}
-            />
-          </Box>
-          <Box
-            role="tabpanel"
-            id="upstream-panel-advanced"
-            aria-labelledby="upstream-tab-advanced"
-            hidden={props.tab !== "advanced"}
-          >
-            <AdvancedEditor
-              config={config}
-              system={system}
-              settings={props.settings}
-              busy={busy}
-              run={run}
-              mark={mark}
-            />
-          </Box>
-          {props.tab === "runtime" ? (
+      <Box
+        sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: { xs: 2, sm: 3 } }}
+      >
+        {dataRouter ? (
+          <UnsavedNavigationGuard dirty={hasDirty} busy={busy} id={props.id} />
+        ) : null}
+        {error ? (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {error}
+          </Alert>
+        ) : null}
+        {!config ? (
+          <CircularProgress size={24} />
+        ) : (
+          <>
             <Box
               role="tabpanel"
-              id="upstream-panel-runtime"
-              aria-labelledby="upstream-tab-runtime"
+              id="upstream-panel-connection"
+              aria-labelledby="upstream-tab-connection"
+              hidden={props.tab !== "connection"}
             >
-              <RuntimePanel settings={props.settings} id={props.id} />
+              <ConnectionEditor
+                config={config}
+                settings={props.settings}
+                busy={busy}
+                run={run}
+                action={action}
+                mark={mark}
+                onMessage={props.onMessage}
+              />
             </Box>
-          ) : null}
-        </>
-      )}
-      <ConfirmAction
-        busy={busy}
-        confirmLabel="放弃修改"
-        open={discard}
-        title={t("放弃未保存的修改？")}
-        onClose={() => setDiscard(false)}
-        onConfirm={props.onClose}
-      />
-      <ConfirmAction
-        open={remove}
-        title={t("确认删除整个上游？历史数据会保留。")}
-        busy={busy}
-        error={error}
-        onClose={() => setRemove(false)}
-        onConfirm={() =>
-          action(async () => {
-            await api.deleteProvider(props.settings, props.id);
-            await props.onRefresh();
-            props.onClose();
-          })
-        }
-      />
-    </DetailDrawer>
+            <Box
+              role="tabpanel"
+              id="upstream-panel-advanced"
+              aria-labelledby="upstream-tab-advanced"
+              hidden={props.tab !== "advanced"}
+            >
+              <AdvancedEditor
+                config={config}
+                system={system}
+                settings={props.settings}
+                busy={busy}
+                run={run}
+                mark={mark}
+              />
+            </Box>
+            {props.tab === "runtime" ? (
+              <Box
+                role="tabpanel"
+                id="upstream-panel-runtime"
+                aria-labelledby="upstream-tab-runtime"
+              >
+                <RuntimePanel settings={props.settings} id={props.id} />
+              </Box>
+            ) : null}
+          </>
+        )}
+        <Dialog
+          open={discard}
+          onClose={busy ? undefined : () => setDiscard(false)}
+          aria-label={t("放弃未保存的修改？")}
+        >
+          <DialogTitle>{t("放弃未保存的修改？")}</DialogTitle>
+          <DialogContent></DialogContent>
+          <DialogActions>
+            <Button
+              autoFocus
+              variant="outlined"
+              disabled={busy}
+              onClick={() => setDiscard(false)}
+            >
+              {t("取消")}
+            </Button>
+            <Button color="error" loading={busy} onClick={props.onClose}>
+              {t("放弃修改")}
+            </Button>
+          </DialogActions>
+        </Dialog>
+        <Dialog
+          open={remove}
+          onClose={busy ? undefined : () => setRemove(false)}
+          aria-label={t("确认删除整个上游？历史数据会保留。")}
+        >
+          <DialogTitle>{t("确认删除整个上游？历史数据会保留。")}</DialogTitle>
+          <DialogContent>
+            {error ? <Alert severity="error">{error}</Alert> : null}
+          </DialogContent>
+          <DialogActions>
+            <Button
+              autoFocus
+              variant="outlined"
+              disabled={busy}
+              onClick={() => setRemove(false)}
+            >
+              {t("取消")}
+            </Button>
+            <Button
+              color="error"
+              loading={busy}
+              onClick={() =>
+                action(async () => {
+                  await api.deleteProvider(props.settings, props.id);
+                  await props.onRefresh();
+                  props.onClose();
+                })
+              }
+            >
+              {t("确认删除")}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      </Box>
+    </Drawer>
   );
 }
 type Run = (
@@ -630,7 +792,7 @@ function ConnectionEditor({
         disabled={busy || index === 0}
         onClick={() => reorder(kind, index, -1)}
       >
-        <ArrowUp size={16} />
+        <ArrowUp fontSize="small" />
       </IconButton>
       <IconButton
         size="small"
@@ -638,7 +800,7 @@ function ConnectionEditor({
         disabled={busy || index === config[kind].length - 1}
         onClick={() => reorder(kind, index, 1)}
       >
-        <ArrowDown size={16} />
+        <ArrowDown fontSize="small" />
       </IconButton>
     </>
   );
@@ -699,111 +861,124 @@ function ConnectionEditor({
           >
             {t("取消")}
           </Button>
-          <Button variant="text" type="submit" disabled={busy}>
+          <Button
+            loading={Boolean(busy)}
+            variant="text"
+            type="submit"
+            disabled={busy}
+          >
             {t("保存基础信息")}
           </Button>
         </Box>
       </Box>
-      <Section
-        title="服务地址"
-        action={
-          <Button
-            variant="text"
-            size="small"
-            onClick={() => choose("endpoint:new")}
-          >
-            {t("添加地址")}
-          </Button>
-        }
-      >
-        {config.endpoints.map((e, index) => (
-          <Box key={e.id}>
-            <Box
-              sx={{
-                ...row,
-                minHeight: 44,
-                borderBottom: 1,
-                borderColor: "divider",
-              }}
-              draggable={!edit}
-              onDragStart={(event) =>
-                event.dataTransfer.setData("text/plain", String(e.id))
-              }
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                const from = config.endpoints.findIndex(
-                  (e) =>
-                    e.id === Number(event.dataTransfer.getData("text/plain")),
-                );
-                if (from >= 0 && from !== index) {
-                  const ids = config.endpoints.map((e) => e.id);
-                  ids.splice(index, 0, ids.splice(from, 1)[0]);
-                  action(() =>
-                    api.reorderProviderChildren(
-                      settings,
-                      p.id,
-                      "endpoints",
-                      ids,
-                    ),
-                  );
-                }
-              }}
+      <Box component="section">
+        <Box sx={{ ...row, justifyContent: "space-between", mb: 0.5 }}>
+          <Typography component="h3" variant="subtitle2">
+            {t("服务地址")}
+          </Typography>
+          {
+            <Button
+              variant="text"
+              size="small"
+              onClick={() => choose("endpoint:new")}
             >
-              <Typography variant="body2">
-                {t(index ? "备用地址" : "主地址")}
-              </Typography>
-              <Typography
-                variant="body2"
-                sx={{ flex: "1 1 180px", overflowWrap: "anywhere" }}
-              >
-                {e.base_url}
-              </Typography>
-              <Typography variant="caption">
-                {t(
-                  !e.enabled
-                    ? "停用"
-                    : e.health?.available === false
-                      ? "冷却中"
-                      : "可用",
-                )}
-              </Typography>
-              {orderButtons("endpoints", index)}
-              <Button
-                variant="text"
-                size="small"
-                disabled={busy}
-                onClick={() =>
-                  action(async () => {
-                    const result = await api.testEndpointConnection(
-                      settings,
-                      e.id,
+              {t("添加地址")}
+            </Button>
+          }
+        </Box>
+        {
+          <>
+            {config.endpoints.map((e, index) => (
+              <Box key={e.id}>
+                <Box
+                  sx={{
+                    ...row,
+                    minHeight: 44,
+                    borderBottom: 1,
+                    borderColor: "divider",
+                  }}
+                  draggable={!edit}
+                  onDragStart={(event) =>
+                    event.dataTransfer.setData("text/plain", String(e.id))
+                  }
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const from = config.endpoints.findIndex(
+                      (e) =>
+                        e.id ===
+                        Number(event.dataTransfer.getData("text/plain")),
                     );
-                    setTest((current) => ({
-                      ...current,
-                      [e.id]: result.ok
-                        ? t("地址可达（未验证 Key）")
-                        : (result.message ?? t("地址不可达")),
-                    }));
-                  })
-                }
-              >
-                {t("测试")}
-              </Button>
-              <Button
-                variant="text"
-                size="small"
-                onClick={() => choose(`endpoint:${e.id}`)}
-              >
-                {t("编辑")}
-              </Button>
-            </Box>
-            {test[e.id] ? (
-              <Typography variant="caption">{test[e.id]}</Typography>
-            ) : null}
-          </Box>
-        ))}
-      </Section>
+                    if (from >= 0 && from !== index) {
+                      const ids = config.endpoints.map((e) => e.id);
+                      ids.splice(index, 0, ids.splice(from, 1)[0]);
+                      action(() =>
+                        api.reorderProviderChildren(
+                          settings,
+                          p.id,
+                          "endpoints",
+                          ids,
+                        ),
+                      );
+                    }
+                  }}
+                >
+                  <Typography variant="body2">
+                    {t(index ? "备用地址" : "主地址")}
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    sx={{ flex: "1 1 180px", overflowWrap: "anywhere" }}
+                  >
+                    {e.base_url}
+                  </Typography>
+                  <Typography variant="caption">
+                    {t(
+                      !e.enabled
+                        ? "停用"
+                        : e.health?.available === false
+                          ? "冷却中"
+                          : "可用",
+                    )}
+                  </Typography>
+                  {orderButtons("endpoints", index)}
+                  <Button
+                    variant="text"
+                    size="small"
+                    disabled={busy}
+                    onClick={() =>
+                      action(async () => {
+                        const result = await api.testEndpointConnection(
+                          settings,
+                          e.id,
+                        );
+                        setTest((current) => ({
+                          ...current,
+                          [e.id]: result.ok
+                            ? t("地址可达（未验证 Key）")
+                            : (result.message ?? t("地址不可达")),
+                        }));
+                      })
+                    }
+                  >
+                    {t("测试")}
+                  </Button>
+                  <Button
+                    variant="text"
+                    size="small"
+                    onClick={() => choose(`endpoint:${e.id}`)}
+                  >
+                    {t("编辑")}
+                  </Button>
+                </Box>
+                {test[e.id] ? (
+                  <Typography variant="caption">{test[e.id]}</Typography>
+                ) : null}
+              </Box>
+            ))}
+          </>
+        }
+      </Box>
       {edit?.startsWith("endpoint:") ? (
         <ChildEditor
           key={edit}
@@ -833,84 +1008,90 @@ function ConnectionEditor({
         />
       ) : (
         <>
-          <Section
-            title="API Key"
-            action={
-              <Button
-                variant="text"
-                size="small"
-                onClick={() => choose("key:new")}
-              >
-                {t("添加 Key")}
-              </Button>
-            }
-          >
-            <TextField
-              size="small"
-              select
-              label={t("Key 使用方式")}
-              value={p.key_selection_strategy}
-              disabled={busy}
-              sx={{ width: { xs: "100%", sm: 240 }, my: 1 }}
-              onChange={(e) =>
-                action(() =>
-                  api.updateProvider(settings, p.id, {
-                    key_selection_strategy: e.target.value as
-                      | "ordered"
-                      | "round_robin",
-                  }),
-                )
-              }
-            >
-              <MenuItem value="round_robin">{t("轮流使用")}</MenuItem>
-              <MenuItem value="ordered">{t("主备顺序")}</MenuItem>
-              {p.key_selection_strategy === "weighted" ? (
-                <MenuItem value="weighted" disabled>
-                  {t("加权分配（兼容旧配置）")}
-                </MenuItem>
-              ) : null}
-            </TextField>
-            {config.keys.map((k, index) => (
-              <Box
-                key={k.id}
-                sx={{
-                  ...row,
-                  minHeight: 44,
-                  borderBottom: 1,
-                  borderColor: "divider",
-                }}
-              >
-                <Typography
-                  variant="body2"
-                  sx={{ flex: 1, overflowWrap: "anywhere" }}
-                >
-                  {k.name}
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  {t("已配置")}
-                </Typography>
-                <Typography variant="caption">
-                  {t(
-                    !k.enabled
-                      ? "停用"
-                      : k.routing_availability?.available === false
-                        ? "冷却 / 不可用"
-                        : "可用",
-                  )}
-                </Typography>
-                {p.key_selection_strategy === "ordered"
-                  ? orderButtons("keys", index)
-                  : null}
+          <Box component="section">
+            <Box sx={{ ...row, justifyContent: "space-between", mb: 0.5 }}>
+              <Typography component="h3" variant="subtitle2">
+                {t("API Key")}
+              </Typography>
+              {
                 <Button
                   variant="text"
                   size="small"
-                  onClick={() => choose(`key:${k.id}`)}
+                  onClick={() => choose("key:new")}
                 >
-                  {t("编辑")}
+                  {t("添加 Key")}
                 </Button>
-              </Box>
-            ))}
-          </Section>
+              }
+            </Box>
+            {
+              <>
+                <TextField
+                  size="small"
+                  select
+                  label={t("Key 使用方式")}
+                  value={p.key_selection_strategy}
+                  disabled={busy}
+                  sx={{ width: { xs: "100%", sm: 240 }, my: 1 }}
+                  onChange={(e) =>
+                    action(() =>
+                      api.updateProvider(settings, p.id, {
+                        key_selection_strategy: e.target.value as
+                          "ordered" | "round_robin",
+                      }),
+                    )
+                  }
+                >
+                  <MenuItem value="round_robin">{t("轮流使用")}</MenuItem>
+                  <MenuItem value="ordered">{t("主备顺序")}</MenuItem>
+                  {p.key_selection_strategy === "weighted" ? (
+                    <MenuItem value="weighted" disabled>
+                      {t("加权分配（兼容旧配置）")}
+                    </MenuItem>
+                  ) : null}
+                </TextField>
+                {config.keys.map((k, index) => (
+                  <Box
+                    key={k.id}
+                    sx={{
+                      ...row,
+                      minHeight: 44,
+                      borderBottom: 1,
+                      borderColor: "divider",
+                    }}
+                  >
+                    <Typography
+                      variant="body2"
+                      sx={{ flex: 1, overflowWrap: "anywhere" }}
+                    >
+                      {k.name}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {t("已配置")}
+                    </Typography>
+                    <Typography variant="caption">
+                      {t(
+                        !k.enabled
+                          ? "停用"
+                          : k.routing_availability?.available === false
+                            ? "冷却 / 不可用"
+                            : "可用",
+                      )}
+                    </Typography>
+                    {p.key_selection_strategy === "ordered"
+                      ? orderButtons("keys", index)
+                      : null}
+                    <Button
+                      variant="text"
+                      size="small"
+                      onClick={() => choose(`key:${k.id}`)}
+                    >
+                      {t("编辑")}
+                    </Button>
+                  </Box>
+                ))}
+              </>
+            }
+          </Box>
           {edit?.startsWith("key:") ? (
             <ChildEditor
               key={edit}
@@ -933,93 +1114,115 @@ function ConnectionEditor({
           ) : null}
         </>
       )}
-      <Section
-        title="模型"
-        action={
-          <Box sx={row}>
-            <Button
-              variant="text"
-              disabled={busy}
-              onClick={() =>
-                action(() => api.syncProviderModels(settings, p.id))
-              }
-            >
-              {t("同步模型")}
-            </Button>
-            <Button
-              variant="text"
-              component={Link}
-              to={`/models?provider_id=${p.id}`}
-            >
-              {t("管理模型 →")}
-            </Button>
-          </Box>
+      <Box component="section">
+        <Box sx={{ ...row, justifyContent: "space-between", mb: 0.5 }}>
+          <Typography component="h3" variant="subtitle2">
+            {t("模型")}
+          </Typography>
+          {
+            <Box sx={row}>
+              <Button
+                variant="text"
+                disabled={busy}
+                onClick={() =>
+                  action(() => api.syncProviderModels(settings, p.id))
+                }
+              >
+                {t("同步模型")}
+              </Button>
+              <Button
+                variant="text"
+                component={Link}
+                to={`/models?provider_id=${p.id}`}
+              >
+                {t("管理模型 →")}
+              </Button>
+            </Box>
+          }
+        </Box>
+        {
+          <>
+            <Typography variant="body2" color="text.secondary">
+              {t("已发现")} {p.model_count ?? 0} {t("个模型")} ·{" "}
+              {t("最近成功同步")}：
+              {p.model_sync?.last_success_ms
+                ? formatDateTime(p.model_sync.last_success_ms)
+                : t("尚未同步")}
+            </Typography>
+            {p.model_sync?.error ? (
+              <Alert severity="warning">
+                {t("最近同步失败，保留上次成功库存。")}
+              </Alert>
+            ) : null}
+          </>
         }
-      >
-        <Typography variant="body2" color="text.secondary">
-          {t("已发现")} {p.model_count ?? 0} {t("个模型")} · {t("最近成功同步")}
-          ：
-          {p.model_sync?.last_success_ms
-            ? formatDateTime(p.model_sync.last_success_ms)
-            : t("尚未同步")}
-        </Typography>
-        {p.model_sync?.error ? (
-          <Alert severity="warning">
-            {t("最近同步失败，保留上次成功库存。")}
-          </Alert>
-        ) : null}
-      </Section>
-      <ConfirmAction
-        busy={busy}
-        confirmLabel="放弃修改"
-        open={pending !== undefined}
-        title={t("放弃当前编辑的修改？")}
-        onClose={() => setPending(undefined)}
-        onConfirm={() => {
-          childChanged(false);
-          setEdit(pending ?? null);
-          setPending(undefined);
-        }}
-      />
-      <ConfirmAction
-        open={!!removal}
-        title={t("确认删除 {{name}}？", { name: removal?.label ?? "" })}
-        busy={busy}
-        onClose={() => setRemoval(null)}
-        onConfirm={() => {
-          if (removal)
-            void run(removal.run, "child")
-              .then(() => {
-                setRemoval(null);
-                childChanged(false);
-                setEdit(null);
-              })
-              .catch(() => {});
-        }}
-      />
-    </Stack>
-  );
-}
-function Section({
-  title,
-  action,
-  children,
-}: {
-  title: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  const { t } = useI18n();
-  return (
-    <Box component="section">
-      <Box sx={{ ...row, justifyContent: "space-between", mb: 0.5 }}>
-        <Typography component="h3" variant="subtitle2">
-          {t(title)}
-        </Typography>
-        {action}
       </Box>
-      {children}
-    </Box>
+      <Dialog
+        open={pending !== undefined}
+        onClose={busy ? undefined : () => setPending(undefined)}
+        aria-label={t("放弃当前编辑的修改？")}
+      >
+        <DialogTitle>{t("放弃当前编辑的修改？")}</DialogTitle>
+        <DialogContent></DialogContent>
+        <DialogActions>
+          <Button
+            autoFocus
+            variant="outlined"
+            disabled={busy}
+            onClick={() => setPending(undefined)}
+          >
+            {t("取消")}
+          </Button>
+          <Button
+            color="error"
+            loading={busy}
+            onClick={() => {
+              childChanged(false);
+              setEdit(pending ?? null);
+              setPending(undefined);
+            }}
+          >
+            {t("放弃修改")}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={!!removal}
+        onClose={busy ? undefined : () => setRemoval(null)}
+        aria-label={t("确认删除 {{name}}？", { name: removal?.label ?? "" })}
+      >
+        <DialogTitle>
+          {t("确认删除 {{name}}？", { name: removal?.label ?? "" })}
+        </DialogTitle>
+        <DialogContent></DialogContent>
+        <DialogActions>
+          <Button
+            autoFocus
+            variant="outlined"
+            disabled={busy}
+            onClick={() => setRemoval(null)}
+          >
+            {t("取消")}
+          </Button>
+          <Button
+            color="error"
+            loading={busy}
+            onClick={() => {
+              if (removal)
+                void run(removal.run, "child")
+                  .then(() => {
+                    setRemoval(null);
+                    childChanged(false);
+                    setEdit(null);
+                  })
+                  .catch(() => {});
+            }}
+          >
+            {t("确认删除")}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Stack>
   );
 }
 
@@ -1119,7 +1322,12 @@ function ChildEditor(props: {
           }
         />
         <Box sx={row}>
-          <Button variant="text" type="submit" disabled={props.busy}>
+          <Button
+            loading={props.busy}
+            variant="text"
+            type="submit"
+            disabled={props.busy}
+          >
             {t("保存")}
           </Button>
           <Button variant="text" onClick={props.onClose}>
@@ -1148,7 +1356,7 @@ function ChildEditor(props: {
           sx={{ mt: 1 }}
           slotProps={{ transition: { unmountOnExit: true } }}
         >
-          <AccordionSummary expandIcon={<ChevronDown size={16} />}>
+          <AccordionSummary expandIcon={<ChevronDown fontSize="small" />}>
             {t("高级：模型允许列表")}
           </AccordionSummary>
           <AccordionDetails>
@@ -1207,7 +1415,7 @@ function AdvancedEditor({
   return (
     <Stack spacing={2}>
       <Accordion>
-        <AccordionSummary expandIcon={<ChevronDown size={16} />}>
+        <AccordionSummary expandIcon={<ChevronDown fontSize="small" />}>
           {t("请求策略")}
         </AccordionSummary>
         <AccordionDetails>
@@ -1275,7 +1483,9 @@ function AdvancedEditor({
               variant="text"
               disabled={busy}
               onClick={() => {
-                setRetries(p.max_retries ?? Math.min((p.max_attempts ?? 2) - 1, 2));
+                setRetries(
+                  p.max_retries ?? Math.min((p.max_attempts ?? 2) - 1, 2),
+                );
                 setTimeout(p.request_timeout_ms?.toString() ?? "");
                 setConcurrency(p.max_concurrency?.toString() ?? "");
                 setFailover(p.endpoint_failover ?? true);
@@ -1284,14 +1494,19 @@ function AdvancedEditor({
             >
               {t("取消")}
             </Button>
-            <Button variant="text" type="submit" disabled={busy}>
+            <Button
+              loading={Boolean(busy)}
+              variant="text"
+              type="submit"
+              disabled={busy}
+            >
               {t("保存请求策略")}
             </Button>
           </Box>
         </AccordionDetails>
       </Accordion>
       <Accordion>
-        <AccordionSummary expandIcon={<ChevronDown size={16} />}>
+        <AccordionSummary expandIcon={<ChevronDown fontSize="small" />}>
           {t("协议兼容")}
         </AccordionSummary>
         <AccordionDetails>
@@ -1344,7 +1559,12 @@ function AdvancedEditor({
             >
               {t("取消")}
             </Button>
-            <Button variant="text" type="submit" disabled={busy}>
+            <Button
+              loading={Boolean(busy)}
+              variant="text"
+              type="submit"
+              disabled={busy}
+            >
               {t("保存协议兼容")}
             </Button>
           </Stack>
@@ -1352,7 +1572,7 @@ function AdvancedEditor({
       </Accordion>
       {system?.capabilities?.request_rewrite ? (
         <Accordion>
-          <AccordionSummary expandIcon={<ChevronDown size={16} />}>
+          <AccordionSummary expandIcon={<ChevronDown fontSize="small" />}>
             {t("请求覆写")} ·{" "}
             {p.request_overrides.headers.length +
               p.request_overrides.body.length}{" "}
@@ -1489,60 +1709,84 @@ function RuntimePanel({
             {formatMs(data.provider.runtime?.latency_ewma_ms ?? 0)} ·{" "}
             {t("亲和会话")} {data.provider.affinity_sessions ?? 0}
           </Typography>
-          <Section title="地址 / Key 健康">
-            {[...data.endpoints, ...data.keys].map((item) => (
-              <Box
-                key={`${"base_url" in item ? "endpoint" : "key"}:${item.id}`}
-                sx={{ py: 1, borderBottom: 1, borderColor: "divider" }}
-              >
-                <Typography variant="body2">
-                  {item.name} ·{" "}
-                  {t(
-                    !item.enabled
-                      ? "停用"
-                      : item.health?.available === false
-                        ? "冷却中"
-                        : "可用",
-                  )}
+          <Box component="section">
+            <Box sx={{ ...row, justifyContent: "space-between", mb: 0.5 }}>
+              <Typography component="h3" variant="subtitle2">
+                {t("地址 / Key 健康")}
+              </Typography>
+              {undefined}
+            </Box>
+            {
+              <>
+                {[...data.endpoints, ...data.keys].map((item) => (
+                  <Box
+                    key={`${"base_url" in item ? "endpoint" : "key"}:${item.id}`}
+                    sx={{ py: 1, borderBottom: 1, borderColor: "divider" }}
+                  >
+                    <Typography variant="body2">
+                      {item.name} ·{" "}
+                      {t(
+                        !item.enabled
+                          ? "停用"
+                          : item.health?.available === false
+                            ? "冷却中"
+                            : "可用",
+                      )}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      sx={{ overflowWrap: "anywhere" }}
+                    >
+                      {"routing_availability" in item
+                        ? item.routing_availability?.reason
+                        : ""}{" "}
+                      {item.health?.last_error_message}{" "}
+                      {item.health?.open_until_ms
+                        ? formatDateTime(item.health.open_until_ms)
+                        : ""}
+                      {"quota" in item && item.quota?.cooldown_until_ms
+                        ? ` · ${t("配额等待至")} ${formatDateTime(item.quota.cooldown_until_ms)}`
+                        : ""}
+                    </Typography>
+                  </Box>
+                ))}
+              </>
+            }
+          </Box>
+          <Box component="section">
+            <Box sx={{ ...row, justifyContent: "space-between", mb: 0.5 }}>
+              <Typography component="h3" variant="subtitle2">
+                {t("最近错误")}
+              </Typography>
+              {undefined}
+            </Box>
+            {
+              <>
+                <Typography variant="caption" color="text.secondary">
+                  {t("最多 50 条，重启后清空；长期追溯请查看请求日志。")}
                 </Typography>
-                <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
-                  {"routing_availability" in item
-                    ? item.routing_availability?.reason
-                    : ""}{" "}
-                  {item.health?.last_error_message}{" "}
-                  {item.health?.open_until_ms
-                    ? formatDateTime(item.health.open_until_ms)
-                    : ""}
-                  {"quota" in item && item.quota?.cooldown_until_ms
-                    ? ` · ${t("配额等待至")} ${formatDateTime(item.quota.cooldown_until_ms)}`
-                    : ""}
-                </Typography>
-              </Box>
-            ))}
-          </Section>
-          <Section title="最近错误">
-            <Typography variant="caption" color="text.secondary">
-              {t("最多 50 条，重启后清空；长期追溯请查看请求日志。")}
-            </Typography>
-            {data.recent_errors.length ? (
-              data.recent_errors.map((e, i) => (
-                <Box
-                  key={`${e.time_ms}:${i}`}
-                  sx={{ py: 1, borderBottom: 1, borderColor: "divider" }}
-                >
-                  <Typography variant="body2">
-                    {formatDateTime(e.time_ms)} · {e.category} ·{" "}
-                    {e.status ?? "—"}
-                  </Typography>
-                  <Typography variant="caption">
-                    {t("地址")} #{e.endpoint_id} · Key #{e.key_id} · {e.summary}
-                  </Typography>
-                </Box>
-              ))
-            ) : (
-              <Typography variant="body2">{t("暂无错误")}</Typography>
-            )}
-          </Section>
+                {data.recent_errors.length ? (
+                  data.recent_errors.map((e, i) => (
+                    <Box
+                      key={`${e.time_ms}:${i}`}
+                      sx={{ py: 1, borderBottom: 1, borderColor: "divider" }}
+                    >
+                      <Typography variant="body2">
+                        {formatDateTime(e.time_ms)} · {e.category} ·{" "}
+                        {e.status ?? "—"}
+                      </Typography>
+                      <Typography variant="caption">
+                        {t("地址")} #{e.endpoint_id} · Key #{e.key_id} ·{" "}
+                        {e.summary}
+                      </Typography>
+                    </Box>
+                  ))
+                ) : (
+                  <Typography variant="body2">{t("暂无错误")}</Typography>
+                )}
+              </>
+            }
+          </Box>
         </>
       ) : null}
     </Stack>
@@ -1567,13 +1811,32 @@ function UnsavedNavigationGuard({
           id),
   );
   return (
-    <ConfirmAction
+    <Dialog
       open={blocker.state === "blocked"}
-      busy={busy}
-      title={t("放弃未保存的修改？")}
-      confirmLabel="放弃修改"
-      onClose={() => blocker.state === "blocked" && blocker.reset()}
-      onConfirm={() => blocker.state === "blocked" && blocker.proceed()}
-    />
+      onClose={
+        busy ? undefined : () => blocker.state === "blocked" && blocker.reset()
+      }
+      aria-label={t("放弃未保存的修改？")}
+    >
+      <DialogTitle>{t("放弃未保存的修改？")}</DialogTitle>
+      <DialogContent></DialogContent>
+      <DialogActions>
+        <Button
+          autoFocus
+          variant="outlined"
+          disabled={busy}
+          onClick={() => blocker.state === "blocked" && blocker.reset()}
+        >
+          {t("取消")}
+        </Button>
+        <Button
+          color="error"
+          loading={busy}
+          onClick={() => blocker.state === "blocked" && blocker.proceed()}
+        >
+          {t("放弃修改")}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }

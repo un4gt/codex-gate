@@ -1,30 +1,30 @@
-import { useEffect, useState } from "react";
+import Accordion from "@mui/material/Accordion";
+import AccordionDetails from "@mui/material/AccordionDetails";
+import AccordionSummary from "@mui/material/AccordionSummary";
+import Alert from "@mui/material/Alert";
+import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
+import Checkbox from "@mui/material/Checkbox";
+import FormControlLabel from "@mui/material/FormControlLabel";
+import MenuItem from "@mui/material/MenuItem";
+import Stack from "@mui/material/Stack";
+import TextField from "@mui/material/TextField";
+import Typography from "@mui/material/Typography";
+import { useEffect,useState } from "react";
+
+import ChevronDown from "@mui/icons-material/ExpandMoreOutlined";
+
 import {
-  Alert,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
-  Box,
-  Button,
-  Checkbox,
-  FormControlLabel,
-  MenuItem,
-  Stack,
-  TextField,
-  Typography,
-} from "@mui/material";
-import { ChevronDown } from "lucide-react";
-import {
-  loadModelRoutePolicies,
-  saveModelRoutePolicy,
-  resetModelRoutePolicy,
+loadModelRoutePolicies,
+resetModelRoutePolicy,
+saveModelRoutePolicy,
 } from "@/lib/api";
-import type {
-  ConnectionSettings,
-  ModelRoutePolicy,
-  ProviderWorkspace,
-} from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
+import type {
+ConnectionSettings,
+ModelRoutePolicy,
+ProviderWorkspace,
+} from "@/lib/types";
 
 export default function ModelRoutesEditor({
   settings,
@@ -121,7 +121,7 @@ function Policy({
   const [saved, setSaved] = useState(false);
   return (
     <Accordion defaultExpanded={initial.model_name === "*"}>
-      <AccordionSummary expandIcon={<ChevronDown size={16} />}>
+      <AccordionSummary expandIcon={<ChevronDown fontSize="small" />}>
         {initial.model_name === "*" ? t("默认路由") : initial.model_name}
       </AccordionSummary>
       <AccordionDetails>
@@ -231,7 +231,7 @@ function Policy({
             );
           })}
           <Accordion>
-            <AccordionSummary expandIcon={<ChevronDown size={16} />}>
+            <AccordionSummary expandIcon={<ChevronDown fontSize="small" />}>
               {t("高级选项")}
             </AccordionSummary>
             <AccordionDetails>
@@ -272,7 +272,7 @@ function Policy({
               {t("恢复默认路由")}
             </Button>
           ) : null}
-          <Button type="submit" disabled={busy}>
+          <Button loading={Boolean(busy)} type="submit" disabled={busy}>
             {t("保存路由")}
           </Button>
         </Stack>

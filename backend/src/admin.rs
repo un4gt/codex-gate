@@ -3894,6 +3894,38 @@ async fn stats_daily(req: Request<Incoming>, state: SharedState) -> HttpResponse
     }
 }
 
+fn stats_series_points(
+    from_ms: i64,
+    to_ms: i64,
+    interval_ms: i64,
+    buckets: Vec<(i64, crate::types::StatsOverviewAggRow)>,
+) -> (crate::types::StatsOverviewAggRow, Vec<Value>) {
+    let mut aggregate = crate::types::StatsOverviewAggRow::default();
+    let mut buckets = buckets.into_iter().peekable();
+    let first = (from_ms + ASIA_SHANGHAI_OFFSET_MS).div_euclid(interval_ms) * interval_ms
+        - ASIA_SHANGHAI_OFFSET_MS;
+    let mut points = Vec::new();
+    for start in (first..=to_ms).step_by(interval_ms as usize) {
+        let row = if buckets.peek().is_some_and(|(time, _)| *time == start) {
+            buckets.next().map(|(_, row)| row).unwrap_or_default()
+        } else {
+            crate::types::StatsOverviewAggRow::default()
+        };
+        aggregate.accumulate(&row);
+        points.push(serde_json::json!({
+            "bucket_start_ms": start,
+            "request_success": row.request_success,
+            "request_failed": row.request_failed,
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cache_read_input_tokens": row.cache_read_input_tokens,
+            "cache_creation_input_tokens": row.cache_creation_input_tokens,
+            "usage_observed_requests": row.usage_observed_requests,
+        }));
+    }
+    (aggregate, points)
+}
+
 async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let period = query_string(req.uri().query(), "period").unwrap_or_else(|| "today".to_string());
     let now_ms = util::now_ms();
@@ -3906,8 +3938,13 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
-    let (agg, pricing_groups) = match tokio::join!(
-        state.db.aggregate_stats_events_range(from_ms, to_ms),
+    let interval_ms = if matches!(period.as_str(), "week" | "month" | "7d" | "30d") {
+        MILLIS_PER_DAY
+    } else {
+        MILLIS_PER_HOUR
+    };
+    let (buckets, pricing_groups) = match tokio::join!(
+        state.db.aggregate_stats_series(from_ms, to_ms, interval_ms),
         state.db.aggregate_pricing_usage_groups(from_ms, to_ms)
     ) {
         (Ok(agg), Ok(groups)) => (agg, groups),
@@ -3915,6 +3952,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
         }
     };
+    let (agg, points) = stats_series_points(from_ms, to_ms, interval_ms, buckets);
     let mut price_version_ids = pricing_groups
         .iter()
         .filter_map(|group| group.price_version_id)
@@ -4004,6 +4042,7 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
 
     let payload = serde_json::json!({
         "period": period,
+        "series": { "interval_ms": interval_ms, "points": points },
         "window": { "from_ms": from_ms, "to_ms": to_ms },
         "kpis": {
             "requests": requests_total,
@@ -4531,6 +4570,52 @@ async fn sync_legacy_provider_route(
 mod tests {
     use super::*;
     use hyper::header::{CONNECTION, CONTENT_TYPE};
+
+    #[test]
+    fn stats_series_fills_empty_buckets_and_keeps_summary_consistent() {
+        let midnight = 1_787_068_800_000;
+        let observed = crate::types::StatsOverviewAggRow {
+            request_success: 1,
+            input_tokens: 10,
+            output_tokens: 5,
+            usage_observed_requests: 1,
+            ..Default::default()
+        };
+        let missing = crate::types::StatsOverviewAggRow {
+            request_failed: 1,
+            ..Default::default()
+        };
+        let (sum, points) = stats_series_points(
+            midnight + 123,
+            midnight + 2 * MILLIS_PER_HOUR + 456,
+            MILLIS_PER_HOUR,
+            vec![
+                (midnight, observed),
+                (midnight + 2 * MILLIS_PER_HOUR, missing),
+            ],
+        );
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[1]["request_success"], 0);
+        assert_eq!(points[2]["usage_observed_requests"], 0);
+        assert_eq!(
+            sum.request_success + sum.request_failed,
+            points
+                .iter()
+                .map(|p| p["request_success"].as_i64().unwrap()
+                    + p["request_failed"].as_i64().unwrap())
+                .sum::<i64>()
+        );
+        assert_eq!(sum.input_tokens, 10);
+        assert_eq!(sum.usage_observed_requests, 1);
+    }
+
+    #[test]
+    fn stats_series_empty_window_has_zero_buckets_and_no_latency() {
+        let (sum, points) = stats_series_points(0, 3_600_000, MILLIS_PER_HOUR, Vec::new());
+        assert_eq!(points.len(), 2);
+        assert_eq!(sum, crate::types::StatsOverviewAggRow::default());
+        assert_eq!(approximate_p95_latency_ms(&[0; 6]), None);
+    }
 
     #[test]
     fn stats_window_today_should_start_at_asia_shanghai_midnight() {

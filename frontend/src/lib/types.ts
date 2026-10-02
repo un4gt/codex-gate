@@ -43,8 +43,9 @@ export interface RequestLogRow {
   t_first_byte_ms: number | null;
   t_first_token_ms: number | null;
   duration_ms: number | null;
-  span_kind: 'request' | 'ws_session' | 'ws_session_close' | 'ws_turn' | string;
-  transport: 'http' | 'ws' | 'ws_native' | 'ws_http_bridge' | 'ws_setup' | string;
+  span_kind: "request" | "ws_session" | "ws_session_close" | "ws_turn" | string;
+  transport:
+    "http" | "ws" | "ws_native" | "ws_http_bridge" | "ws_setup" | string;
   parent_id: string | null;
   ws_session_id: string | null;
   requested_service_tier?: string | null;
@@ -55,7 +56,11 @@ export interface RequestLogRow {
 }
 
 export interface RoutingTrace {
-  encrypted_content_recovery?: { filtered_items: number; stripped_items: number; retries: number };
+  encrypted_content_recovery?: {
+    filtered_items: number;
+    stripped_items: number;
+    retries: number;
+  };
   attempts_sent?: number;
   attempt_limit?: number;
   backoff_ms?: number;
@@ -98,12 +103,16 @@ export interface RoutingTrace {
   }>;
   provider_switches: number;
   conversion?: {
-    mode: 'responses_via_chat' | string;
+    mode: "responses_via_chat" | string;
     client_api_format: string;
     upstream_api_format: string;
     warnings: string[];
   } | null;
-  terminal: { status: number | null; error_type: string | null; message?: string } | null;
+  terminal: {
+    status: number | null;
+    error_type: string | null;
+    message?: string;
+  } | null;
 }
 
 export interface ProviderGroupRef {
@@ -138,7 +147,7 @@ export interface RequestLogSearchParams {
   upstream_key_id?: number;
   api_key_id?: number;
   api_key_log_enabled?: boolean;
-  api_format?: 'chat_completions' | 'responses';
+  api_format?: "chat_completions" | "responses";
   error_type?: string;
   status_class?: number;
   time_from_ms?: number;
@@ -156,21 +165,22 @@ export interface RequestLogSearchParams {
   cache_creation_input_tokens_max?: number;
 }
 
-export type NotificationLocale = 'zh-CN' | 'en-US';
-export type NotificationSmtpSecurity = 'starttls' | 'tls' | 'none';
-export type NotificationChannelKind = 'smtp' | 'webhook';
-export type NotificationWebhookFormat = 'generic' | 'feishu' | 'wecom' | 'dingtalk' | 'slack' | 'discord';
-export type NotificationRuleKind = 'scheduled_report' | 'threshold_alert';
+export type NotificationLocale = "zh-CN" | "en-US";
+export type NotificationSmtpSecurity = "starttls" | "tls" | "none";
+export type NotificationChannelKind = "smtp" | "webhook";
+export type NotificationWebhookFormat =
+  "generic" | "feishu" | "wecom" | "dingtalk" | "slack" | "discord";
+export type NotificationRuleKind = "scheduled_report" | "threshold_alert";
 export type NotificationAlertMetric =
-  | 'cpu_usage_percent'
-  | 'memory_usage_percent'
-  | 'unhealthy_provider_count'
-  | 'request_count'
-  | 'error_rate_percent'
-  | 'total_tokens'
-  | 'estimated_cost_usd';
-export type NotificationAlertScope = 'global' | 'provider' | 'client_key';
-export type NotificationAlertOperator = 'gt' | 'gte' | 'lt' | 'lte';
+  | "cpu_usage_percent"
+  | "memory_usage_percent"
+  | "unhealthy_provider_count"
+  | "request_count"
+  | "error_rate_percent"
+  | "total_tokens"
+  | "estimated_cost_usd";
+export type NotificationAlertScope = "global" | "provider" | "client_key";
+export type NotificationAlertOperator = "gt" | "gte" | "lt" | "lte";
 
 export interface NotificationWebhookHeader {
   name: string;
@@ -203,17 +213,18 @@ interface NotificationChannelBase {
   updated_at_ms: number;
 }
 
-export type NotificationChannel = NotificationChannelBase & (
-  | { kind: 'smtp'; config: NotificationSmtpPublicConfig }
-  | { kind: 'webhook'; config: NotificationWebhookPublicConfig }
-);
+export type NotificationChannel = NotificationChannelBase &
+  (
+    | { kind: "smtp"; config: NotificationSmtpPublicConfig }
+    | { kind: "webhook"; config: NotificationWebhookPublicConfig }
+  );
 
 export type NotificationChannelInput = {
   name: string;
   enabled: boolean;
 } & (
   | {
-      kind: 'smtp';
+      kind: "smtp";
       config: {
         host: string;
         port: number;
@@ -226,7 +237,7 @@ export type NotificationChannelInput = {
       };
     }
   | {
-      kind: 'webhook';
+      kind: "webhook";
       config: {
         url: string;
         format: NotificationWebhookFormat;
@@ -237,8 +248,7 @@ export type NotificationChannelInput = {
 );
 
 export type NotificationChannelUpdateInput =
-  | NotificationChannelInput
-  | { name?: string; enabled?: boolean };
+  NotificationChannelInput | { name?: string; enabled?: boolean };
 
 export interface NotificationChannelCreateResponse {
   channel: NotificationChannel;
@@ -277,7 +287,7 @@ interface NotificationRuleBase {
   created_at_ms: number;
   updated_at_ms: number;
   alert_state?: {
-    state: 'normal' | 'pending' | 'firing' | string;
+    state: "normal" | "pending" | "firing" | string;
     breach_count: number;
     recovery_count: number;
     opened_at_ms: number | null;
@@ -285,18 +295,19 @@ interface NotificationRuleBase {
   };
 }
 
-export type NotificationRule = NotificationRuleBase & (
-  | { kind: 'scheduled_report'; config: ScheduledNotificationConfig }
-  | { kind: 'threshold_alert'; config: ThresholdNotificationConfig }
-);
+export type NotificationRule = NotificationRuleBase &
+  (
+    | { kind: "scheduled_report"; config: ScheduledNotificationConfig }
+    | { kind: "threshold_alert"; config: ThresholdNotificationConfig }
+  );
 
 export type NotificationRuleInput = {
   name: string;
   enabled: boolean;
   channel_ids: number[];
 } & (
-  | { kind: 'scheduled_report'; config: ScheduledNotificationConfig }
-  | { kind: 'threshold_alert'; config: ThresholdNotificationConfig }
+  | { kind: "scheduled_report"; config: ScheduledNotificationConfig }
+  | { kind: "threshold_alert"; config: ThresholdNotificationConfig }
 );
 
 export type NotificationRuleUpdateInput =
@@ -319,7 +330,7 @@ export interface NotificationDelivery {
   channel_id: number | null;
   channel_name: string;
   channel_kind: NotificationChannelKind;
-  status: 'pending' | 'sending' | 'succeeded' | 'failed' | 'skipped' | string;
+  status: "pending" | "sending" | "succeeded" | "failed" | "skipped" | string;
   attempts: number;
   next_attempt_at_ms: number | null;
   last_attempt_at_ms: number | null;
@@ -401,7 +412,7 @@ export interface ApiKeyWorkspace {
   recentModels: string[];
 }
 
-export type CircuitState = 'closed' | 'open' | 'half_open';
+export type CircuitState = "closed" | "open" | "half_open";
 
 export interface RuntimeHealthSummary {
   state: CircuitState;
@@ -433,8 +444,8 @@ export interface ProviderHealthSummary extends RuntimeHealthSummary {
   key_counts: HealthCounts;
 }
 
-export type RequestOverrideScope = 'all' | 'chat_completions' | 'responses';
-export type RequestOverrideOperation = 'set' | 'remove';
+export type RequestOverrideScope = "all" | "chat_completions" | "responses";
+export type RequestOverrideOperation = "set" | "remove";
 
 export interface RequestHeaderOverride {
   scope: RequestOverrideScope;
@@ -462,7 +473,11 @@ export interface ProviderSummary {
   max_retries?: number;
   request_timeout_ms?: number | null;
   endpoint_failover?: boolean;
-  model_sync?: { last_attempt_ms: number | null; last_success_ms: number | null; error: string | null } | null;
+  model_sync?: {
+    last_attempt_ms: number | null;
+    last_success_ms: number | null;
+    error: string | null;
+  } | null;
   routing_availability?: RoutingAvailability;
   id: number;
   name: string;
@@ -474,7 +489,7 @@ export interface ProviderSummary {
   websocket_enabled: boolean;
   beta_features: string[];
   request_overrides: RequestOverrides;
-  key_selection_strategy: 'round_robin' | 'ordered' | 'weighted';
+  key_selection_strategy: "round_robin" | "ordered" | "weighted";
   groups?: ProviderGroupMembership[];
   max_attempts?: number;
   max_concurrency: number | null;
@@ -527,7 +542,7 @@ export interface UpstreamKeyMeta {
   enabled: boolean;
   priority: number;
   weight: number;
-  auth_kind?: 'api_key' | 'codex_oauth';
+  auth_kind?: "api_key" | "codex_oauth";
   codex_oauth?: CodexOAuthAccount | null;
   health?: UpstreamKeyHealthSummary;
   quota?: {
@@ -572,26 +587,27 @@ export interface CodexOAuthAccount {
   plan_type: string | null;
   token_expires_at_ms: number | null;
   last_refresh_at_ms: number | null;
-  auth_status: 'active' | 'reauth_required' | 'forbidden' | string;
+  auth_status: "active" | "reauth_required" | "forbidden" | string;
   last_error: string | null;
   quota: CodexQuotaSnapshot | null;
   quota_checked_at_ms: number | null;
 }
 
-export type CodexOAuthFlow = 'browser' | 'device';
-export type CodexOAuthStage = 'waiting_for_user' | 'exchanging' | 'finalizing' | 'finished';
+export type CodexOAuthFlow = "browser" | "device";
+export type CodexOAuthStage =
+  "waiting_for_user" | "exchanging" | "finalizing" | "finished";
 
 export interface CodexOAuthSession {
   session_id: string;
   flow: CodexOAuthFlow;
   stage: CodexOAuthStage;
-  status: 'pending' | 'completed' | 'failed' | 'cancelled' | 'expired';
+  status: "pending" | "completed" | "failed" | "cancelled" | "expired";
   verification_uri: string;
   user_code?: string;
   expires_at_ms: number;
   poll_interval_ms: number;
   key_id?: number;
-  operation?: 'created' | 'updated';
+  operation?: "created" | "updated";
   warnings?: string[];
   error_code?: string;
   error_message?: string;
@@ -622,7 +638,7 @@ export interface ProviderModelInventory extends ProviderModel {
   display?: ModelDisplay | null;
   provider_name: string;
   provider_type: string;
-  native_api_formats: Array<'chat_completions' | 'responses'>;
+  native_api_formats: Array<"chat_completions" | "responses">;
 }
 
 export interface ConsolePreferences {
@@ -653,7 +669,7 @@ export interface ModelAlias {
   id: number;
   name: string;
   enabled: boolean;
-  mode: 'ordered' | 'weighted';
+  mode: "ordered" | "weighted";
   created_at_ms: number;
   updated_at_ms: number;
   targets: ModelAliasTarget[];
@@ -687,7 +703,7 @@ export interface CreateProviderInput {
   websocket_enabled: boolean;
   beta_features: string[];
   request_overrides: RequestOverrides;
-  key_selection_strategy: 'round_robin' | 'ordered' | 'weighted';
+  key_selection_strategy: "round_robin" | "ordered" | "weighted";
   groups?: Array<{ group_id: number; priority_override: number | null }>;
   max_attempts: number;
   max_concurrency: number | null;
@@ -710,7 +726,7 @@ export interface UpdateProviderInput {
   websocket_enabled?: boolean;
   beta_features?: string[];
   request_overrides?: RequestOverrides;
-  key_selection_strategy?: 'round_robin' | 'ordered' | 'weighted';
+  key_selection_strategy?: "round_robin" | "ordered" | "weighted";
   groups?: Array<{ group_id: number; priority_override: number | null }>;
   max_attempts?: number;
   max_concurrency?: number | null;
@@ -773,7 +789,7 @@ export interface ContextPriceTier {
 
 export interface PriceCardV2 {
   schema_version: 2;
-  unit: 'usd_per_million_tokens';
+  unit: "usd_per_million_tokens";
   base: PriceRates;
   tiers: ContextPriceTier[];
 }
@@ -784,10 +800,17 @@ export interface RequestPricing {
   card: PriceCardV2 | null;
 }
 
-export interface ModelDisplay { display_name: string; brand: string; aliases: string[]; quote_provider: string; adaptation: string; present: boolean }
+export interface ModelDisplay {
+  display_name: string;
+  brand: string;
+  aliases: string[];
+  quote_provider: string;
+  adaptation: string;
+  present: boolean;
+}
 
 export interface ModelPrice {
-  source?: 'manual' | 'cloud';
+  source?: "manual" | "cloud";
   source_version?: string | null;
   display?: ModelDisplay | null;
   id: number;
@@ -841,7 +864,13 @@ export interface RuntimeEnvPreviewResponse {
 }
 
 export interface SystemConfigResponse {
-  capabilities?: { websocket: boolean; websocket_to_http: boolean; http_to_websocket: boolean; response_rewrite: boolean; request_rewrite: boolean };
+  capabilities?: {
+    websocket: boolean;
+    websocket_to_http: boolean;
+    http_to_websocket: boolean;
+    response_rewrite: boolean;
+    request_rewrite: boolean;
+  };
   build?: {
     version: string;
     commit: string;
@@ -886,9 +915,21 @@ export interface SystemConfigResponse {
   };
 }
 
-export type StatsPeriod = 'today' | '7h' | '24h' | 'week' | 'month' | '7d' | '30d';
+export type StatsPeriod =
+  "today" | "7h" | "24h" | "week" | "month" | "7d" | "30d";
 
+export interface StatsSeriesPoint {
+  bucket_start_ms: number;
+  request_success: number;
+  request_failed: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  usage_observed_requests: number;
+}
 export interface StatsOverviewResponse {
+  series?: { interval_ms: number; points: StatsSeriesPoint[] };
   period: StatsPeriod;
   window: {
     from_ms: number;
@@ -898,7 +939,7 @@ export interface StatsOverviewResponse {
     requests: number;
     failed: number;
     error_rate: number;
-    p95_latency_ms: number;
+    p95_latency_ms: number | null;
     avg_latency_ms: number;
   };
   service_health: {
@@ -910,7 +951,7 @@ export interface StatsOverviewResponse {
     error: number;
   };
   server_status?: {
-    scope: 'container' | 'cgroup' | 'host' | string;
+    scope: "container" | "cgroup" | "host" | string;
     cpu_usage_percent: number | null;
     cpu_capacity_cores: number;
     cpu_sample_ms: number | null;
@@ -949,15 +990,40 @@ export interface StatsOverviewResponse {
 }
 
 export interface UpstreamRuntimeState {
-  provider: Pick<ProviderSummary, 'id' | 'name' | 'enabled' | 'runtime' | 'health' | 'affinity_sessions' | 'routing_availability'>;
+  provider: Pick<
+    ProviderSummary,
+    | "id"
+    | "name"
+    | "enabled"
+    | "runtime"
+    | "health"
+    | "affinity_sessions"
+    | "routing_availability"
+  >;
   endpoints: UpstreamEndpointSummary[];
   keys: UpstreamKeyMeta[];
-  recent_errors: Array<{time_ms:number;endpoint_id:number;key_id:number;category:string;status:number|null;summary:string}>;
+  recent_errors: Array<{
+    time_ms: number;
+    endpoint_id: number;
+    key_id: number;
+    category: string;
+    status: number | null;
+    summary: string;
+  }>;
 }
 export interface ModelRoutePolicy {
   model_name: string;
-  mode: 'ordered' | 'weighted';
+  mode: "ordered" | "weighted";
   sticky: boolean;
   failover: boolean;
-  targets: Array<{provider_id:number;priority:number;weight:number}>;
+  targets: Array<{ provider_id: number; priority: number; weight: number }>;
+}
+
+export type StatusTone =
+  "normal" | "warning" | "error" | "disabled" | "draft" | "archived";
+export interface StatItem {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: "default" | "success" | "warning" | "destructive";
 }

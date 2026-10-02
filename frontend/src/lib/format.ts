@@ -1,4 +1,4 @@
-import { getIntlLocale, t } from '@/lib/i18n';
+import { getIntlLocale, t } from "@/lib/i18n";
 
 interface FormatterBundle {
   integer: Intl.NumberFormat;
@@ -20,10 +20,10 @@ function getFormatters() {
       maximumFractionDigits: 2,
     }),
     dateTime: new Intl.DateTimeFormat(locale, {
-      month: 'short',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
     }),
   };
 
@@ -55,7 +55,7 @@ export function formatMs(value: number): string {
 
 export function formatBytes(value: number): string {
   const { decimal, integer } = getFormatters();
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const units = ["B", "KB", "MB", "GB", "TB"];
   let current = value;
   let unitIndex = 0;
   while (Math.abs(current) >= 1024 && unitIndex < units.length - 1) {
@@ -72,8 +72,8 @@ export function formatDate(date: Date): string {
 
 export function formatDateKey(date: Date): string {
   const year = date.getUTCFullYear();
-  const month = `${date.getUTCMonth() + 1}`.padStart(2, '0');
-  const day = `${date.getUTCDate()}`.padStart(2, '0');
+  const month = `${date.getUTCMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getUTCDate()}`.padStart(2, "0");
   return `${year}${month}${day}`;
 }
 
@@ -81,14 +81,16 @@ export function formatDateTime(timestampMs: number): string {
   return getFormatters().dateTime.format(new Date(timestampMs));
 }
 
-export function formatDateTimeLocalInput(timestampMs: number | null | undefined): string {
-  if (!timestampMs) return '';
+export function formatDateTimeLocalInput(
+  timestampMs: number | null | undefined,
+): string {
+  if (!timestampMs) return "";
   const date = new Date(timestampMs);
   const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, '0');
-  const day = `${date.getDate()}`.padStart(2, '0');
-  const hour = `${date.getHours()}`.padStart(2, '0');
-  const minute = `${date.getMinutes()}`.padStart(2, '0');
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const hour = `${date.getHours()}`.padStart(2, "0");
+  const minute = `${date.getMinutes()}`.padStart(2, "0");
   return `${year}-${month}-${day}T${hour}:${minute}`;
 }
 
@@ -101,26 +103,27 @@ export function parseDateTimeLocalInput(value: string): number | null {
 
 export function formatVersionLabel(value: string | null | undefined): string {
   const trimmed = value?.trim();
-  if (!trimmed || trimmed === 'unknown') return '—';
-  if (trimmed.startsWith('v') || trimmed === 'dev' || trimmed === 'manual') return trimmed;
+  if (!trimmed || trimmed === "unknown") return "—";
+  if (trimmed.startsWith("v") || trimmed === "dev" || trimmed === "manual")
+    return trimmed;
   if (/^\d+\.\d+/.test(trimmed)) return `v${trimmed}`;
   return trimmed;
 }
 
 export function formatCommitShort(value: string | null | undefined): string {
   const trimmed = value?.trim();
-  if (!trimmed || trimmed === 'unknown') return '—';
+  if (!trimmed || trimmed === "unknown") return "—";
   return trimmed.slice(0, 7);
 }
 
 export function formatModelName(value: string | null | undefined): string {
   const trimmed = value?.trim();
-  return trimmed ? trimmed : t('未识别');
+  return trimmed ? trimmed : t("未识别");
 }
 
 export const REQUEST_TYPE_OPTIONS = [
-  { value: 'chat_completions', endpoint: 'v1/chat/completions' },
-  { value: 'responses', endpoint: 'v1/responses' },
+  { value: "chat_completions", endpoint: "v1/chat/completions" },
+  { value: "responses", endpoint: "v1/responses" },
 ] as const;
 
 const requestTypeEndpointMap = new Map<string, string>(
@@ -128,7 +131,7 @@ const requestTypeEndpointMap = new Map<string, string>(
 );
 
 export function formatRequestType(value: string | null | undefined): string {
-  return value ? requestTypeEndpointMap.get(value) ?? '—' : '—';
+  return value ? (requestTypeEndpointMap.get(value) ?? "—") : "—";
 }
 
 export function formatRequestPath(
@@ -137,14 +140,25 @@ export function formatRequestPath(
 ): string {
   const client = formatRequestType(clientApiFormat);
   const upstream = formatRequestType(upstreamApiFormat ?? clientApiFormat);
-  return upstream !== client && upstream !== '—' && client !== '—'
+  return upstream !== client && upstream !== "—" && client !== "—"
     ? `${upstream} → ${client}`
     : client;
 }
 
-export function formatRoutingStrategy(value: string | null | undefined): string {
-  if (value === 'weighted') return t('加权');
-  if (value === 'priority') return t('优先级策略');
+export function formatRoutingStrategy(
+  value: string | null | undefined,
+): string {
+  if (value === "weighted") return t("加权");
+  if (value === "priority") return t("优先级策略");
   const trimmed = value?.trim();
-  return trimmed ? trimmed : '—';
+  return trimmed ? trimmed : "—";
+}
+
+/** 额度剩余量低于 20% 时显示错误色，低于 50% 时显示警告色。 */
+export function quotaTextColor(remaining: number) {
+  return remaining >= 50
+    ? "text.primary"
+    : remaining >= 20
+      ? "warning.main"
+      : "error.main";
 }

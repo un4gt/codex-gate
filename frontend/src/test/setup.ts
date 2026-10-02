@@ -1,3 +1,6 @@
+import { configure } from '@testing-library/react';
+
+configure({ asyncUtilTimeout: 3000 });
 export {};
 
 class ResizeObserverMock implements ResizeObserver {
