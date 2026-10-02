@@ -6,6 +6,7 @@ mod codex_oauth_callback;
 mod config;
 mod crypto;
 mod db;
+mod encrypted_content;
 mod health;
 mod http;
 mod key_rotation;
@@ -292,6 +293,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let started_at_ms = util::now_ms();
 
     let state: SharedState = Arc::new(AppState {
+        encrypted_content: encrypted_content::RecoveryBook::new(
+            config.affinity_ttl,
+            config.affinity_max_entries,
+        ),
         config,
         db,
         caches,

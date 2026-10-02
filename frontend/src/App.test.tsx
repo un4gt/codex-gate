@@ -329,6 +329,38 @@ describe('admin console smoke test', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it('enables encrypted recovery only after saving the advanced Beta setting', async () => {
+    fetchRequest.mockResolvedValue(jsonResponse({ ok: true }));
+    const refresh = rs.fn().mockResolvedValue(undefined);
+    renderWithTheme(<SettingsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      systemConfig={null}
+      runtimeSettings={{ updated_at_ms: 0, settings: [{
+        key: 'encrypted_content_recovery', group: 'beta', label: '加密内容恢复（Beta）',
+        value: false, default_value: false, editable: true, requires_restart: false, updated_at_ms: null,
+      }] }}
+      runtimeEnvPreview={null}
+      onApiBaseChange={() => undefined}
+      onAdminTokenChange={() => undefined}
+      onRefresh={refresh}
+      onMessage={() => undefined}
+    />);
+    fireEvent.click(screen.getByText('Advanced Settings'));
+    fireEvent.click(screen.getByRole('button', { name: /Beta Features/i }));
+    const checkbox = screen.getByRole('checkbox', { name: 'Enable encrypted content recovery' }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(screen.getByText(/may lose earlier context/i)).toBeTruthy();
+    fireEvent.click(checkbox);
+    expect(fetchRequest).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    const [url, options] = fetchRequest.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:8080/api/v1/runtime-settings');
+    expect(options.method).toBe('PATCH');
+    expect(JSON.parse(String(options.body))).toEqual({ key: 'encrypted_content_recovery', value: true });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it('keeps long model identifiers and pricing headers on one line', () => {
     const modelName = 'openai/gpt-5.4-2026-08-14-long-model-identifier';
     renderWithTheme(

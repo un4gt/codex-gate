@@ -60,6 +60,7 @@ struct WsContext {
     pending_turn_log: std::sync::Arc<parking_lot::Mutex<Option<PendingTurnLog>>>,
     budget: std::sync::Arc<tokio::sync::Mutex<crate::resilience::AttemptBudget>>,
     trace: std::sync::Arc<parking_lot::Mutex<WsRoutingTrace>>,
+    recovery: std::sync::Arc<parking_lot::Mutex<crate::encrypted_content::RequestRecovery>>,
 }
 
 #[derive(Default)]
@@ -105,6 +106,7 @@ fn ws_trace_value(ctx: &WsContext) -> Value {
     json!({ "attempt_limit": crate::resilience::MAX_ATTEMPTS, "attempts_sent": trace.attempts.len(),
         "backoff_ms": trace.backoff_ms, "attempts": trace.attempts, "authorized_groups": ctx.api_key.provider_groups, "authorized_provider_ids":ctx.api_key.allowed_provider_ids,
         "model_route":trace.model_route, "affinity": null, "candidates": [], "rejections": [], "terminal": null,
+        "encrypted_content_recovery": ctx.recovery.lock().trace,
         "provider_switches": trace.attempts.windows(2).filter(|pair| pair[0]["provider_id"] != pair[1]["provider_id"]).count() })
 }
 
@@ -170,6 +172,7 @@ enum NativeWsConnectOutcome {
 
 enum ForwardResult {
     Complete,
+    RetryEncryptedContent(String),
     RetryableBeforeEvent(WsBridgeError),
     Fatal,
 }
@@ -257,6 +260,7 @@ pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpRespo
 
     let ctx = WsContext {
         trace: Default::default(),
+        recovery: Default::default(),
         budget: std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::resilience::AttemptBudget::new(state.config.upstream_request_timeout),
         )),
@@ -489,6 +493,22 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     }
                 }
                 let turn_start = Instant::now();
+                let recovery_key = extract_affinity_identity(
+                    &ctx.request_headers,
+                    text.as_bytes(),
+                    ctx.api_key.id,
+                )
+                .map(|identity| identity.derived_prompt_cache_key())
+                .unwrap_or_else(|| format!("ws:{}:{}", ctx.api_key.id, ctx.session_id));
+                ctx.recovery = std::sync::Arc::new(parking_lot::Mutex::new(
+                    crate::encrypted_content::RequestRecovery::new(
+                        ctx.state
+                            .runtime_settings
+                            .snapshot()
+                            .encrypted_content_recovery,
+                        Some(recovery_key),
+                    ),
+                ));
                 ctx.trace = Default::default();
                 ctx.budget = std::sync::Arc::new(tokio::sync::Mutex::new(
                     crate::resilience::AttemptBudget::new(
@@ -695,7 +715,7 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                             turn_complete = true;
                             break;
                         }
-                        ForwardResult::Fatal => break,
+                        ForwardResult::Fatal | ForwardResult::RetryEncryptedContent(_) => break,
                         ForwardResult::RetryableBeforeEvent(err) => {
                             if ctx.disconnected_at.borrow().is_some() {
                                 break;
@@ -1524,33 +1544,87 @@ where
         }
     };
 
-    match &mut active.transport {
-        ActiveTransport::NativeWs(ws) => {
-            forward_native_response_create(
-                ctx,
-                downstream,
-                &active.resolved,
-                &active.requested_model,
-                ws,
-                payload,
-                turn_start,
-                &mut telemetry_permit,
-            )
-            .await
-        }
-        ActiveTransport::HttpBridge => {
-            forward_http_bridge_response_create(
-                ctx,
-                downstream,
-                &active.resolved,
-                &active.requested_model,
-                payload,
-                turn_start,
-                &mut telemetry_permit,
-            )
-            .await
+    let filtered = ctx
+        .recovery
+        .lock()
+        .filter_known(&ctx.state.encrypted_content, Bytes::from(payload));
+    let mut payload = String::from_utf8_lossy(&filtered).into_owned();
+    loop {
+        let result = match &mut active.transport {
+            ActiveTransport::NativeWs(ws) => {
+                forward_native_response_create(
+                    ctx,
+                    downstream,
+                    &active.resolved,
+                    &active.requested_model,
+                    ws,
+                    payload,
+                    turn_start,
+                    &mut telemetry_permit,
+                )
+                .await
+            }
+            ActiveTransport::HttpBridge => {
+                forward_http_bridge_response_create(
+                    ctx,
+                    downstream,
+                    &active.resolved,
+                    &active.requested_model,
+                    payload,
+                    turn_start,
+                    &mut telemetry_permit,
+                )
+                .await
+            }
+        };
+        match result {
+            ForwardResult::RetryEncryptedContent(cleaned) => {
+                // The rejected attempt has no billable output; keep one final turn log.
+                if let Some(pending) = ctx.pending_turn_log.lock().take() {
+                    telemetry_permit = pending.permit;
+                }
+                *ctx.observation.lock() = Default::default();
+                payload = cleaned;
+            }
+            result => return result,
         }
     }
+}
+
+async fn prepare_encrypted_recovery(
+    ctx: &WsContext,
+    resolved: &ResolvedUpstream,
+    event: &Value,
+    payload: &[u8],
+    emitted_event: bool,
+) -> Option<String> {
+    if !ctx.recovery.lock().enabled
+        || !crate::encrypted_content::rejection_without_output(event)
+        || ctx.observation.lock().usage.is_some()
+    {
+        return None;
+    }
+    ctx.recovery
+        .lock()
+        .record_failure(&ctx.state.encrypted_content, payload);
+    if emitted_event || ctx.disconnected_at.borrow().is_some() {
+        return None;
+    }
+    let budget = ctx.budget.lock().await;
+    if !budget.available()
+        || !budget.provider_available(resolved.provider.id, resolved.provider.max_attempts)
+    {
+        return None;
+    }
+    let mut recovery = ctx.recovery.lock();
+    let cleaned = recovery.prepare_retry(payload, true)?;
+    log::info!(
+        "encrypted content recovery: transport=ws provider_id={} upstream_key_id={} stripped_items={}",
+        resolved.provider.id,
+        resolved.key.id,
+        recovery.trace.stripped_items
+    );
+    Some(String::from_utf8_lossy(&cleaned).into_owned())
 }
 
 #[expect(
@@ -1626,6 +1700,7 @@ where
         }
     };
     note_ws_send(ctx, resolved).await;
+    let recovery_request = ctx.recovery.lock().enabled.then(|| payload.clone());
     if let Err(err) = ws.send(Message::Text(payload.into())).await {
         let message = format!("failed to send websocket request upstream: {err}");
         let outcome = TurnOutcome::provider_error(
@@ -1655,6 +1730,7 @@ where
     let mut first_byte_ms = None;
     let mut first_token_ms = None;
     let mut emitted_event = false;
+    let mut encrypted_retry = None;
     let (status, error_type, error_message) = loop {
         match read_with_disconnect_grace(ctx, resolved, ws.next(), emitted_event).await {
             Ok(Some(Ok(Message::Text(text)))) => {
@@ -1673,7 +1749,19 @@ where
                             text.as_bytes(),
                         )
                         .await;
-                        if !should_retry_terminal_before_event(&event, emitted_event) {
+                        if let Some(payload) = &recovery_request {
+                            encrypted_retry = prepare_encrypted_recovery(
+                                ctx,
+                                resolved,
+                                &event,
+                                payload.as_bytes(),
+                                emitted_event,
+                            )
+                            .await;
+                        }
+                        if encrypted_retry.is_none()
+                            && !should_retry_terminal_before_event(&event, emitted_event)
+                        {
                             send_turn_event(ctx, downstream, Message::Text(text)).await;
                             emitted_event = true;
                         }
@@ -1731,7 +1819,7 @@ where
         false,
         turn_start,
     );
-    finish_forwarded_turn(
+    let result = finish_forwarded_turn(
         ctx,
         resolved,
         requested_model,
@@ -1740,7 +1828,8 @@ where
         emitted_event,
         telemetry_permit,
         reservation,
-    )
+    );
+    encrypted_retry.map_or(result, ForwardResult::RetryEncryptedContent)
 }
 
 async fn read_with_disconnect_grace<T>(
@@ -2252,6 +2341,7 @@ where
     let mut sse = SseToWsParser::default();
     let mut capture = BytesMut::new();
     let mut emitted_event = false;
+    let mut encrypted_retry = None;
     loop {
         let frame =
             match read_with_disconnect_grace(ctx, resolved, body.frame(), emitted_event).await {
@@ -2319,10 +2409,23 @@ where
                     event.to_string().as_bytes(),
                 )
                 .await;
+                encrypted_retry = prepare_encrypted_recovery(
+                    ctx,
+                    resolved,
+                    &event,
+                    payload.as_bytes(),
+                    emitted_event,
+                )
+                .await;
             }
-            if !should_retry_terminal_before_event(&event, emitted_event) {
+            if encrypted_retry.is_none()
+                && !should_retry_terminal_before_event(&event, emitted_event)
+            {
                 send_turn_event(ctx, downstream, Message::Text(event.to_string().into())).await;
                 emitted_event = true;
+            }
+            if terminal_event {
+                break;
             }
         }
         if eof || terminal.is_some() {
@@ -2350,7 +2453,7 @@ where
         false,
         turn_start,
     );
-    finish_forwarded_turn(
+    let result = finish_forwarded_turn(
         ctx,
         resolved,
         requested_model,
@@ -2359,7 +2462,8 @@ where
         emitted_event,
         telemetry_permit,
         reservation,
-    )
+    );
+    encrypted_retry.map_or(result, ForwardResult::RetryEncryptedContent)
 }
 
 async fn observe_codex_account_error(

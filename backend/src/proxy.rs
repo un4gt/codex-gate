@@ -380,6 +380,12 @@ async fn proxy_openai(
         }
     };
     apply_route_diagnostics(&routing_trace, &plan.diagnostics);
+    let mut encrypted_recovery = crate::encrypted_content::RequestRecovery::new(
+        api_format == ApiFormat::Responses && plan.runtime.encrypted_content_recovery,
+        affinity_identity
+            .as_ref()
+            .map(AffinityIdentity::derived_prompt_cache_key),
+    );
     if api_format == ApiFormat::Responses && has_previous_response_id(&body_bytes) {
         let mut rejected_conversion_candidates = HashSet::new();
         plan.attempts.retain(|attempt| {
@@ -634,6 +640,10 @@ async fn proxy_openai(
             if let Ok(encoded) = serde_json::to_vec(&value) {
                 out_body = Bytes::from(encoded);
             }
+        }
+        if !resolved.protocol.is_responses_via_chat() {
+            out_body = encrypted_recovery.filter_known(&state.encrypted_content, out_body);
+            routing_trace.lock().encrypted_content_recovery = encrypted_recovery.trace.clone();
         }
         let upstream_service_tier = serde_json::from_slice::<Value>(&out_body)
             .ok()
@@ -907,13 +917,75 @@ async fn proxy_openai(
                 &request_method,
                 request_version,
                 &retry_headers,
-                out_body,
-                upstream_uri,
+                out_body.clone(),
+                upstream_uri.clone(),
                 budget
                     .remaining()
                     .min(provider_timeout(&resolved.provider, &state)),
             )
             .await;
+            headers = retry_headers;
+        }
+
+        let mut upstream_response =
+            upstream_response.map(|response| response.map(ReplayIncomingBody::new));
+        if encrypted_recovery.enabled
+            && !resolved.protocol.is_responses_via_chat()
+            && let Ok(response) = &mut upstream_response
+            && encrypted_content_rejected(
+                response,
+                budget
+                    .remaining()
+                    .min(provider_timeout(&resolved.provider, &state)),
+            )
+            .await
+        {
+            encrypted_recovery.record_failure(&state.encrypted_content, &out_body);
+            if encrypted_recovery.can_retry()
+                && budget.available()
+                && budget.provider_available(resolved.provider.id, resolved.provider.max_attempts)
+                && let Some(cleaned) = encrypted_recovery.prepare_retry(&out_body, false)
+            {
+                let before_backoff = Instant::now();
+                if budget.begin().await && reservation.is_current() {
+                    routing_trace.lock().backoff_ms += before_backoff.elapsed().as_millis() as i64;
+                    trace_attempt(
+                        &routing_trace,
+                        resolved,
+                        Some(400),
+                        Some("invalid_encrypted_content"),
+                        attempt_start.elapsed().as_millis() as i64,
+                    );
+                    headers.insert(CONTENT_LENGTH, HeaderValue::from(cleaned.len()));
+                    budget.note_send(resolved.provider.id);
+                    {
+                        let mut trace = routing_trace.lock();
+                        trace.attempts_sent += 1;
+                        trace.encrypted_content_recovery = encrypted_recovery.trace.clone();
+                    }
+                    state.metrics.record_upstream_attempt();
+                    log::info!(
+                        "encrypted content recovery: transport=http provider_id={} upstream_key_id={} stripped_items={}",
+                        resolved.provider.id,
+                        resolved.key.id,
+                        encrypted_recovery.trace.stripped_items
+                    );
+                    attempt_start = Instant::now();
+                    upstream_response = dispatch_upstream_request_with_timeout(
+                        &state,
+                        &request_method,
+                        request_version,
+                        &headers,
+                        cleaned,
+                        upstream_uri,
+                        budget
+                            .remaining()
+                            .min(provider_timeout(&resolved.provider, &state)),
+                    )
+                    .await
+                    .map(|response| response.map(ReplayIncomingBody::new));
+                }
+            }
         }
 
         let upstream_resp = match upstream_response {
@@ -980,7 +1052,7 @@ async fn proxy_openai(
             }
         };
 
-        let mut upstream_resp = upstream_resp.map(ReplayIncomingBody::new);
+        let mut upstream_resp = upstream_resp;
         let t_stream_ms = start.elapsed().as_millis() as i64;
         let status_code = upstream_resp.status();
         let status_i32 = status_code.as_u16() as i32;
@@ -1866,6 +1938,7 @@ struct RoutingTrace {
     attempts_sent: usize,
     backoff_ms: i64,
     conversion: Option<Value>,
+    encrypted_content_recovery: crate::encrypted_content::RecoveryTrace,
     terminal: Option<Value>,
 }
 
@@ -3476,6 +3549,7 @@ fn copy_allowed_upstream_headers_by_prefix(from: &HeaderMap, to: &mut HeaderMap,
 
 struct ReplayIncomingBody {
     buffered: VecDeque<Frame<Bytes>>,
+    buffered_error: Option<hyper::Error>,
     inner: Incoming,
 }
 
@@ -3551,6 +3625,7 @@ impl ReplayIncomingBody {
     fn new(inner: Incoming) -> Self {
         Self {
             buffered: VecDeque::new(),
+            buffered_error: None,
             inner,
         }
     }
@@ -3567,11 +3642,14 @@ impl hyper::body::Body for ReplayIncomingBody {
         if let Some(frame) = self.buffered.pop_front() {
             return Poll::Ready(Some(Ok(frame)));
         }
+        if let Some(error) = self.buffered_error.take() {
+            return Poll::Ready(Some(Err(error)));
+        }
         Pin::new(&mut self.inner).poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
-        self.buffered.is_empty() && self.inner.is_end_stream()
+        self.buffered.is_empty() && self.buffered_error.is_none() && self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -3592,6 +3670,68 @@ impl hyper::body::Body for ReplayIncomingBody {
         }
         hint
     }
+}
+
+/// Peek before committing downstream headers; every inspected frame remains replayable.
+async fn encrypted_content_rejected(
+    response: &mut Response<ReplayIncomingBody>,
+    timeout: std::time::Duration,
+) -> bool {
+    let is_sse = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/event-stream"));
+    if response.status() != StatusCode::BAD_REQUEST && !(response.status().is_success() && is_sse) {
+        return false;
+    }
+    let body = response.body_mut();
+    let mut parser = crate::response_events::SseDecoder::default();
+    let mut capture = BytesMut::new();
+    let read = async {
+        loop {
+            let frame = match body.inner.frame().await {
+                Some(Ok(frame)) => frame,
+                Some(Err(error)) => {
+                    body.buffered_error = Some(error);
+                    return false;
+                }
+                None => {
+                    if is_sse {
+                        let events = parser.finish();
+                        return parser.error.is_none()
+                            && events.len() == 1
+                            && crate::encrypted_content::rejection_without_output(&events[0]);
+                    }
+                    return serde_json::from_slice::<Value>(&capture).is_ok_and(|value| {
+                        crate::encrypted_content::rejection_without_output(&value)
+                    });
+                }
+            };
+            let data = frame.data_ref().cloned();
+            body.buffered.push_back(frame);
+            if let Some(data) = data {
+                if capture.len().saturating_add(data.len())
+                    > crate::response_events::MAX_EVENT_BYTES
+                {
+                    return false;
+                }
+                capture.extend_from_slice(&data);
+                if is_sse {
+                    let events = parser.push_bytes(&data);
+                    if parser.error.is_some() {
+                        return false;
+                    }
+                    if !events.is_empty() {
+                        // Once any other event arrives the normal streaming path takes ownership.
+                        return events.len() == 1
+                            && crate::encrypted_content::rejection_without_output(&events[0]);
+                    }
+                }
+            }
+        }
+    };
+    time::timeout(timeout, read).await.unwrap_or(false)
 }
 
 /// Preserve retryable error bodies and avoid issuing another request after observed usage.
@@ -3655,6 +3795,7 @@ async fn preflight_sse(
                     buffered.append(&mut inner.buffered);
                     return Ok(ReplayIncomingBody {
                         buffered,
+                        buffered_error: inner.buffered_error,
                         inner: inner.inner,
                     });
                 }
@@ -3670,6 +3811,7 @@ async fn preflight_sse(
                     buffered.append(&mut inner.buffered);
                     return Ok(ReplayIncomingBody {
                         buffered,
+                        buffered_error: inner.buffered_error,
                         inner: inner.inner,
                     });
                 }
@@ -3692,6 +3834,7 @@ async fn preflight_sse(
                     buffered.append(&mut inner.buffered);
                     return Ok(ReplayIncomingBody {
                         buffered,
+                        buffered_error: inner.buffered_error,
                         inner: inner.inner,
                     });
                 }

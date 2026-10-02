@@ -26,7 +26,7 @@ interface SettingsPageProps {
   onRefresh: (successMessage?: string) => Promise<void>;
   onMessage: (message: string) => void;
 }
-type SectionKey = 'basic' | 'runtime' | 'routing' | 'stability' | 'retention' | 'pricing';
+type SectionKey = 'basic' | 'runtime' | 'routing' | 'stability' | 'retention' | 'pricing' | 'beta';
 function readString(formData: FormData, key: string) {
   return String(formData.get(key) ?? '').trim();
 }
@@ -68,6 +68,30 @@ export function SettingsPage(props: SettingsPageProps) {
       setBusy(false);
     }
   };
+  const renderRuntimeSetting = (setting: RuntimeSettingView) => <Box key={`${setting.key}:${String(setting.value)}`} className="surface-tile" onSubmit={event => void submitRuntimeSetting(event, setting)} component="form">
+                  <Box className="mb-3 flex items-center justify-between gap-2.5">
+                    <Box>
+                      <Box className="text-[0.8125rem] font-medium text-foreground">{t(setting.label)}</Box>
+                      <Box className="mt-0.5 font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground">
+                        {setting.requires_restart ? '重启生效' : '立即生效'}
+                      </Box>
+                    </Box>
+                    <StatusBadge tone={setting.editable ? 'normal' : 'warning'}>{setting.editable ? '可修改' : '需重启'}</StatusBadge>
+                  </Box>
+
+                  <RuntimeSettingControl setting={setting} />
+                  {setting.key === 'encrypted_content_recovery' ? <Box className="mt-2 space-y-2">
+                    <Typography variant="body2" color="text.secondary">{t('遇到加密内容校验失败时，清理加密推理内容并在当前账号重试一次；同一会话后续请求自动过滤已失效的旧密文。')}</Typography>
+                    <Typography variant="body2" color="warning.main">{t('实验功能，默认关闭。恢复会移除加密压缩项，可能丢失早期上下文；保留可见消息和工具记录。')}</Typography>
+                  </Box> : null}
+
+                  <Box className="mt-3 flex items-center justify-between gap-2.5 border-t border-border/40 pt-3">
+                    <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground" component="span">
+                      默认 {formatSettingValue(setting.default_value)}
+                    </Box>
+                    <Button type="submit" size="sm" disabled={!setting.editable || busy}>{t("保存")}</Button>
+                  </Box>
+                </Box>;
   return <Box className="section-stack">
       <Card>
         <Box className="flex flex-col gap-2 p-4 pb-3">
@@ -114,29 +138,15 @@ export function SettingsPage(props: SettingsPageProps) {
       </SettingsSection>
 
       <Box component="details"><Box component="summary" sx={{ cursor: 'pointer', py: 2, fontWeight: 600 }}>{t('高级设置')}</Box><Box className="section-stack">
+      <SettingsSection title="Beta 功能" description="按需开启实验功能，保存后立即生效。" open={openSection === 'beta'} onToggle={() => toggleSection('beta')}>
+        <Box className="grid gap-3 md:grid-cols-2">
+          {(props.runtimeSettings?.settings ?? []).filter(setting => setting.group === 'beta').map(renderRuntimeSetting)}
+        </Box>
+      </SettingsSection>
       <SettingsSection title="运行设置" description="常用设置可直接生效，资源类设置按建议调整后重启。" open={openSection === 'runtime'} onToggle={() => toggleSection('runtime')}>
         <Box className="grid gap-4">
           <Box className="grid gap-3 md:grid-cols-2">
-            {(props.runtimeSettings?.settings ?? []).filter(setting => setting.key !== 'price_sync' && setting.key !== 'endpoint_selector_strategy').map(setting => <Box key={`${setting.key}:${String(setting.value)}`} className="surface-tile" onSubmit={event => void submitRuntimeSetting(event, setting)} component="form">
-                  <Box className="mb-3 flex items-center justify-between gap-2.5">
-                    <Box>
-                      <Box className="text-[0.8125rem] font-medium text-foreground">{setting.label}</Box>
-                      <Box className="mt-0.5 font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground">
-                        {setting.requires_restart ? '重启生效' : '立即生效'}
-                      </Box>
-                    </Box>
-                    <StatusBadge tone={setting.editable ? 'normal' : 'warning'}>{setting.editable ? '可修改' : '需重启'}</StatusBadge>
-                  </Box>
-
-                  <RuntimeSettingControl setting={setting} />
-
-                  <Box className="mt-3 flex items-center justify-between gap-2.5 border-t border-border/40 pt-3">
-                    <Box className="font-mono text-[0.6875rem] uppercase tracking-widest text-muted-foreground" component="span">
-                      默认 {formatSettingValue(setting.default_value)}
-                    </Box>
-                    <Button type="submit" size="sm" disabled={!setting.editable || busy}>{t("保存")}</Button>
-                  </Box>
-                </Box>)}
+            {(props.runtimeSettings?.settings ?? []).filter(setting => setting.group !== 'beta' && setting.key !== 'price_sync' && setting.key !== 'endpoint_selector_strategy').map(renderRuntimeSetting)}
           </Box>
 
           {props.runtimeEnvPreview ? (preview => <Box className="surface-tile">
@@ -234,7 +244,7 @@ function RuntimeSettingControl(props: {
   if (typeof setting.value === 'boolean') {
     return <Box className="check-row" component="label">
         <Checkbox name={`runtime_${setting.key}`} defaultChecked={setting.value} disabled={!setting.editable} />
-        <Box component="span">{t(setting.value ? '开启' : '关闭')}</Box>
+        <Box component="span">{t(setting.key === 'encrypted_content_recovery' ? '启用加密内容恢复' : setting.value ? '开启' : '关闭')}</Box>
       </Box>;
   }
   if (typeof setting.value === 'number') {

@@ -25,6 +25,7 @@ pub struct AppState {
     pub upstream_key_health: Arc<UpstreamKeyHealthBook>,
     pub key_rotation: Arc<KeyRotationBook>,
     pub affinity: Arc<AffinityBook>,
+    pub encrypted_content: crate::encrypted_content::RecoveryBook,
     pub provider_runtime: Arc<ProviderRuntimeBook>,
     pub quota: Arc<QuotaBook>,
     pub codex_oauth: CodexOAuthManager,

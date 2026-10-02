@@ -737,6 +737,13 @@ export function LogsPage(props: LogsPageProps) {
                             key: row.routing_trace.affinity.bound_upstream_key_id ?? '—'
                           })}
                         </Box> : null}
+                        {row.routing_trace.encrypted_content_recovery && (row.routing_trace.encrypted_content_recovery.retries > 0 || row.routing_trace.encrypted_content_recovery.filtered_items > 0) ? <Box className="md:col-span-2">
+                          {t('加密内容恢复：重试 {{retries}} 次 · 清理 {{stripped}} 项 · 过滤旧密文 {{filtered}} 项', {
+                            retries: row.routing_trace.encrypted_content_recovery.retries,
+                            stripped: row.routing_trace.encrypted_content_recovery.stripped_items,
+                            filtered: row.routing_trace.encrypted_content_recovery.filtered_items,
+                          })}
+                        </Box> : null}
                         {row.routing_trace.conversion ? <Box className="md:col-span-2">
                           {formatRequestPath(
                             row.routing_trace.conversion.client_api_format,

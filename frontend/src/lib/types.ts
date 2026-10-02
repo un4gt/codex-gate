@@ -55,6 +55,7 @@ export interface RequestLogRow {
 }
 
 export interface RoutingTrace {
+  encrypted_content_recovery?: { filtered_items: number; stripped_items: number; retries: number };
   attempts_sent?: number;
   attempt_limit?: number;
   backoff_ms?: number;

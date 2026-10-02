@@ -216,6 +216,18 @@ impl Observation {
 }
 
 pub(crate) fn terminal_status(value: &Value) -> (StatusCode, Option<String>, Option<String>) {
+    // A missing numeric status on a Responses error must not turn this client error into a 502 failover.
+    if crate::encrypted_content::is_invalid_encrypted_content(value) {
+        let error = value
+            .get("error")
+            .or_else(|| value.pointer("/response/error"));
+        let (code, message) = error_fields(
+            error,
+            "invalid_encrypted_content",
+            "encrypted content could not be verified",
+        );
+        return (StatusCode::BAD_REQUEST, Some(code), Some(message));
+    }
     let status = value
         .get("response")
         .unwrap_or(value)

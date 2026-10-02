@@ -13,6 +13,7 @@ use crate::selector::EndpointSelectorStrategy;
 pub struct RuntimeSettingsSnapshot {
     pub price_sync: crate::price_sync::SyncConfig,
     pub inject_include_usage: bool,
+    pub encrypted_content_recovery: bool,
     pub endpoint_selector_strategy: EndpointSelectorStrategy,
     pub usage_capture_bytes: usize,
     pub usage_capture_tail_bytes: usize,
@@ -25,6 +26,7 @@ impl RuntimeSettingsSnapshot {
         Self {
             price_sync: crate::price_sync::SyncConfig::from_env(),
             inject_include_usage: config.inject_include_usage,
+            encrypted_content_recovery: false,
             endpoint_selector_strategy: config.endpoint_selector_strategy,
             usage_capture_bytes: config.usage_capture_bytes,
             usage_capture_tail_bytes: config.usage_capture_tail_bytes,
@@ -35,6 +37,11 @@ impl RuntimeSettingsSnapshot {
 
     fn apply_value(&mut self, key: &str, value: &Value) -> Result<(), String> {
         match key {
+            "encrypted_content_recovery" => {
+                self.encrypted_content_recovery = value
+                    .as_bool()
+                    .ok_or_else(|| "encrypted_content_recovery must be boolean".to_string())?;
+            }
             "price_sync" => {
                 let config: crate::price_sync::SyncConfig =
                     serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
@@ -101,6 +108,13 @@ struct RuntimeSettingSpec {
 }
 
 const SPECS: &[RuntimeSettingSpec] = &[
+    RuntimeSettingSpec {
+        key: "encrypted_content_recovery",
+        group: "beta",
+        label: "加密内容恢复（Beta）",
+        editable: true,
+        requires_restart: false,
+    },
     RuntimeSettingSpec {
         key: "price_sync",
         group: "pricing",
@@ -252,6 +266,7 @@ fn spec_for(key: &str) -> Option<&'static RuntimeSettingSpec> {
 
 fn value_for(key: &str, settings: &RuntimeSettingsSnapshot, config: &Config) -> Value {
     match key {
+        "encrypted_content_recovery" => Value::Bool(settings.encrypted_content_recovery),
         "price_sync" => serde_json::json!(settings.price_sync),
         "inject_include_usage" => Value::Bool(settings.inject_include_usage),
         "endpoint_selector_strategy" => {

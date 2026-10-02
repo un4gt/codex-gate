@@ -462,6 +462,8 @@ MOCK_PORT=19130 GW_PORT=18130 scripts/test_openai_compatible_responses.sh
 
 ## 本地验证与回归
 
+- **加密内容恢复（Beta）**：默认关闭，可在「设置 → 高级设置 → Beta 功能」开启。遇到 `invalid_encrypted_content` 时尝试清理加密历史并有限重试，支持 HTTP/SSE、WebSocket 及 Codex OAuth。清理加密压缩项可能丢失早期上下文，详见[恢复行为与边界](docs/encrypted-content-recovery.md)。
+- `python3 scripts/run_encrypted_content_regression.py`：使用真实网关和 Python 模拟上游验证加密内容恢复，所有测试账号及数据库均为临时数据。
 - `python3 scripts/mock_upstream.py`：本地模拟上游（支持带任意 API 前缀的 chat/responses/models）
 - `python3 scripts/bench_gateway.py ...`：基础并发 / 长压 / RSS 采样
 - `python3 scripts/bench_failover.py ...`：endpoint / key failover 基线
