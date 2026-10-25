@@ -19,6 +19,7 @@ import Stack from "@mui/material/Stack";
 import TablePagination from "@mui/material/TablePagination";
 import Tooltip from "@mui/material/Tooltip";
 import { useEffect,useMemo,useRef,useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { t,useI18n } from "@/lib/i18n";
 import Box from "@mui/material/Box";
@@ -40,6 +41,7 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import {
 loadConsolePreferences,
+loadLogEndpoints,
 loadRequestLogs,
 updateConsolePreferences,
 } from "../lib/api";
@@ -63,6 +65,7 @@ ConnectionSettings,
 ProviderWorkspace,
 RequestLogRow,
 } from "../lib/types";
+import { useRemoteResource } from "@/lib/useRemoteResource";
 interface LogsPageProps {
   settings: ConnectionSettings;
   providers: ProviderWorkspace[];
@@ -102,6 +105,22 @@ const EMPTY_FILTERS: LogFilters = {
   reasoningMin: "",
   reasoningMax: "",
 };
+
+export function logFiltersFromSearch(search: string): LogFilters {
+  const params = new URLSearchParams(search);
+  const id = (key: string) => {
+    const value = params.get(key) ?? "";
+    return /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0
+      ? String(Number(value)) : "";
+  };
+  return {
+    ...EMPTY_FILTERS,
+    providerId: id("provider_id"),
+    endpointId: id("endpoint_id"),
+    apiKeyId: id("api_key_id"),
+    model: params.get("model") ?? "",
+  };
+}
 export const LOG_COLUMN_DEFINITIONS = [
   {
     id: "time",
@@ -148,8 +167,8 @@ export const LOG_COLUMN_DEFINITIONS = [
   {
     id: "total_tokens",
     label: "用量",
-    defaultWidth: 360,
-    minWidth: 280,
+    defaultWidth: 200,
+    minWidth: 160,
     maxWidth: 640,
   },
   {
@@ -221,8 +240,8 @@ export const DEFAULT_LOG_COLUMNS: LogColumnId[] = [
   "status",
   "duration",
   "total_tokens",
+  "cost",
   "api_key",
-  "provider",
 ];
 const LOG_COLUMN_IDS = new Set<LogColumnId>(
   LOG_COLUMN_DEFINITIONS.map((column) => column.id),
@@ -328,8 +347,11 @@ function transportTone(
 }
 export function LogsPage(props: LogsPageProps) {
   const { t } = useI18n();
-  const [filters, setFilters] = useState<LogFilters>(EMPTY_FILTERS);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const endpoints = useRemoteResource(props.settings, loadLogEndpoints, props.refreshKey);
+  const [searchParams] = useSearchParams();
+  const search = searchParams.toString();
+  const [filters, setFilters] = useState<LogFilters>(() => logFiltersFromSearch(search));
+  const [advancedOpen, setAdvancedOpen] = useState(() => Boolean(filters.providerId || filters.endpointId));
   const [rows, setRows] = useState<RequestLogRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<RequestLogRow | null>(null);
@@ -343,7 +365,17 @@ export function LogsPage(props: LogsPageProps) {
   );
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(50);
-  const [query, setQuery] = useState({ filters: EMPTY_FILTERS, revision: 0 });
+  const [query, setQuery] = useState(() => ({ filters: logFiltersFromSearch(search), revision: 0 }));
+  const previousSearch = useRef(search);
+  useEffect(() => {
+    if (previousSearch.current === search) return;
+    previousSearch.current = search;
+    const next = logFiltersFromSearch(search);
+    setFilters(next);
+    setPage(0);
+    setAdvancedOpen(Boolean(next.providerId || next.endpointId));
+    setQuery((current) => ({ filters: next, revision: current.revision + 1 }));
+  }, [search]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const requestSequence = useRef(0);
   const preferenceSequence = useRef(0);
@@ -361,13 +393,9 @@ export function LogsPage(props: LogsPageProps) {
   const endpointNameMap = useMemo(
     () =>
       new Map(
-        props.providers.flatMap((item) =>
-          item.endpoints.map(
-            (endpoint) => [endpoint.id, endpoint.name] as const,
-          ),
-        ),
+        (endpoints.data ?? []).map((endpoint) => [endpoint.id, endpoint.name] as const),
       ),
-    [props.providers],
+    [endpoints.data],
   );
   const apiKeyNameMap = useMemo(
     () =>
@@ -376,14 +404,13 @@ export function LogsPage(props: LogsPageProps) {
   );
   const endpointOptions = useMemo(() => {
     const providerId = filters.providerId;
-    return props.providers.flatMap((item) => {
-      if (providerId && String(item.provider.id) !== providerId) return [];
-      return item.endpoints.map((endpoint) => ({
+    return (endpoints.data ?? [])
+      .filter((endpoint) => !providerId || String(endpoint.provider_id) === providerId)
+      .map((endpoint) => ({
         value: String(endpoint.id),
-        label: `${item.provider.name} / ${endpoint.name}`,
+        label: `${endpoint.provider_name} / ${endpoint.name}`,
       }));
-    });
-  }, [filters.providerId, props.providers]);
+  }, [filters.providerId, endpoints.data]);
   const loadLogs = async () => {
     const sequence = ++requestSequence.current;
     setLoadError(null);
@@ -584,6 +611,13 @@ export function LogsPage(props: LogsPageProps) {
       }}
     >
       <Stack spacing={2}>
+        {endpoints.error ? (
+          <Alert severity="warning" action={
+            <Button disabled={endpoints.loading} onClick={() => void endpoints.reload()}>{t("重试")}</Button>
+          }>
+            {endpoints.error}
+          </Alert>
+        ) : null}
         <Box
           sx={{
             display: "flex",
@@ -5098,7 +5132,14 @@ function LogColumnValue(props: {
           }}
           title={formatModelName(row.model)}
         >
-          {isWsSession(row) ? t("WS 会话") : formatModelName(row.model)}
+          <Box component="span" sx={{ display: "block", fontWeight: 500 }}>
+            {isWsSession(row) ? t("WS 会话") : formatModelName(row.model)}
+          </Box>
+          {row.provider_id ? (
+            <Box component="span" sx={{ display: "block", fontSize: 11, color: "text.secondary", mt: "2px" }}>
+              {props.providerNameMap.get(row.provider_id) ?? `#${row.provider_id}`}
+            </Box>
+          ) : null}
         </Box>
       );
     case "request_path":
@@ -5119,6 +5160,7 @@ function LogColumnValue(props: {
     case "status":
       return (
         <Chip
+          sx={{ height: 20, fontSize: 11, fontWeight: 500 }}
           color={
             (
               {
@@ -5142,7 +5184,14 @@ function LogColumnValue(props: {
             lineHeight: "calc(1 / 0.75)",
           }}
         >
-          {formatMaybeMs(primaryLatency(row))}
+          <Box component="span" sx={{ display: "block", fontVariantNumeric: "tabular-nums" }}>
+            {formatMaybeMs(primaryLatency(row))}
+          </Box>
+          {row.t_first_token_ms != null ? (
+            <Box component="span" sx={{ display: "block", fontSize: 11, color: "text.secondary", mt: "2px" }}>
+              TTFT {formatMaybeMs(row.t_first_token_ms)}
+            </Box>
+          ) : null}
         </Box>
       );
     case "total_tokens":
@@ -5316,6 +5365,7 @@ function LogColumnValue(props: {
 }
 function UsageBreakdown({ row }: { row: RequestLogRow }) {
   const { t } = useI18n();
+  const cache = row.cache_read_input_tokens + row.cache_creation_input_tokens;
   const description = [
     [t("输入"), row.input_tokens],
     [t("输出"), row.output_tokens],
@@ -5325,16 +5375,35 @@ function UsageBreakdown({ row }: { row: RequestLogRow }) {
   ]
     .map(([label, value]) => `${label}: ${value}`)
     .join(" · ");
+  const parts = [
+    { key: "in", label: t("入"), value: row.input_tokens, color: "var(--mui-palette-primary-main)" },
+    { key: "out", label: t("出"), value: row.output_tokens, color: "var(--mui-palette-success-main)" },
+    { key: "cache", label: t("缓"), value: cache, color: "var(--mui-palette-warning-main)" },
+  ];
+  const total = parts.reduce((sum, part) => sum + part.value, 0);
   return (
     <Tooltip title={description}>
-      <Typography
-        component="span"
-        tabIndex={0}
-        aria-label={description}
-        sx={{ fontVariantNumeric: "tabular-nums" }}
-      >
-        {formatCompactInteger(totalTokens(row))}
-      </Typography>
+      <Box tabIndex={0} aria-label={description} sx={{ fontSize: 12, fontVariantNumeric: "tabular-nums", minWidth: 140 }}>
+        <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+          <Box component="span" sx={{ fontWeight: 600 }}>
+            {formatCompactInteger(totalTokens(row))}
+          </Box>
+          <Box component="span" sx={{ display: "inline-flex", gap: 1, fontSize: 11, color: "text.secondary" }}>
+            {parts.map((part) => (
+              <Box component="span" key={part.key}>
+                {part.label} {formatCompactInteger(part.value)}
+              </Box>
+            ))}
+          </Box>
+        </Box>
+        <Box sx={{ mt: "4px", display: "flex", height: 3, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}>
+          {total > 0
+            ? parts.map((part) => (
+                <Box key={part.key} sx={{ width: `${(part.value / total) * 100}%`, bgcolor: part.color }} />
+              ))
+            : null}
+        </Box>
+      </Box>
     </Tooltip>
   );
 }

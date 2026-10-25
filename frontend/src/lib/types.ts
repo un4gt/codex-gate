@@ -946,6 +946,8 @@ export interface StatsOverviewResponse {
     providers_enabled: number;
     endpoints_enabled: number;
     upstream_keys_enabled: number;
+    endpoints_available?: number;
+    upstream_keys_available?: number;
     healthy: number;
     warning: number;
     error: number;
@@ -1025,5 +1027,6 @@ export interface StatItem {
   label: string;
   value: string;
   hint?: string;
+  title?: string;
   tone?: "default" | "success" | "warning" | "destructive";
 }

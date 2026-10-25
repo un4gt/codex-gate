@@ -40,14 +40,13 @@ const ADMIN_UPSTREAM_TEST_BODY_MAX_BYTES: usize = 16 * 1024;
 const MILLIS_PER_HOUR: i64 = 3_600_000;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const ASIA_SHANGHAI_OFFSET_MS: i64 = 8 * MILLIS_PER_HOUR;
-const DEFAULT_LOG_VISIBLE_COLUMNS: [&str; 8] = [
+const DEFAULT_LOG_VISIBLE_COLUMNS: [&str; 7] = [
     "time",
     "model",
-    "service_tier",
-    "request_path",
     "status",
     "duration",
     "total_tokens",
+    "cost",
     "api_key",
 ];
 const LOG_COLUMN_IDS: [&str; 16] = [
@@ -105,7 +104,7 @@ where
 
 fn build_info() -> Value {
     serde_json::json!({
-        "version": option_env!("LITTLE_GATE_VERSION").unwrap_or("dev"),
+        "version": option_env!("LITTLE_GATE_VERSION").unwrap_or(concat!("v", env!("CARGO_PKG_VERSION"))),
         "commit": option_env!("LITTLE_GATE_COMMIT").unwrap_or("unknown"),
     })
 }
@@ -216,6 +215,7 @@ pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpRespo
         (Method::GET, "/api/v1/stats/overview") => return stats_overview(req, state).await,
         (Method::GET, "/api/v1/stats/live") => return stats_live(req, state).await,
         (Method::GET, "/api/v1/logs") => return list_logs(req, state).await,
+        (Method::GET, "/api/v1/logs/endpoints") => return upstreams::log_endpoints(state).await,
         _ => {}
     }
 
@@ -4034,6 +4034,46 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
     let endpoints_enabled = endpoints.iter().filter(|e| e.enabled).count();
     let keys_enabled = keys.iter().filter(|k| k.enabled).count();
 
+    let snapshot = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    };
+    let mut endpoints_available = 0;
+    let mut keys_available = 0;
+    for provider in &snapshot.providers {
+        let available_keys = snapshot
+            .keys_by_provider
+            .get(&provider.id)
+            .into_iter()
+            .flatten()
+            .filter(|key| {
+                crate::routing_availability::account(&state, &snapshot, provider, key, None, false)
+                    .available
+            })
+            .count();
+        keys_available += available_keys;
+        if available_keys > 0 {
+            endpoints_available += snapshot
+                .endpoints_by_provider
+                .get(&provider.id)
+                .into_iter()
+                .flatten()
+                .filter(|endpoint| {
+                    endpoint.enabled
+                        && state
+                            .endpoint_health
+                            .snapshot(endpoint.id, util::now_ms())
+                            .available
+                })
+                .count();
+        }
+    }
+
     let (healthy, warning, error) = match crate::routing_availability::health_counts(&state).await {
         Ok(counts) => counts,
         Err(error) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
@@ -4055,6 +4095,8 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
             "providers_enabled": providers_enabled,
             "endpoints_enabled": endpoints_enabled,
             "upstream_keys_enabled": keys_enabled,
+            "endpoints_available": endpoints_available,
+            "upstream_keys_available": keys_available,
             "healthy": healthy,
             "warning": warning,
             "error": error

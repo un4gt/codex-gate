@@ -73,7 +73,11 @@ for (const locale of locales) {
     readFile(htmlPath, "utf8"),
     readFile(textPath, "utf8"),
   ]);
-  if (trackedHtml !== html || trackedText !== text) {
+  // Git may check out text assets with CRLF on Windows.
+  if (
+    trackedHtml.replaceAll("\r\n", "\n") !== html.replaceAll("\r\n", "\n") ||
+    trackedText.replaceAll("\r\n", "\n") !== text.replaceAll("\r\n", "\n")
+  ) {
     hasMismatch = true;
     process.stderr.write(
       `${locale} notification email assets are stale; run npm run email-templates:generate\n`,

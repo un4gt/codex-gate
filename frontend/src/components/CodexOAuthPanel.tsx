@@ -290,24 +290,12 @@ export function CodexOAuthLoginDialog(props: CodexOAuthLoginDialogProps) {
       fullWidth
       maxWidth="sm"
       aria-labelledby="codex-oauth-login-title"
-      aria-describedby="codex-oauth-login-description"
       onClose={() => void cancelAndClose()}
     >
       <DialogTitle id="codex-oauth-login-title">
         {t("OpenAI Codex OAuth 登录")}
       </DialogTitle>
       <DialogContent sx={{ display: "grid", gap: "0.875rem" }}>
-        <Typography
-          id="codex-oauth-login-description"
-          sx={{
-            fontSize: "0.875rem",
-            lineHeight: "1.25rem",
-            color: "var(--mui-palette-text-secondary)",
-          }}
-        >
-          {t("授权码和 OAuth Token 不会写入日志。")}
-        </Typography>
-
         <ToggleButtonGroup
           exclusive
           fullWidth

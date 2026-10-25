@@ -139,9 +139,6 @@ export function PriceSyncPanel({
             {t("立即同步 · 先预览")}
           </Button>
         </Box>
-        <Typography variant="body2" color="text.secondary">
-          {t("自动同步保留手工价与渠道专属价；价格目录不会新增可调用模型。")}
-        </Typography>
         {status.error ? (
           <Alert
             severity="error"

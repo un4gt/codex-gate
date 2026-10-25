@@ -145,17 +145,6 @@ export function ProvidersPage(props: Props) {
           </>
         }
       </Stack>
-      {props.loading && !props.items.length ? (
-        <CircularProgress size={24} />
-      ) : null}
-      {!props.loading && !props.items.length ? (
-        <Box sx={{ py: 6, px: 2, textAlign: "center" }}>
-          <Typography variant="subtitle1">{t("暂无上游")}</Typography>
-          <Typography color="text.secondary" sx={{ mt: 1 }}>
-            {t("添加服务地址和凭据以连接模型服务。")}
-          </Typography>
-        </Box>
-      ) : null}
       <TableContainer component={Paper} variant="outlined">
         <Table aria-label={t("上游列表")} sx={{ minWidth: 720 }}>
           <TableHead>
@@ -174,6 +163,22 @@ export function ProvidersPage(props: Props) {
             </TableRow>
           </TableHead>
           <TableBody>
+            {!props.items.length ? (
+              <TableRow>
+                <TableCell colSpan={7} align="center" sx={{ py: 6 }}>
+                  {props.loading ? (
+                    <CircularProgress size={24} aria-label={t("加载中")} />
+                  ) : (
+                    <>
+                      <Typography variant="subtitle1">{t("暂无上游")}</Typography>
+                      <Typography color="text.secondary" sx={{ mt: 1 }}>
+                        {t("添加服务地址和凭据以连接模型服务。")}
+                      </Typography>
+                    </>
+                  )}
+                </TableCell>
+              </TableRow>
+            ) : null}
             {props.items.map(({ provider: p }) => (
               <TableRow key={p.id} hover>
                 <TableCell
@@ -185,15 +190,31 @@ export function ProvidersPage(props: Props) {
                 >
                   {p.name}
                 </TableCell>
-                <TableCell>{p.provider_type}</TableCell>
+                <TableCell>
+                  <Chip
+                    variant="filled"
+                    label={p.provider_type}
+                    title={t("协议（只读）")}
+                    sx={{
+                      height: 20,
+                      borderRadius: "4px",
+                      fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+                      fontSize: 11,
+                      bgcolor: "action.selected",
+                      color: "text.secondary",
+                      "& .MuiChip-label": { px: 0.75 },
+                    }}
+                  />
+                </TableCell>
                 <TableCell align="right">{p.endpoint_count ?? 0}</TableCell>
                 <TableCell align="right">{p.key_count ?? 0}</TableCell>
                 <TableCell align="right">{p.model_count ?? 0}</TableCell>
                 <TableCell>
                   <Chip
+                    sx={{ height: 20, fontSize: 11, fontWeight: 500 }}
                     color={
                       !p.enabled
-                        ? "default"
+                        ? "error"
                         : p.routing_availability?.available
                           ? "success"
                           : "warning"

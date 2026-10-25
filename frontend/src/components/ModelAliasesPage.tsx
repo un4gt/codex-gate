@@ -2,6 +2,9 @@ import Plus from "@mui/icons-material/AddOutlined";
 import CloseOutlined from "@mui/icons-material/CloseOutlined";
 import Trash2 from "@mui/icons-material/DeleteOutlined";
 import Search from "@mui/icons-material/SearchOutlined";
+import Pencil from "@mui/icons-material/EditOutlined";
+import Chip from "@mui/material/Chip";
+import Skeleton from "@mui/material/Skeleton";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
@@ -80,6 +83,9 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
     )
     .sort((a, b) => a.name.localeCompare(b.name));
   const close = () => update({ alias_id: null }, true);
+  const providerNames = new Map(
+    props.providers.map((item) => [item.provider.id, item.provider.name]),
+  );
   return (
     <Box sx={{ display: "grid", gap: 2, minWidth: 0 }}>
       <Suspense fallback={<CircularProgress size={24} />}>
@@ -88,32 +94,32 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
           providers={props.providers}
         />
       </Suspense>
-      <Stack spacing={2}>
+      <Stack spacing={1}>
         <Box
           sx={{
             display: "flex",
             alignItems: "center",
             flexWrap: "wrap",
-            gap: 2,
+            gap: 1,
           }}
         >
           <Box
             sx={{
-              display: "grid",
-              gridTemplateColumns:
-                "repeat(auto-fit, minmax(min(100%, 180px), 1fr))",
-              gap: 2,
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 1,
               flex: 1,
               minWidth: 0,
+              "& .MuiInputBase-root": { height: 32 },
             }}
           >
             {
               <TextField
                 value={search}
                 placeholder={t("搜索路由别名")}
-                onChange={(event) => filter("q", event.target.value, true)}
-                sx={{ gridColumn: "1 / -1" }}
                 label={t("搜索路由别名")}
+                onChange={(event) => filter("q", event.target.value, true)}
+                sx={{ flex: "1 1 220px", maxWidth: 320 }}
                 slotProps={{
                   input: { startAdornment: <Search fontSize="small" /> },
                   htmlInput: { ...{ "aria-label": t("搜索路由别名") } },
@@ -134,10 +140,8 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
           </Stack>
         </Box>
       </Stack>
-      <Typography variant="body2" color="text.secondary">
-        {t(
-          "通过一个调用名称，按顺序或权重选择多个上游模型。显示名称在模型详情中管理。",
-        )}
+      <Typography variant="caption" color="text.secondary">
+        {t("{{count}} 个路由别名", { count: filtered.length })}
       </Typography>
       {providerId ? (
         <Alert
@@ -148,7 +152,7 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
             </Button>
           }
         >
-          {t("只显示包含所选上游的路由别名。")}
+          {t("已按上游筛选")}
         </Alert>
       ) : null}
       {props.error ? (
@@ -162,48 +166,144 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
         </Alert>
       ) : null}
       {props.loading && props.aliases.length === 0 ? (
-        <CircularProgress size={24} />
+        <Stack spacing={0.75} aria-label={t("加载中")} aria-busy="true">
+          {Array.from({ length: 4 }, (_, index) => (
+            <Skeleton key={index} variant="rounded" height={36} />
+          ))}
+        </Stack>
       ) : null}
       {filtered.length > 0 ? (
         <TableContainer>
-          <Table size="small" aria-label={t("路由别名")} sx={{ minWidth: 560 }}>
+          <Table
+            size="small"
+            aria-label={t("路由别名")}
+            sx={{
+              minWidth: 640,
+              tableLayout: "fixed",
+              "& td, & th": { py: 0.75 },
+            }}
+          >
             <TableHead>
               <TableRow>
-                {["别名", "模式", "启用", "目标数量", "操作"].map((label) => (
-                  <TableCell key={label}>{t(label)}</TableCell>
+                {(
+                  [
+                    ["别名", 220],
+                    ["目标", undefined],
+                    ["模式", 92],
+                    ["状态", 80],
+                    ["操作", 64],
+                  ] as const
+                ).map(([label, width]) => (
+                  <TableCell
+                    key={label}
+                    align={label === "操作" ? "right" : undefined}
+                    sx={{ width }}
+                  >
+                    {t(label)}
+                  </TableCell>
                 ))}
               </TableRow>
             </TableHead>
             <TableBody>
-              {paginate(filtered, page, pageSize).items.map((alias) => (
-                <TableRow key={alias.id} hover>
-                  <TableCell sx={{ fontFamily: "monospace" }}>
-                    {alias.name}
-                  </TableCell>
-                  <TableCell>
-                    {t(alias.mode === "ordered" ? "按顺序" : "按权重")}
-                  </TableCell>
-                  <TableCell>{t(alias.enabled ? "启用" : "停用")}</TableCell>
-                  <TableCell>{alias.targets.length}</TableCell>
-                  <TableCell>
-                    <Button
-                      disabled={!!props.error}
-                      onClick={() => update({ alias_id: String(alias.id) })}
+              {paginate(filtered, page, pageSize).items.map((alias) => {
+                const targets = [...alias.targets].sort(
+                  (a, b) => a.priority - b.priority,
+                );
+                const activeTargets = targets.filter((target) => target.enabled);
+                return (
+                  <TableRow key={alias.id} hover>
+                    <TableCell
+                      sx={{
+                        fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                        fontSize: 12.5,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={alias.name}
                     >
-                      {t("编辑")}
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
+                      {alias.name}
+                    </TableCell>
+                    <TableCell sx={{ overflow: "hidden" }}>
+                      {targets.length === 0 ? (
+                        <Typography variant="caption" color="text.secondary">
+                          {t("暂无目标")}
+                        </Typography>
+                      ) : (
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 0.5,
+                            minWidth: 0,
+                            flexWrap: "nowrap",
+                            overflow: "hidden",
+                          }}
+                        >
+                          {targets.slice(0, 2).map((target) => {
+                            const label = `${providerNames.get(target.provider_id) ?? `#${target.provider_id}`} · ${target.upstream_model}`;
+                            return (
+                              <Chip
+                                key={target.id}
+                                label={label}
+                                title={label}
+                                sx={{
+                                  height: 22,
+                                  fontSize: 11.5,
+                                  maxWidth: 220,
+                                  opacity: target.enabled ? 1 : 0.55,
+                                }}
+                              />
+                            );
+                          })}
+                          {targets.length > 2 ? (
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ whiteSpace: "nowrap" }}
+                            >
+                              +{targets.length - 2}
+                            </Typography>
+                          ) : null}
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ ml: "auto", pl: 1, whiteSpace: "nowrap" }}
+                          >
+                            {activeTargets.length}/{targets.length}
+                          </Typography>
+                        </Box>
+                      )}
+                    </TableCell>
+                    <TableCell sx={{ whiteSpace: "nowrap", fontSize: 12 }}>
+                      {t(alias.mode === "ordered" ? "按顺序" : "按权重")}
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={t(alias.enabled ? "启用" : "停用")}
+                        color={alias.enabled ? "success" : "default"}
+                        sx={{ height: 20, fontSize: 11 }}
+                      />
+                    </TableCell>
+                    <TableCell align="right">
+                      <IconButton
+                        aria-label={t("编辑")}
+                        title={t("编辑")}
+                        disabled={!!props.error}
+                        onClick={() => update({ alias_id: String(alias.id) })}
+                      >
+                        <Pencil fontSize="small" />
+                      </IconButton>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </TableContainer>
       ) : !props.loading && !props.error ? (
         <Box sx={{ py: 6, px: 2, textAlign: "center" }}>
           <Typography variant="subtitle1">{t("暂无模型配置")}</Typography>
-          <Typography color="text.secondary" sx={{ mt: 1 }}>
-            {t("新增一个模型名称后，再为它添加上游目标。")}
-          </Typography>
         </Box>
       ) : null}
       <TablePagination

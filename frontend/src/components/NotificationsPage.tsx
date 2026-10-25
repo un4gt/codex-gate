@@ -1644,19 +1644,6 @@ export function NotificationsPage(props: NotificationsPageProps) {
               >
                 {t("投递通道")}
               </Typography>
-              <Typography
-                sx={{
-                  marginTop: "0.125rem",
-                  fontSize: "0.875rem",
-                  lineHeight: "1.25rem",
-                  color: "var(--mui-palette-text-secondary)",
-                }}
-                component="p"
-              >
-                {t(
-                  "SMTP 邮件由 Rust 后端投递；Webhook 支持通用 JSON 与常用消息平台格式。",
-                )}
-              </Typography>
             </Box>
             {
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -1965,19 +1952,6 @@ export function NotificationsPage(props: NotificationsPageProps) {
               >
                 {t("定时报表")}
               </Typography>
-              <Typography
-                sx={{
-                  marginTop: "0.125rem",
-                  fontSize: "0.875rem",
-                  lineHeight: "1.25rem",
-                  color: "var(--mui-palette-text-secondary)",
-                }}
-                component="p"
-              >
-                {t(
-                  "使用标准 5 段 Cron 与独立 IANA 时区；停机期间遗漏窗口会合并为一份报表。",
-                )}
-              </Typography>
             </Box>
             {
               <Button
@@ -2058,17 +2032,6 @@ export function NotificationsPage(props: NotificationsPageProps) {
               >
                 {t("阈值告警")}
               </Typography>
-              <Typography
-                sx={{
-                  marginTop: "0.125rem",
-                  fontSize: "0.875rem",
-                  lineHeight: "1.25rem",
-                  color: "var(--mui-palette-text-secondary)",
-                }}
-                component="p"
-              >
-                {t("支持首次触发、冷却提醒和恢复通知；每分钟评估一次。")}
-              </Typography>
             </Box>
             {
               <Button
@@ -2139,19 +2102,6 @@ export function NotificationsPage(props: NotificationsPageProps) {
                 component="h2"
               >
                 {t("发送历史")}
-              </Typography>
-              <Typography
-                sx={{
-                  marginTop: "0.125rem",
-                  fontSize: "0.875rem",
-                  lineHeight: "1.25rem",
-                  color: "var(--mui-palette-text-secondary)",
-                }}
-                component="p"
-              >
-                {t(
-                  "保留 90 天。失败投递可单独重试；待发送任务存在时每 5 秒自动刷新。",
-                )}
               </Typography>
             </Box>
             {

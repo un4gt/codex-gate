@@ -8,6 +8,7 @@ import DialogContentText from "@mui/material/DialogContentText";
 import DialogTitle from "@mui/material/DialogTitle";
 import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
+import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import TablePagination from "@mui/material/TablePagination";
 import { useId,useMemo,useState,type FormEvent } from "react";
@@ -242,69 +243,13 @@ interface InventoryProps extends ModelsPageProps {
 }
 
 const MODEL_COLUMNS = [
-  {
-    id: "model",
-    label: "模型",
-    defaultWidth: 240,
-    minWidth: 160,
-    maxWidth: 640,
-  },
-  {
-    id: "provider_count",
-    label: "上游数量",
-    defaultWidth: 104,
-    minWidth: 88,
-    maxWidth: 240,
-  },
-  {
-    id: "native_endpoint",
-    label: "原生端点",
-    defaultWidth: 160,
-    minWidth: 128,
-    maxWidth: 420,
-  },
-  {
-    id: "availability",
-    label: "库存",
-    defaultWidth: 96,
-    minWidth: 88,
-    maxWidth: 240,
-  },
-  {
-    id: "enabled",
-    label: "上游启用",
-    defaultWidth: 128,
-    minWidth: 112,
-    maxWidth: 240,
-  },
-  {
-    id: "input_price",
-    label: "输入",
-    defaultWidth: 152,
-    minWidth: 112,
-    maxWidth: 360,
-  },
-  {
-    id: "output_price",
-    label: "输出",
-    defaultWidth: 152,
-    minWidth: 112,
-    maxWidth: 360,
-  },
-  {
-    id: "global",
-    label: "全局",
-    defaultWidth: 88,
-    minWidth: 72,
-    maxWidth: 180,
-  },
-  {
-    id: "actions",
-    label: "操作",
-    defaultWidth: 96,
-    minWidth: 80,
-    maxWidth: 200,
-  },
+  { id: "model", label: "模型" },
+  { id: "provider_count", label: "上游 / 可用" },
+  { id: "native_endpoint", label: "原生端点" },
+  { id: "enabled", label: "上游启用" },
+  { id: "price", label: "价格 输入 / 输出" },
+  { id: "global", label: "全局" },
+  { id: "actions", label: "" },
 ] as const;
 
 function ModelInventory(props: InventoryProps) {
@@ -578,7 +523,11 @@ function ModelInventory(props: InventoryProps) {
         </Typography>
       ) : null}
       {props.inventory.loading && props.inventory.data === null ? (
-        <CircularProgress size={24} aria-label={t("正在读取模型")} />
+        <Stack sx={{ gap: 0.75 }} aria-busy aria-label={t("正在读取模型")}>
+          {Array.from({ length: 8 }, (_, index) => (
+            <Skeleton key={index} variant="rounded" height={40} />
+          ))}
+        </Stack>
       ) : null}
       {filtered.length ? (
         <TableContainer
@@ -589,7 +538,7 @@ function ModelInventory(props: InventoryProps) {
             stickyHeader
             size="small"
             aria-label={t("模型库存")}
-            sx={{ minWidth: 960 }}
+            sx={{ minWidth: 760, "& .MuiTableCell-root": { py: 0.75, px: 1.25 } }}
           >
             <TableHead>
               <TableRow>
@@ -620,30 +569,37 @@ function ModelInventory(props: InventoryProps) {
                         onOpen={() => update({ model: model.name })}
                       />
                     </TableCell>
-                    <TableCell>{model.inventories.length}</TableCell>
-                    <TableCell sx={{ overflow: "hidden" }}>
-                      <Typography variant="caption" component="div">
+                    <TableCell data-column-id="provider_count">
+                      <AvailabilitySummary
+                        total={model.inventories.length}
+                        available={model.inventories.filter((item) => item.available).length}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Stack direction="row" sx={{ gap: 0.5, flexWrap: "wrap" }}>
                         {Array.from(
                           new Set(
                             model.inventories.flatMap(
                               (item) => item.native_api_formats,
                             ),
                           ),
-                        )
-                          .map((format) =>
-                            format === "responses"
-                              ? "Responses"
-                              : "Chat Completions",
-                          )
-                          .join(" · ")}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      {
-                        model.inventories.filter((item) => item.available)
-                          .length
-                      }{" "}
-                      / {model.inventories.length}
+                        ).map((format) => (
+                          <Chip
+                            key={format}
+                            variant="filled"
+                            label={format === "responses" ? "Responses" : "Chat"}
+                            sx={{
+                              height: 18,
+                              borderRadius: "4px",
+                              fontSize: 10.5,
+                              fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+                              bgcolor: "action.selected",
+                              color: "text.secondary",
+                              "& .MuiChip-label": { px: 0.75 },
+                            }}
+                          />
+                        ))}
+                      </Stack>
                     </TableCell>
                     <TableCell>
                       {providerModel ? (
@@ -675,15 +631,21 @@ function ModelInventory(props: InventoryProps) {
                         </>
                       )}
                     </TableCell>
-                    {(["input", "output"] as const).map((kind) => (
-                      <TableCell key={kind}>
+                    <TableCell sx={{ fontSize: 12 }}>
+                      <Stack direction="row" sx={{ alignItems: "baseline", gap: 0.75, whiteSpace: "nowrap" }}>
                         <RateSummary
                           model={model}
                           prices={pricesKnown ? priceItems : null}
-                          kind={kind}
+                          kind="input"
                         />
-                      </TableCell>
-                    ))}
+                        <Box component="span" sx={{ color: "text.disabled" }}>/</Box>
+                        <RateSummary
+                          model={model}
+                          prices={pricesKnown ? priceItems : null}
+                          kind="output"
+                        />
+                      </Stack>
+                    </TableCell>
                     <TableCell>
                       {providerId ? (
                         <Typography
@@ -725,6 +687,8 @@ function ModelInventory(props: InventoryProps) {
                     <TableCell>
                       <Button
                         variant="text"
+                        size="small"
+                        sx={{ minWidth: 0, px: 1, fontSize: 12 }}
                         onClick={() => update({ model: model.name })}
                       >
                         {t("详情")}
@@ -1226,5 +1190,26 @@ function RateSummary({
         </Typography>
       ) : null}
     </Box>
+  );
+}
+
+function AvailabilitySummary(props: { total: number; available: number }) {
+  const { t } = useI18n();
+  const tone =
+    props.total === 0 || props.available === 0
+      ? "error.main"
+      : props.available < props.total
+        ? "warning.main"
+        : "success.main";
+  return (
+    <Stack direction="row" sx={{ alignItems: "center", gap: 0.75, fontSize: 12, whiteSpace: "nowrap" }}>
+      <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: tone, flexShrink: 0 }} />
+      <Box component="span" sx={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+        {props.available}/{props.total}
+      </Box>
+      <Box component="span" sx={{ color: "text.secondary" }}>
+        {t("可用")}
+      </Box>
+    </Stack>
   );
 }

@@ -425,6 +425,18 @@ export async function loadRequestLogs(settings: ConnectionSettings, params: Requ
   return fetchJson<RequestLogRow[]>(apiBase, `/api/v1/logs?${search.toString()}`, adminToken);
 }
 
+export interface LogEndpoint {
+  id: number;
+  provider_id: number;
+  name: string;
+  provider_name: string;
+}
+
+export async function loadLogEndpoints(settings: ConnectionSettings): Promise<LogEndpoint[]> {
+  const { apiBase, adminToken } = requireConnection(settings);
+  return fetchJson<LogEndpoint[]>(apiBase, '/api/v1/logs/endpoints', adminToken);
+}
+
 export async function loadStatsOverview(
   settings: ConnectionSettings,
   period: StatsPeriod = 'today',

@@ -21,7 +21,7 @@ import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
-import CircularProgress from "@mui/material/CircularProgress";
+import Skeleton from "@mui/material/Skeleton";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
@@ -130,23 +130,23 @@ export function PricesPage(props: PricesPageProps) {
   return (
     <Box sx={{ display: "grid", gap: 2, minWidth: 0 }}>
       <PriceSyncPanel settings={props.settings} onRefresh={props.onRefresh} />
-      <Stack spacing={2}>
+      <Stack spacing={1}>
         <Box
           sx={{
             display: "flex",
             alignItems: "center",
             flexWrap: "wrap",
-            gap: 2,
+            gap: 1,
           }}
         >
           <Box
             sx={{
-              display: "grid",
-              gridTemplateColumns:
-                "repeat(auto-fit, minmax(min(100%, 180px), 1fr))",
-              gap: 2,
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 1,
               flex: 1,
               minWidth: 0,
+              "& .MuiInputBase-root": { height: 32 },
             }}
           >
             {
@@ -154,16 +154,16 @@ export function PricesPage(props: PricesPageProps) {
                 <TextField
                   value={search}
                   placeholder={t("搜索模型价格")}
-                  sx={{ gridColumn: { xl: "span 2" } }}
-                  onChange={(event) => filter("q", event.target.value, true)}
                   label={t("搜索模型价格")}
+                  sx={{ flex: "1 1 220px", maxWidth: 320 }}
+                  onChange={(event) => filter("q", event.target.value, true)}
                   slotProps={{
                     input: { startAdornment: <Search fontSize="small" /> },
                     htmlInput: { ...{ "aria-label": t("搜索模型价格") } },
                   }}
                 />
                 <Select
-                  sx={{ gridColumn: { xl: "span 2" } }}
+                  sx={{ width: 168 }}
                   displayEmpty
                   value={scope === "global" ? "global" : providerId}
                   inputProps={{ "aria-label": t("作用范围") }}
@@ -187,6 +187,7 @@ export function PricesPage(props: PricesPageProps) {
                   ))}
                 </Select>
                 <Select
+                  sx={{ width: 128 }}
                   displayEmpty
                   value={source}
                   inputProps={{ "aria-label": t("价格来源") }}
@@ -218,7 +219,7 @@ export function PricesPage(props: PricesPageProps) {
           </Stack>
         </Box>
       </Stack>
-      <Typography variant="body2" color="text.secondary">
+      <Typography variant="caption" color="text.secondary">
         {t("{{count}} 个价格项 · 美元 / 百万 token", {
           count: filtered.length,
         })}
@@ -234,7 +235,11 @@ export function PricesPage(props: PricesPageProps) {
         </Alert>
       ) : null}
       {props.loading && props.items.length === 0 ? (
-        <CircularProgress size={24} aria-label={t("加载中")} />
+        <Stack spacing={0.75} aria-label={t("加载中")} aria-busy="true">
+          {Array.from({ length: 5 }, (_, index) => (
+            <Skeleton key={index} variant="rounded" height={36} />
+          ))}
+        </Stack>
       ) : null}
       {visible.length > 0 ? (
         <TableContainer>
@@ -243,41 +248,30 @@ export function PricesPage(props: PricesPageProps) {
             aria-label={t("当前可用价格项")}
             sx={[
               { tableLayout: "fixed" },
-              { minWidth: 1150, "& td": { overflow: "hidden" } },
+              {
+                minWidth: 900,
+                "& td": { overflow: "hidden", py: 0.75 },
+                "& .MuiTableCell-head": { py: 0.75 },
+              },
             ]}
           >
             <TableHead>
               <TableRow>
-                {[
-                  "模型",
-                  "范围",
-                  "输入",
-                  "输出",
-                  "缓存读取",
-                  "缓存写入",
-                  "价格层级",
-                  "更新时间",
-                  "操作",
-                ].map((label) => (
+                {(
+                  [
+                    ["模型", undefined],
+                    ["范围", 140],
+                    ["价格 输入 / 输出", 150],
+                    ["缓存 读 / 写", 140],
+                    ["层级", 76],
+                    ["更新时间", 128],
+                    ["操作", 72],
+                  ] as const
+                ).map(([label, width]) => (
                   <TableCell
                     key={label}
-                    sx={[
-                      { whiteSpace: "nowrap" },
-                      {
-                        width:
-                          label === "模型"
-                            ? 210
-                            : label === "范围"
-                              ? 150
-                              : label === "更新时间"
-                                ? 140
-                                : label === "操作"
-                                  ? 96
-                                  : label === "价格层级"
-                                    ? 100
-                                    : 115,
-                      },
-                    ]}
+                    align={label === "操作" ? "right" : undefined}
+                    sx={{ whiteSpace: "nowrap", width }}
                   >
                     {t(label)}
                   </TableCell>
@@ -287,12 +281,17 @@ export function PricesPage(props: PricesPageProps) {
             <TableBody>
               {visible.map((item) => (
                 <TableRow key={item.id} hover>
-                  <TableCell sx={{ whiteSpace: "nowrap" }}>
+                  <TableCell sx={{ whiteSpace: "nowrap", minWidth: 200 }}>
                     <ModelIdentity
                       id={item.model_name}
                       display={item.display}
                     />
-                    <Typography variant="caption" color="text.secondary">
+                    <Typography
+                      component="div"
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ lineHeight: 1.3 }}
+                    >
                       {t(item.source === "cloud" ? "云端报价" : "手工价格")}
                       {item.source === "cloud" && item.display?.quote_provider
                         ? ` · ${item.display.quote_provider}`
@@ -323,6 +322,7 @@ export function PricesPage(props: PricesPageProps) {
                     <Chip
                       size="small"
                       variant="outlined"
+                      sx={{ maxWidth: "100%", height: 22, fontSize: 12 }}
                       label={
                         item.provider_id === null
                           ? t("全局默认")
@@ -333,34 +333,57 @@ export function PricesPage(props: PricesPageProps) {
                           ? t("全局默认")
                           : scopeNames.get(item.provider_id)
                       }
-                      sx={{ maxWidth: "100%" }}
                     />
                   </TableCell>
                   {(
-                    ["input", "output", "cache_read", "cache_write"] as const
-                  ).map((kind) => (
+                    [
+                      ["input", "output"],
+                      ["cache_read", "cache_write"],
+                    ] as const
+                  ).map(([first, second]) => (
                     <TableCell
-                      key={kind}
+                      key={first}
                       sx={{
                         whiteSpace: "nowrap",
                         fontVariantNumeric: "tabular-nums",
                       }}
                     >
-                      {formatUnitCost(item.price_data.base[kind])}
+                      {formatUnitCost(item.price_data.base[first])}
+                      <Box
+                        component="span"
+                        sx={{ color: "text.disabled", mx: 0.5 }}
+                      >
+                        /
+                      </Box>
+                      {formatUnitCost(item.price_data.base[second])}
                     </TableCell>
                   ))}
                   <TableCell sx={{ whiteSpace: "nowrap" }}>
-                    {item.price_data.tiers.length
-                      ? t("{{count}} 个阶梯", {
+                    {item.price_data.tiers.length ? (
+                      <Chip
+                        color="primary"
+                        label={t("{{count}} 个阶梯", {
                           count: item.price_data.tiers.length,
-                        })
-                      : t("基础")}
+                        })}
+                        sx={{ height: 20, fontSize: 11 }}
+                      />
+                    ) : (
+                      <Typography variant="caption" color="text.secondary">
+                        {t("基础")}
+                      </Typography>
+                    )}
                   </TableCell>
-                  <TableCell sx={{ whiteSpace: "nowrap" }}>
+                  <TableCell
+                    sx={{
+                      whiteSpace: "nowrap",
+                      fontSize: 12,
+                      color: "text.secondary",
+                    }}
+                  >
                     {formatDateTime(item.updated_at_ms)}
                   </TableCell>
-                  <TableCell>
-                    <Box sx={{ display: "flex" }}>
+                  <TableCell align="right">
+                    <Box sx={{ display: "inline-flex" }}>
                       <IconButton
                         aria-label={t("编辑价格 {{name}}", {
                           name: item.model_name,
@@ -393,9 +416,6 @@ export function PricesPage(props: PricesPageProps) {
       ) : !props.loading && !props.error ? (
         <Box sx={{ py: 6, px: 2, textAlign: "center" }}>
           <Typography variant="subtitle1">{t("当前还没有价格项。")}</Typography>
-          <Typography color="text.secondary" sx={{ mt: 1 }}>
-            {t("尝试调整筛选条件，或新增模型价格。")}
-          </Typography>
         </Box>
       ) : null}
       <TablePagination

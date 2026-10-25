@@ -32,6 +32,9 @@ class UpstreamMock(Mock):
 
 
 def check(test):
+    assert test.api('GET', '/console-preferences')['log_visible_columns'] == [
+        'time', 'model', 'status', 'duration', 'total_tokens', 'cost', 'api_key',
+    ]
     def create(name, paths, keys=('good-key',), **options):
         return test.api('POST', '/upstreams', {
             'name': name, 'provider_type': 'openai', 'websocket_enabled': True,
@@ -49,6 +52,24 @@ def check(test):
     assert len(configs) == 2 and all(not item['endpoints'] and not item['keys'] for item in configs)
     assert configs[0]['provider']['endpoint_count'] == 2
     detail = test.api('GET', f"/upstreams/{one['id']}")
+    log_endpoints = test.api('GET', '/logs/endpoints')
+    assert len(log_endpoints) == 3, log_endpoints
+    assert all(set(item) == {'id', 'provider_id', 'name', 'provider_name'} for item in log_endpoints)
+    endpoint = detail['endpoints'][0]
+    assert next(item for item in log_endpoints if item['id'] == endpoint['id']) == {
+        'id': endpoint['id'], 'provider_id': one['id'], 'name': endpoint['name'], 'provider_name': 'combined-failures',
+    }
+    assert test.http('GET', '/api/v1/logs/endpoints', token='invalid-admin')[0] == 401
+    test.api('PATCH', f"/endpoints/{endpoint['id']}", {'enabled': False})
+    assert any(item['id'] == endpoint['id'] for item in test.api('GET', '/logs/endpoints'))
+    test.api('PATCH', f"/endpoints/{endpoint['id']}", {'enabled': True})
+    health = test.api('GET', '/stats/overview')['service_health']
+    assert health['endpoints_available'] == 3 and health['upstream_keys_available'] == 3, health
+    test.api('PATCH', f"/upstreams/{one['id']}", {'enabled': False})
+    health = test.api('GET', '/stats/overview')['service_health']
+    assert health['endpoints_enabled'] == 3 and health['upstream_keys_enabled'] == 3, health
+    assert health['endpoints_available'] == 1 and health['upstream_keys_available'] == 1, health
+    test.api('PATCH', f"/upstreams/{one['id']}", {'enabled': True})
     assert all('secret' not in k and k['configured'] for k in detail['keys'])
     assert 'bad-key' not in json.dumps(detail)
     assert not any(k in detail['provider'] for k in ['priority', 'weight', 'groups'])

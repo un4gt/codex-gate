@@ -306,6 +306,42 @@ describe("admin console smoke test", () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it("loads log endpoint filters independently of upstream summaries and submits the selected ID", async () => {
+    window.localStorage.setItem("little_gate_locale", "zh");
+    window.history.replaceState({}, "", "/logs?provider_id=7");
+    initializeI18n();
+    fetchRequest.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/logs/endpoints") return jsonResponse([
+        { id: 71, provider_id: 7, name: "Primary", provider_name: "Provider A" },
+      ]);
+      if (url.pathname === "/api/v1/console-preferences") return jsonResponse({ log_visible_columns: ["time", "endpoint"] });
+      return jsonResponse([]);
+    });
+    await act(async () => {
+      renderWithTheme(<LogsPage
+        settings={{ apiBase: "http://127.0.0.1:8080", adminToken: "test-token" }}
+        providers={[providerWorkspace()]}
+        apiKeys={[]}
+        refreshKey={0}
+        onMessage={() => {}}
+      />);
+    });
+    expect(fetchRequest.mock.calls.some(([input]) => {
+      const url = new URL(String(input));
+      return url.pathname === "/api/v1/logs" && url.searchParams.get("provider_id") === "7";
+    })).toBe(true);
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "全部目标" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Provider A / Primary" }));
+    expect(fetchRequest.mock.calls.some(([input]) => new URL(String(input)).searchParams.has("endpoint_id"))).toBe(false);
+    fireEvent.keyDown(screen.getByLabelText("模型"), { key: "Enter" });
+    await waitFor(() => expect(fetchRequest.mock.calls.some(([input]) => {
+      const url = new URL(String(input));
+      return url.pathname === "/api/v1/logs" && url.searchParams.get("endpoint_id") === "71";
+    })).toBe(true));
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it("keeps the connection gate closed when the submitted admin token is rejected", async () => {
     fetchRequest.mockResolvedValue(
       jsonResponse({ error: "invalid token" }, 401),
@@ -384,6 +420,50 @@ describe("admin console smoke test", () => {
         .getByRole("button", { name: "Last 24 hours" })
         .getAttribute("aria-pressed"),
     ).toBe("true");
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("switches the combined traffic chart without refetching or losing missing-usage feedback", async () => {
+    window.sessionStorage.setItem("little_gate_admin_token", "test-token");
+    window.history.replaceState({}, "", "/overview");
+    const overview = overviewFixture("today", 3);
+    overview.series = {
+      interval_ms: 300_000,
+      points: [
+        { bucket_start_ms: 0, request_success: 1, request_failed: 0, input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 2, cache_creation_input_tokens: 0, usage_observed_requests: 1 },
+        { bucket_start_ms: 300_000, request_success: 0, request_failed: 1, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, usage_observed_requests: 0 },
+        { bucket_start_ms: 600_000, request_success: 1, request_failed: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, usage_observed_requests: 1 },
+      ],
+    };
+    Object.assign(overview.token_usage, {
+      total_tokens: 17,
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 2,
+      usage_observed_requests: 2,
+    });
+    fetchRequest.mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/api/v1/system/config") return jsonResponse({});
+      if (path === "/api/v1/stats/overview") return jsonResponse(overview);
+      return jsonResponse([]);
+    });
+    await act(async () => {
+      renderWithTheme(<Root />);
+    });
+    const controls = screen.getByRole("group", { name: "Traffic Trend" });
+    const requestsBefore = fetchRequest.mock.calls.length;
+    for (const name of ["Requests", "Usage", "All"]) {
+      await act(async () => {
+        fireEvent.click(within(controls).getByRole("button", { name }));
+      });
+      expect(
+        within(controls).getByRole("button", { name }).getAttribute("aria-pressed"),
+      ).toBe("true");
+      expect(screen.getByRole("alert").textContent).toContain("1");
+      expect(screen.queryByText("Trend data unavailable")).toBeNull();
+    }
+    expect(fetchRequest.mock.calls.length).toBe(requestsBefore);
     expect(consoleError).not.toHaveBeenCalled();
   });
 
@@ -2575,7 +2655,10 @@ describe("admin console smoke test", () => {
     const usage = table.querySelector(
       'tbody [data-column-id="total_tokens"] [tabindex="0"]',
     );
-    expect(usage?.textContent).toBe("1.01k");
+    expect(usage?.textContent).toContain("1.01k");
+    expect(usage?.textContent).toContain("In 101");
+    expect(usage?.textContent).toContain("Out 202");
+    expect(usage?.textContent).toContain("Cache 707");
     expect(usage?.getAttribute("aria-label")).toContain("101");
     expect(usage?.getAttribute("aria-label")).toContain("505");
     expect(widthPatch).toBeNull();

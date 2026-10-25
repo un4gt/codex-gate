@@ -5,7 +5,17 @@ import {
   formatRoutingProtocol,
   formatUpstreamEndpoint,
   sanitizeLogColumns,
+  logFiltersFromSearch,
 } from '@/components/LogsPage';
+
+describe('log links from upstream details', () => {
+  it('applies linked server filters and rejects invalid IDs', () => {
+    expect(logFiltersFromSearch('provider_id=7&endpoint_id=71&api_key_id=3&model=model-a'))
+      .toMatchObject({providerId: '7', endpointId: '71', apiKeyId: '3', model: 'model-a'});
+    expect(logFiltersFromSearch('provider_id=-1&endpoint_id=NaN&api_key_id=1.5'))
+      .toMatchObject({providerId: '', endpointId: '', apiKeyId: ''});
+  });
+});
 
 describe('log column preferences', () => {
   it('preserves the exact saved order while filtering unknown and duplicate columns', () => {
@@ -52,6 +62,6 @@ describe('actual service tier display', () => {
   });
   it('does not infer a tier when the upstream omitted it', () => {
     expect(formatServiceTier(null)).toBe('未确认');
-    expect(DEFAULT_LOG_COLUMNS).toContain('provider');
+    expect(DEFAULT_LOG_COLUMNS).toContain('cost');
   });
 });

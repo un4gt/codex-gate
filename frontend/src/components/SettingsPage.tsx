@@ -13,7 +13,6 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Checkbox from "@mui/material/Checkbox";
 import FormControl from "@mui/material/FormControl";
-import FormHelperText from "@mui/material/FormHelperText";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import { Link } from "react-router";
@@ -264,17 +263,6 @@ export function SettingsPage(props: SettingsPageProps) {
               >
                 {t("基础连接")}
               </Typography>
-              <Typography
-                sx={{
-                  marginTop: "0.125rem",
-                  fontSize: "0.875rem",
-                  lineHeight: "1.25rem",
-                  color: "var(--mui-palette-text-secondary)",
-                }}
-                component="div"
-              >
-                {t("更新当前控制台的连接信息。")}
-              </Typography>
             </Box>
             <Chip
               color={
@@ -331,7 +319,6 @@ export function SettingsPage(props: SettingsPageProps) {
                     props.onAdminTokenChange(event.target.value)
                   }
                 />
-                <FormHelperText>{t("只保存在当前标签页。")}</FormHelperText>
               </FormControl>
             </Box>
             <Box
@@ -360,9 +347,6 @@ export function SettingsPage(props: SettingsPageProps) {
           <Box>
             <Typography component="h2" variant="h2">
               {t("基础设置")}
-            </Typography>
-            <Typography color="text.secondary">
-              {t("查看当前服务配置。")}
             </Typography>
           </Box>
         </AccordionSummary>
@@ -547,9 +531,6 @@ export function SettingsPage(props: SettingsPageProps) {
                   <Typography component="h2" variant="h2">
                     {t("Beta 功能")}
                   </Typography>
-                  <Typography color="text.secondary">
-                    {t("按需开启实验功能，保存后立即生效。")}
-                  </Typography>
                 </Box>
               </AccordionSummary>
               <AccordionDetails>
@@ -581,9 +562,6 @@ export function SettingsPage(props: SettingsPageProps) {
                 <Box>
                   <Typography component="h2" variant="h2">
                     {t("运行设置")}
-                  </Typography>
-                  <Typography color="text.secondary">
-                    {t("常用设置可直接生效，资源类设置按建议调整后重启。")}
                   </Typography>
                 </Box>
               </AccordionSummary>
@@ -930,9 +908,6 @@ export function SettingsPage(props: SettingsPageProps) {
                   <Typography component="h2" variant="h2">
                     {t("稳定性与保护")}
                   </Typography>
-                  <Typography color="text.secondary">
-                    {t("查看服务故障保护的配置与实际规则。")}
-                  </Typography>
                 </Box>
               </AccordionSummary>
               <AccordionDetails>
@@ -1110,9 +1085,6 @@ export function SettingsPage(props: SettingsPageProps) {
                 <Box>
                   <Typography component="h2" variant="h2">
                     {t("数据保留与归档")}
-                  </Typography>
-                  <Typography color="text.secondary">
-                    {t("归档和清理策略集中在这里。")}
                   </Typography>
                 </Box>
               </AccordionSummary>
@@ -1373,17 +1345,11 @@ export function SettingsPage(props: SettingsPageProps) {
                   <Typography component="h2" variant="h2">
                     {t("价格与成本")}
                   </Typography>
-                  <Typography color="text.secondary">
-                    {t("管理模型单价与成本统计。")}
-                  </Typography>
                 </Box>
               </AccordionSummary>
               <AccordionDetails>
                 {
                   <>
-                    <Typography color="text.secondary">
-                      {t("价格管理已移至模型中心。")}
-                    </Typography>
                     <Button
                       component={Link}
                       to="/models/prices"

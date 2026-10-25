@@ -23,17 +23,26 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
-import Chip from "@mui/material/Chip";
+import CircularProgress from "@mui/material/CircularProgress";
 import Grid from "@mui/material/Grid";
 import LinearProgress from "@mui/material/LinearProgress";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
-import { useTheme } from "@mui/material/styles";
+import { type CssVarsTheme, useColorScheme, useTheme } from "@mui/material/styles";
 import Typography from "@mui/material/Typography";
-import { BarChart } from "@mui/x-charts/BarChart";
-import { LineChart } from "@mui/x-charts/LineChart";
+import ToggleButton from "@mui/material/ToggleButton";
+import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
+import { BarChart, BarPlot } from "@mui/x-charts/BarChart";
+import { ChartsAxisHighlight } from "@mui/x-charts/ChartsAxisHighlight";
+import { ChartsContainer } from "@mui/x-charts/ChartsContainer";
+import { ChartsGrid } from "@mui/x-charts/ChartsGrid";
+import { ChartsTooltip } from "@mui/x-charts/ChartsTooltip";
+import { ChartsXAxis } from "@mui/x-charts/ChartsXAxis";
+import { ChartsYAxis } from "@mui/x-charts/ChartsYAxis";
+import { LineHighlightPlot, LinePlot } from "@mui/x-charts/LineChart";
+import { SparkLineChart } from "@mui/x-charts/SparkLineChart";
 import { PieChart } from "@mui/x-charts/PieChart";
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router";
 const OVERVIEW_PERIODS: {
   value: StatsPeriod;
@@ -109,10 +118,14 @@ function formatServerMemory(
 }
 export default function OverviewPage(props: { data: AppDataContext }) {
   const { t } = useI18n();
-  const theme = useTheme();
-  const palette = theme.vars?.palette ?? theme.palette;
+  const theme = useTheme<CssVarsTheme>();
+  const { mode, systemMode } = useColorScheme();
+  const chartColorScheme = (mode === "system" ? systemMode : mode) ?? "light";
+  // Concrete colors let chart internals recompute styles when the scheme changes.
+  const palette = theme.colorSchemes?.[chartColorScheme]?.palette ?? theme.palette;
   const [period, setPeriod] = useState<StatsPeriod>("today");
   const [copied, setCopied] = useState(false);
+  const [trendView, setTrendView] = useState<"all" | "requests" | "tokens">("all");
   const loadOverview = useCallback(
     async (settings: ConnectionSettings) => ({
       period,
@@ -143,6 +156,7 @@ export default function OverviewPage(props: { data: AppDataContext }) {
     (tokenUsage()?.cache_read_input_tokens ?? 0) +
     (tokenUsage()?.cache_creation_input_tokens ?? 0);
   const cacheRate = () => {
+    if (!tokenUsage()?.usage_observed_requests) return null;
     const total = tokenUsage()?.total_tokens ?? 0;
     if (total <= 0) return 0;
     return (cacheTokens() / total) * 100;
@@ -174,6 +188,12 @@ export default function OverviewPage(props: { data: AppDataContext }) {
               ? formatUsd(overviewPricing.totalUsd)
               : "—",
           hint: overviewPricing
+            ? t("已计价 {{priced}} · 未定价 {{unpriced}}", {
+                priced: formatCompactInteger(overviewPricing.priceableRequests),
+                unpriced: formatCompactInteger(overviewPricing.unpricedRequests),
+              })
+            : t("当前窗口：{{window}}", { window: t(periodLabel()) }),
+          title: overviewPricing
             ? t(
                 "已计价 {{priced}} · 未定价 {{unpriced}} · 缺用量 {{missing}} · token 覆盖 {{coverage}}%",
                 {
@@ -191,9 +211,7 @@ export default function OverviewPage(props: { data: AppDataContext }) {
                     .toFixed(1),
                 },
               )
-            : t("当前窗口：{{window}}", {
-                window: t(periodLabel()),
-              }),
+            : undefined,
           tone:
             overviewPricing &&
             (overviewPricing.unpricedRequests > 0 ||
@@ -203,7 +221,9 @@ export default function OverviewPage(props: { data: AppDataContext }) {
         },
         {
           label: "用量",
-          value: formatCompactInteger(current.token_usage.total_tokens),
+          value: current.kpis.requests > 0 && current.token_usage.usage_observed_requests === 0
+            ? "—"
+            : formatCompactInteger(current.token_usage.total_tokens),
           hint: t("输入 {{input}} · 输出 {{output}}", {
             input: formatCompactInteger(current.token_usage.input_tokens),
             output: formatCompactInteger(current.token_usage.output_tokens),
@@ -211,7 +231,7 @@ export default function OverviewPage(props: { data: AppDataContext }) {
         },
         {
           label: "缓存率",
-          value: `${cacheRate().toFixed(1)}%`,
+          value: cacheRate() === null ? "—" : `${cacheRate()!.toFixed(1)}%`,
           hint: t("读 {{read}} · 写 {{write}}", {
             read: formatCompactInteger(
               current.token_usage.cache_read_input_tokens,
@@ -220,7 +240,7 @@ export default function OverviewPage(props: { data: AppDataContext }) {
               current.token_usage.cache_creation_input_tokens,
             ),
           }),
-          tone: cacheRate() > 0 ? "success" : "default",
+          tone: (cacheRate() ?? 0) > 0 ? "success" : "default",
         },
         {
           label: "平均响应",
@@ -328,13 +348,37 @@ export default function OverviewPage(props: { data: AppDataContext }) {
         : {}),
     }).format(date);
   };
+  const sparkRequests = points.map((point) => point.request_success + point.request_failed);
+  const sparkTokens = points.map(
+    (point) =>
+      point.request_success + point.request_failed > 0 && point.usage_observed_requests === 0
+        ? null
+        : point.input_tokens + point.output_tokens + point.cache_read_input_tokens + point.cache_creation_input_tokens,
+  );
+  const successRate = overview && overview.kpis.requests > 0 ? 100 - overview.kpis.error_rate : null;
+  const showTokens = trendView !== "requests";
+  const showRequests = trendView !== "tokens";
+  const legendItems = [
+    ...(showTokens ? tokenSeries.map((item) => ({ label: item.label, color: item.color, line: false })) : []),
+    ...(showRequests
+      ? [
+          { label: t("成功"), color: palette.primary.main, line: true },
+          { label: t("失败"), color: palette.error.main, line: true },
+        ]
+      : []),
+  ];
+  const healthTone = !health ? "default" : health.error > 0 ? "error" : health.warning > 0 ? "warning" : "success";
+  const healthColor = healthTone === "default" ? palette.text.disabled : palette[healthTone].main;
+  const healthLabel = t(
+    !health ? "等待数据" : health.error > 0 ? "异常" : health.warning > 0 ? "警告" : "正常",
+  );
   return (
     <Box
       sx={{
         display: "flex",
         minWidth: "0",
         flexDirection: "column",
-        gap: "1.25rem",
+        gap: "1rem",
       }}
     >
       <Stack
@@ -457,579 +501,338 @@ export default function OverviewPage(props: { data: AppDataContext }) {
         {loading && overview ? (
           <LinearProgress
             aria-label={t("更新总览数据")}
-            sx={{
-              position: "absolute",
-              top: "calc(0.25rem * -2)",
-              insetInline: "0",
-            }}
+            sx={{ position: "absolute", top: -6, insetInline: 0, height: 2 }}
           />
         ) : null}
-        <Grid
-          container
-          spacing={2}
-          aria-label={"用量概览"}
-          aria-busy={loading && !overview}
-        >
-          {orderedItems.map((item) => (
+        <Grid container spacing={1.5} aria-label={t("用量概览")}>
+          {orderedItems.map((item, index) => (
             <Grid key={item.label} size={{ xs: 12, sm: 6, xl: 3 }}>
-              <Card sx={{ height: "100%" }}>
-                <CardContent>
-                  <Typography color="text.secondary" variant="body2">
-                    {t(item.label)}
-                  </Typography>
-                  <Typography component="div" variant="h1" sx={{ my: 1 }}>
-                    {loading && !overview ? (
-                      <Skeleton width="45%" />
-                    ) : (
-                      item.value
-                    )}
-                  </Typography>
-                  {item.hint ? (
-                    <Typography variant="caption" color="text.secondary">
-                      {t(item.hint)}
+              <Card sx={{ height: 112 }}>
+                <Box
+                  sx={{
+                    display: "flex",
+                    height: "100%",
+                    alignItems: "stretch",
+                    gap: 1.5,
+                    px: 2,
+                    py: 1.5,
+                  }}
+                >
+                  <Box sx={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column" }}>
+                    <Typography color="text.secondary" sx={{ fontSize: 12 }}>
+                      {t(item.label)}
                     </Typography>
-                  ) : null}
-                </CardContent>
+                    <Typography
+                      component="div"
+                      sx={{ mt: 0.5, fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.2 }}
+                    >
+                      {loading && !overview ? <Skeleton width={72} /> : item.value}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      title={item.title}
+                      sx={{ mt: "auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    >
+                      {loading && !overview ? <Skeleton width="60%" /> : t(item.hint ?? "")}
+                    </Typography>
+                  </Box>
+                  <Box sx={{ width: 96, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {loading && !overview ? (
+                      <Skeleton variant="rounded" width={96} height={44} />
+                    ) : index === 0 ? (
+                      <SparkLineChart
+                        data={sparkRequests}
+                        height={48}
+                        width={96}
+                        area
+                        curve="natural"
+                        color={palette.primary.main}
+                      />
+                    ) : index === 1 ? (
+                      <BarChart
+                        skipAnimation
+                        series={[{ data: sparkTokens, color: palette.success.main }]}
+                        xAxis={[{ scaleType: "band", data: points.map((point) => point.bucket_start_ms), position: "none" }]}
+                        yAxis={[{ position: "none" }]}
+                        margin={5}
+                        hideLegend
+                        height={48}
+                        width={96}
+                      />
+                    ) : index === 2 ? (
+                      <Ring value={cacheRate()} label={t("缓存")} color={palette.warning.main} />
+                    ) : (
+                      <Ring value={successRate} label={t("成功率")} color={palette.success.main} />
+                    )}
+                  </Box>
+                </Box>
               </Card>
             </Grid>
           ))}
         </Grid>
       </Box>
       {overview && !overview.series ? (
-        <Alert severity="info">
-          {t("当前后端未提供趋势数据，仍显示汇总指标。")}
-        </Alert>
+        <Alert severity="info">{t("当前后端未提供趋势数据，仍显示汇总指标。")}</Alert>
       ) : null}
       {missingUsage > 0 ? (
         <Alert severity="warning">
-          {t("{{count}} 个请求未返回用量，图表仅显示已观测用量。", {
-            count: missingUsage,
-          })}
+          {t("{{count}} 个请求未返回用量，图表仅显示已观测用量。", { count: missingUsage })}
         </Alert>
       ) : null}
-      <Grid container spacing={2}>
+      <Grid container spacing={1.5}>
         <Grid size={{ xs: 12, lg: 8 }}>
-          <Card>
-            <CardContent>
-              <Typography component="h2" variant="h2">
-                {t("请求趋势")}
-              </Typography>
-              {loading ? (
-                <Skeleton height={300} variant="rectangular" sx={{ mt: 2 }} />
-              ) : overview?.series ? (
-                <LineChart
-                  skipAnimation
-                  height={300}
-                  dataset={chartData}
-                  xAxis={[
-                    {
-                      dataKey: "time",
-                      scaleType: "time",
-                      valueFormatter: formatTime,
-                    },
-                  ]}
-                  yAxis={[
-                    { min: 0, valueFormatter: formatCompactInteger, width: 55 },
-                  ]}
-                  series={[
-                    {
-                      dataKey: "request_success",
-                      label: t("成功"),
-                      color: palette.primary.main,
-                      showMark: false,
-                    },
-                    {
-                      dataKey: "request_failed",
-                      label: t("失败"),
-                      color: palette.error.main,
-                      showMark: false,
-                    },
-                  ]}
-                />
-              ) : (
-                <Typography sx={{ py: 6 }} color="text.secondary">
-                  {t("趋势数据不可用")}
+          <Card sx={{ height: "100%" }}>
+            <CardContent sx={{ p: 2, "&:last-child": { pb: 1.5 } }}>
+              <Stack direction="row" sx={{ alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
+                <Typography component="h2" variant="h2">
+                  {t("流量趋势")}
                 </Typography>
-              )}
+                <Stack direction="row" sx={{ gap: 1.5, flexWrap: "wrap", ml: 0.5 }}>
+                  {legendItems.map((item) => (
+                    <Stack key={item.label} direction="row" sx={{ alignItems: "center", gap: 0.5 }}>
+                      <Box
+                        sx={{
+                          width: item.line ? 10 : 8,
+                          height: item.line ? 2 : 8,
+                          borderRadius: item.line ? 1 : "2px",
+                          bgcolor: item.color,
+                        }}
+                      />
+                      <Typography variant="caption" color="text.secondary">
+                        {item.label}
+                      </Typography>
+                    </Stack>
+                  ))}
+                </Stack>
+                <ToggleButtonGroup
+                  aria-label={t("流量趋势")}
+                  exclusive
+                  size="small"
+                  value={trendView}
+                  onChange={(_, value) => value && setTrendView(value)}
+                  sx={{
+                    ml: "auto",
+                    "& .MuiToggleButton-root": { py: 0.25, px: 1, fontSize: 12, textTransform: "none", lineHeight: 1.6 },
+                  }}
+                >
+                  <ToggleButton value="all">{t("全部")}</ToggleButton>
+                  <ToggleButton value="requests">{t("请求")}</ToggleButton>
+                  <ToggleButton value="tokens">{t("用量")}</ToggleButton>
+                </ToggleButtonGroup>
+              </Stack>
+              <Box sx={{ height: 280, mt: 1 }}>
+                {loading ? (
+                  <Skeleton variant="rounded" height={268} sx={{ mt: 1 }} />
+                ) : overview?.series && chartData.length > 0 ? (
+                  <ChartsContainer
+                    skipAnimation
+                    key={trendView}
+                    height={280}
+                    dataset={chartData}
+                    margin={{ left: 4, right: 4, top: 12, bottom: 4 }}
+                    xAxis={[{ id: "time", dataKey: "time", scaleType: "band", valueFormatter: formatTime, height: 24 }]}
+                    yAxis={[
+                      { id: "tokens", min: 0, valueFormatter: formatCompactInteger, width: 44, position: showTokens ? "left" : "none" },
+                      { id: "req", min: 0, valueFormatter: formatCompactInteger, width: 36, position: showRequests ? "right" : "none" },
+                    ]}
+                    series={[
+                      ...(showTokens
+                        ? tokenSeries.map((item) => ({
+                            ...item,
+                            type: "bar" as const,
+                            stack: "tokens",
+                            yAxisId: "tokens",
+                          }))
+                        : []),
+                      ...(showRequests
+                        ? [
+                            {
+                              type: "line" as const,
+                              dataKey: "request_success",
+                              label: t("成功"),
+                              color: palette.primary.main,
+                              yAxisId: "req",
+                              curve: "monotoneX" as const,
+                              showMark: false,
+                            },
+                            {
+                              type: "line" as const,
+                              dataKey: "request_failed",
+                              label: t("失败"),
+                              color: palette.error.main,
+                              yAxisId: "req",
+                              curve: "monotoneX" as const,
+                              showMark: false,
+                            },
+                          ]
+                        : []),
+                    ]}
+                  >
+                    <ChartsGrid horizontal />
+                    <BarPlot borderRadius={2} />
+                    <LinePlot />
+                    <ChartsAxisHighlight x="band" />
+                    <LineHighlightPlot />
+                    <ChartsXAxis axisId="time" tickLabelStyle={{ fontSize: 11 }} disableTicks />
+                    {showTokens ? <ChartsYAxis axisId="tokens" tickLabelStyle={{ fontSize: 11 }} disableLine disableTicks /> : null}
+                    {showRequests ? <ChartsYAxis axisId="req" tickLabelStyle={{ fontSize: 11 }} disableLine disableTicks /> : null}
+                    <ChartsTooltip trigger="axis" />
+                  </ChartsContainer>
+                ) : (
+                  <Box sx={{ display: "grid", height: "100%", placeItems: "center" }}>
+                    <Typography variant="caption" color="text.secondary">{t("趋势数据不可用")}</Typography>
+                  </Box>
+                )}
+              </Box>
             </CardContent>
           </Card>
         </Grid>
         <Grid size={{ xs: 12, lg: 4 }}>
           <Card sx={{ height: "100%" }}>
-            <CardContent>
+            <CardContent sx={{ p: 2, "&:last-child": { pb: 1.5 } }}>
               <Typography component="h2" variant="h2">
                 {t("Token 构成")}
               </Typography>
-              {loading ? (
-                <Skeleton height={260} variant="circular" />
-              ) : overview && overview.token_usage.total_tokens > 0 ? (
-                <PieChart
-                  skipAnimation
-                  height={260}
-                  series={[
-                    {
-                      innerRadius: 65,
-                      outerRadius: 95,
-                      data: tokenSeries.map((item) => ({
-                        id: item.dataKey,
-                        label: item.label,
-                        color: item.color,
-                        value:
-                          overview.token_usage[
-                            item.dataKey as keyof typeof overview.token_usage
-                          ],
-                      })),
-                    },
-                  ]}
-                />
-              ) : (
-                <Typography sx={{ py: 6 }} color="text.secondary">
-                  {t("暂无已观测用量")}
-                </Typography>
-              )}
-              <Typography variant="caption" color="text.secondary">
-                {t("思考 Token {{count}}，已包含在输出中。", {
-                  count: formatCompactInteger(
-                    overview?.token_usage.reasoning_output_tokens ?? 0,
-                  ),
-                })}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-        <Grid size={12}>
-          <Card>
-            <CardContent>
-              <Typography component="h2" variant="h2">
-                {t("用量趋势")}
-              </Typography>
-              {loading ? (
-                <Skeleton height={300} variant="rectangular" sx={{ mt: 2 }} />
-              ) : overview?.series ? (
-                <BarChart
-                  skipAnimation
-                  height={300}
-                  dataset={chartData}
-                  xAxis={[
-                    {
-                      dataKey: "time",
-                      scaleType: "band",
-                      valueFormatter: formatTime,
-                    },
-                  ]}
-                  yAxis={[
-                    { min: 0, valueFormatter: formatCompactInteger, width: 55 },
-                  ]}
-                  series={tokenSeries.map((item) => ({
-                    ...item,
-                    stack: "tokens",
-                  }))}
-                />
-              ) : (
-                <Typography sx={{ py: 6 }} color="text.secondary">
-                  {t("趋势数据不可用")}
-                </Typography>
-              )}
+              <Box sx={{ height: 280, mt: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {loading ? (
+                  <Skeleton variant="circular" width={190} height={190} />
+                ) : overview && overview.token_usage.total_tokens > 0 ? (
+                  <PieChart
+                    skipAnimation
+                    height={260}
+                    slotProps={{ legend: { direction: "horizontal", position: { vertical: "bottom", horizontal: "center" } } }}
+                    series={[
+                      {
+                        innerRadius: 58,
+                        outerRadius: 86,
+                        paddingAngle: 2,
+                        cornerRadius: 3,
+                        highlightScope: { fade: "global", highlight: "item" },
+                        data: tokenSeries.map((item) => ({
+                          id: item.dataKey,
+                          label: item.label,
+                          color: item.color,
+                          value: overview.token_usage[item.dataKey as keyof typeof overview.token_usage],
+                        })),
+                      },
+                    ]}
+                  />
+                ) : (
+                  <Typography variant="caption" color="text.secondary">{t("暂无已观测用量")}</Typography>
+                )}
+              </Box>
             </CardContent>
           </Card>
         </Grid>
       </Grid>
+      <Card>
+        <Box
+          sx={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            columnGap: 3,
+            rowGap: 1.5,
+            px: 2,
+            py: 1.25,
+          }}
+        >
+          <Stack direction="row" sx={{ alignItems: "center", gap: 1 }}>
+            <Box
+              sx={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                bgcolor: healthColor,
+                boxShadow: `0 0 0 3px color-mix(in oklab, ${healthColor} 22%, transparent)`,
+              }}
+            />
+            <Typography sx={{ fontSize: 13, fontWeight: 600 }}>{t("服务状态")}</Typography>
+            <Typography sx={{ fontSize: 12, color: healthColor, fontWeight: 500 }}>{healthLabel}</Typography>
+          </Stack>
+          <StatusStat icon={<Server sx={{ fontSize: 15 }} />} label={t("上游健康")} value={health ? health.healthy : "—"}
+            extra={health && (health.warning > 0 || health.error > 0) ? t("{{warning}} 警告 · {{error}} 异常", { warning: health.warning, error: health.error }) : undefined} />
+          <StatusStat icon={<Zap sx={{ fontSize: 15 }} />} label={t("可用目标")} value={health?.endpoints_available ?? "—"} />
+          <StatusStat icon={<KeyRound sx={{ fontSize: 15 }} />} label={t("活跃密钥")} value={health?.upstream_keys_available === undefined ? "—" : formatCompactInteger(health.upstream_keys_available)} />
+          <Box sx={{ width: "1px", alignSelf: "stretch", bgcolor: "divider", display: { xs: "none", md: "block" } }} />
+          <Stack direction="row" sx={{ alignItems: "center", gap: 0.75 }} title={formatServerScope(serverStatus()?.scope, serverStatus()?.memory_limited)}>
+            <Cpu sx={{ fontSize: 15, color: "text.secondary" }} />
+          </Stack>
+          <MiniMeter label="CPU" value={serverStatus()?.cpu_usage_percent} hint={formatCpuCapacity(serverStatus()?.cpu_capacity_cores)} />
+          <MiniMeter label={t("内存")} value={serverStatus()?.memory_usage_percent} hint={formatServerMemory(serverStatus())} />
+          <Button component={Link} to="/upstreams" variant="text" size="small" sx={{ ml: "auto", fontSize: 12 }}>
+            {t("查看上游详情")}
+            <ArrowRight sx={{ fontSize: 14 }} />
+          </Button>
+        </Box>
+      </Card>
+    </Box>
+  );
+}
+
+function Ring(props: { value: number | null; label: string; color: string }) {
+  const size = 52;
+  const clamped = props.value === null ? null : Math.max(0, Math.min(100, props.value));
+  const label = clamped === null ? "—" : `${Math.round(clamped)}%`;
+  return (
+    <Box sx={{ position: "relative", width: size, height: size }} title={`${props.label} ${clamped === null ? "—" : `${clamped.toFixed(1)}%`}`}>
+      <CircularProgress variant="determinate" value={100} size={size} thickness={4} aria-hidden="true" sx={{ color: "action.hover", position: "absolute" }} />
+      {clamped !== null ? (
+        <CircularProgress variant="determinate" value={clamped} size={size} thickness={4} aria-label={props.label} sx={{ color: props.color, "& .MuiCircularProgress-circle": { strokeLinecap: "round", transition: "none" } }} />
+      ) : null}
       <Box
         sx={{
-          display: "grid",
-          minWidth: "0",
-          gap: "1.25rem",
-          "@media (width >= 80rem)": { gridTemplateColumns: "1.15fr 1fr" },
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          lineHeight: 1,
         }}
       >
-        <Card
-          sx={{
-            overflow: "hidden",
-            borderRadius: "8px",
-            borderStyle: "solid",
-            borderWidth: "1px",
-            borderColor: "var(--mui-palette-divider)",
-            backgroundColor: "var(--mui-palette-background-paper)",
-            boxShadow: "none",
-          }}
-        >
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "flex-start",
-              justifyContent: "space-between",
-              gap: "0.75rem",
-              paddingInline: "1.25rem",
-              paddingBottom: "1rem",
-              paddingTop: "1.25rem",
-            }}
-          >
-            <Box>
-              <Typography
-                component="h2"
-                sx={{
-                  fontSize: "1rem",
-                  lineHeight: "calc(1.25 / 0.875)",
-                  fontWeight: "600",
-                  color: "var(--mui-palette-text-primary)",
-                }}
-              >
-                {t("服务状态")}
-              </Typography>
-              <Typography
-                sx={{
-                  marginTop: "0.25rem",
-                  fontSize: "0.75rem",
-                  lineHeight: "1.25rem",
-                  color: "var(--mui-palette-text-secondary)",
-                }}
-              >
-                {t("健康状态与可用资源。")}
-              </Typography>
-            </Box>
-            <Chip
-              color={
-                (
-                  {
-                    normal: "success",
-                    warning: "warning",
-                    error: "error",
-                    disabled: "default",
-                    draft: "default",
-                    archived: "default",
-                  } as const
-                )[
-                  !health
-                    ? "disabled"
-                    : health.error > 0
-                      ? "error"
-                      : health.warning > 0
-                        ? "warning"
-                        : "normal"
-                ]
-              }
-              label={t(
-                !health
-                  ? "等待数据"
-                  : health.error > 0
-                    ? "异常"
-                    : health.warning > 0
-                      ? "警告"
-                      : "正常",
-              )}
-            />
-          </Box>
-          <CardContent sx={{ paddingInline: "1.25rem" }}>
-            <Box
-              sx={{
-                display: "grid",
-                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-                gap: "0.5rem",
-                "@media (width >= 40rem)": { gap: "1rem" },
-              }}
-            >
-              <Box
-                sx={{
-                  minWidth: "0",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--mui-palette-background-default)",
-                  padding: "0.75rem",
-                  "@media (width >= 40rem)": { padding: "0.875rem" },
-                }}
-              >
-                <Box
-                  sx={{
-                    marginBottom: "0.75rem",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    fontSize: "0.75rem",
-                    lineHeight: "calc(1 / 0.75)",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                >
-                  <Server
-                    fontSize="small"
-                    sx={{
-                      display: "none",
-                      flexShrink: "0",
-                      "@media (width >= 40rem)": { display: "block" },
-                    }}
-                  />
-                  {t("上游健康")}
-                </Box>
-                <Box
-                  sx={{
-                    fontSize: "1.25rem",
-                    lineHeight: "calc(1.75 / 1.25)",
-                    fontWeight: "600",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {health ? health.healthy : "—"}
-                </Box>
-                <Box
-                  sx={{
-                    marginTop: "0.375rem",
-                    fontSize: "0.75rem",
-                    lineHeight: "1.25rem",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                >
-                  {health
-                    ? t("{{warning}} 警告 · {{error}} 异常", {
-                        warning: health.warning,
-                        error: health.error,
-                      })
-                    : t("等待数据")}
-                </Box>
-              </Box>
-              <Box
-                sx={{
-                  minWidth: "0",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--mui-palette-background-default)",
-                  padding: "0.75rem",
-                  "@media (width >= 40rem)": { padding: "0.875rem" },
-                }}
-              >
-                <Box
-                  sx={{
-                    marginBottom: "0.75rem",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    fontSize: "0.75rem",
-                    lineHeight: "calc(1 / 0.75)",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                >
-                  <Zap
-                    fontSize="small"
-                    sx={{
-                      display: "none",
-                      flexShrink: "0",
-                      "@media (width >= 40rem)": { display: "block" },
-                    }}
-                  />
-                  {t("可用目标")}
-                </Box>
-                <Box
-                  sx={{
-                    fontSize: "1.25rem",
-                    lineHeight: "calc(1.75 / 1.25)",
-                    fontWeight: "600",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {health ? health.endpoints_enabled : "—"}
-                </Box>
-                <Box
-                  sx={{
-                    marginTop: "0.375rem",
-                    fontSize: "0.75rem",
-                    lineHeight: "1.25rem",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                >
-                  {t("已启用的连接目标")}
-                </Box>
-              </Box>
-              <Box
-                sx={{
-                  minWidth: "0",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--mui-palette-background-default)",
-                  padding: "0.75rem",
-                  "@media (width >= 40rem)": { padding: "0.875rem" },
-                }}
-              >
-                <Box
-                  sx={{
-                    marginBottom: "0.75rem",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    fontSize: "0.75rem",
-                    lineHeight: "calc(1 / 0.75)",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                >
-                  <KeyRound
-                    fontSize="small"
-                    sx={{
-                      display: "none",
-                      flexShrink: "0",
-                      "@media (width >= 40rem)": { display: "block" },
-                    }}
-                  />
-                  {t("活跃密钥")}
-                </Box>
-                <Box
-                  sx={{
-                    fontSize: "1.25rem",
-                    lineHeight: "calc(1.75 / 1.25)",
-                    fontWeight: "600",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {health
-                    ? formatCompactInteger(health.upstream_keys_enabled)
-                    : "—"}
-                </Box>
-                <Box
-                  sx={{
-                    marginTop: "0.375rem",
-                    fontSize: "0.75rem",
-                    lineHeight: "1.25rem",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                >
-                  {t("当前可用密钥。")}
-                </Box>
-              </Box>
-            </Box>
-            <Button
-              component={Link}
-              to="/upstreams"
-              variant="text"
-              sx={{
-                marginTop: "1rem",
-                color: "var(--mui-palette-primary-main)",
-              }}
-            >
-              {t("查看上游详情")}
-              <ArrowRight fontSize="small" />
-            </Button>
-          </CardContent>
-        </Card>
-        <Card
-          sx={{
-            overflow: "hidden",
-            borderRadius: "8px",
-            borderStyle: "solid",
-            borderWidth: "1px",
-            borderColor: "var(--mui-palette-divider)",
-            backgroundColor: "var(--mui-palette-background-paper)",
-            boxShadow: "none",
-          }}
-        >
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "flex-start",
-              justifyContent: "space-between",
-              gap: "0.75rem",
-              paddingInline: "1.25rem",
-              paddingBottom: "1rem",
-              paddingTop: "1.25rem",
-            }}
-          >
-            <Box>
-              <Typography
-                component="h2"
-                sx={{
-                  fontSize: "1rem",
-                  lineHeight: "calc(1.25 / 0.875)",
-                  fontWeight: "600",
-                  color: "var(--mui-palette-text-primary)",
-                }}
-              >
-                {t("服务器状态")}
-              </Typography>
-              <Typography
-                sx={{
-                  marginTop: "0.25rem",
-                  fontSize: "0.75rem",
-                  lineHeight: "1.25rem",
-                  color: "var(--mui-palette-text-secondary)",
-                }}
-              >
-                {formatServerScope(
-                  serverStatus()?.scope,
-                  serverStatus()?.memory_limited,
-                )}
-              </Typography>
-            </Box>
-            <Box
-              sx={{
-                display: "flex",
-                width: "2rem",
-                height: "2rem",
-                alignItems: "center",
-                justifyContent: "center",
-                borderRadius: "8px",
-                backgroundColor:
-                  "color-mix(in oklab, var(--mui-palette-action-hover) 60%, transparent)",
-                color: "var(--mui-palette-text-secondary)",
-              }}
-            >
-              <Cpu fontSize="small" />
-            </Box>
-          </Box>
-          <CardContent
-            sx={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "1.25rem",
-              paddingInline: "1.25rem",
-            }}
-          >
-            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-              <Chip label={t("访问密钥 {{count}}", { count: apiKeyCount() })} />
-              <Chip
-                label={t("已启用 {{count}}", { count: enabledApiKeyCount() })}
-              />
-              <Chip
-                label={t("缓存率 {{rate}}%", { rate: cacheRate().toFixed(1) })}
-              />
-            </Box>
-            {[
-              {
-                label: "CPU",
-                value: serverStatus()?.cpu_usage_percent,
-                hint: formatCpuCapacity(serverStatus()?.cpu_capacity_cores),
-              },
-              {
-                label: t("内存"),
-                value: serverStatus()?.memory_usage_percent,
-                hint: formatServerMemory(serverStatus()),
-              },
-            ].map(({ label, value, hint }) => (
-              <Box key={label}>
-                <Stack
-                  direction="row"
-                  sx={{ mb: 1, justifyContent: "space-between" }}
-                >
-                  <Typography variant="caption" color="text.secondary">
-                    {label}
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                    {formatUsagePercent(value)}
-                  </Typography>
-                </Stack>
-                {typeof value === "number" && Number.isFinite(value) ? (
-                  <LinearProgress
-                    variant="determinate"
-                    value={Math.max(0, Math.min(100, value))}
-                    color={value >= 90 ? "warning" : "primary"}
-                    aria-label={label}
-                  />
-                ) : (
-                  <Skeleton variant="rounded" height={6} animation={false} />
-                )}
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ mt: 1, display: "block" }}
-                >
-                  {hint}
-                </Typography>
-              </Box>
-            ))}
-          </CardContent>
-        </Card>
+        <Box component="span" sx={{ fontSize: 11, fontWeight: 600 }}>
+          {label}
+        </Box>
+        <Box component="span" sx={{ fontSize: 9, color: "text.secondary", mt: "2px" }}>
+          {props.label}
+        </Box>
       </Box>
     </Box>
+  );
+}
+
+function StatusStat(props: { icon: ReactNode; label: string; value: ReactNode; extra?: string }) {
+  return (
+    <Stack direction="row" sx={{ alignItems: "center", gap: 0.75, color: "text.secondary" }} title={props.extra}>
+      {props.icon}
+      <Typography sx={{ fontSize: 12 }}>{props.label}</Typography>
+      <Typography sx={{ fontSize: 13, fontWeight: 600, color: "text.primary", fontVariantNumeric: "tabular-nums" }}>
+        {props.value}
+      </Typography>
+    </Stack>
+  );
+}
+
+function MiniMeter(props: { label: string; value: number | null | undefined; hint: string }) {
+  const valid = typeof props.value === "number" && Number.isFinite(props.value);
+  const value = valid ? Math.max(0, Math.min(100, props.value as number)) : 0;
+  return (
+    <Stack direction="row" sx={{ alignItems: "center", gap: 1 }} title={props.hint}>
+      <Typography sx={{ fontSize: 12, color: "text.secondary" }}>{props.label}</Typography>
+      <Box sx={{ width: 88 }}>
+        {valid ? <LinearProgress
+          variant="determinate"
+          value={value}
+          color={value >= 90 ? "error" : value >= 70 ? "warning" : "primary"}
+          aria-label={props.label}
+          sx={{ height: 4 }}
+        /> : <Box sx={{ height: 4, borderRadius: 1, bgcolor: "action.hover" }} />}
+      </Box>
+      <Typography sx={{ fontSize: 12, fontWeight: 600, minWidth: 36, fontVariantNumeric: "tabular-nums" }}>
+        {formatUsagePercent(props.value)}
+      </Typography>
+    </Stack>
   );
 }

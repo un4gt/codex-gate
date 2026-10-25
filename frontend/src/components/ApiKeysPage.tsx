@@ -277,23 +277,27 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         }
       </Stack>
 
-      <Grid container spacing={2} aria-label={undefined} aria-busy={false}>
+      <Grid container spacing={1.5} aria-label={undefined} aria-busy={false}>
         {stats().map((item) => (
-          <Grid key={item.label} size={{ xs: 12, sm: 6, xl: 3 }}>
-            <Card sx={{ height: "100%" }}>
-              <CardContent>
-                <Typography color="text.secondary" variant="body2">
+          <Grid key={item.label} size={{ xs: 6, xl: 3 }}>
+            <Card sx={{ height: 84 }}>
+              <Box sx={{ px: 2, py: 1, display: "flex", flexDirection: "column", height: "100%" }}>
+                <Typography color="text.secondary" sx={{ fontSize: 12 }}>
                   {t(item.label)}
                 </Typography>
-                <Typography component="div" variant="h1" sx={{ my: 1 }}>
+                <Typography component="div" sx={{ mt: 0.25, fontSize: 20, lineHeight: 1.2, fontWeight: 600, letterSpacing: "-0.02em" }}>
                   {item.value}
                 </Typography>
                 {item.hint ? (
-                  <Typography variant="caption" color="text.secondary">
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ mt: "auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  >
                     {t(item.hint)}
                   </Typography>
                 ) : null}
-              </CardContent>
+              </Box>
             </Card>
           </Grid>
         ))}
@@ -305,8 +309,9 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
             display: "flex",
             flexDirection: "column",
             gap: "0.5rem",
-            padding: "1rem",
-            paddingBottom: "0.75rem",
+            paddingInline: "1rem",
+            paddingTop: "0.875rem",
+            paddingBottom: "0.25rem",
           }}
         >
           <Typography
@@ -321,22 +326,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
           >
             {t("访问密钥列表")}
           </Typography>
-          <Typography
-            sx={{
-              marginTop: "0.125rem",
-              fontSize: "0.875rem",
-              lineHeight: "1.25rem",
-              color: "var(--mui-palette-text-secondary)",
-            }}
-            component="div"
-          >
-            {t("用于客户端连接本应用，与上游 API Key 分开管理。")}
-          </Typography>
         </Box>
         <CardContent>
           {props.items.length > 0 ? (
             <TableContainer>
-              <Table>
+              <Table size="small" sx={{ "& .MuiTableCell-root": { py: 0.75, px: 1.25 } }}>
                 <TableHead>
                   <TableRow>
                     <TableCell>{t("密钥")}</TableCell>
@@ -355,6 +349,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                     return (
                       <TableRow
                         key={item.apiKey.id}
+                        hover
                         sx={{ cursor: "pointer" }}
                         onClick={() => openDetails(item)}
                       >
@@ -362,13 +357,13 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                           <Box
                             sx={{
                               display: "flex",
-                              flexDirection: "column",
-                              gap: "0.25rem",
+                              alignItems: "baseline",
+                              gap: "0.5rem",
                             }}
                           >
                             <Box
                               sx={{
-                                fontSize: "0.875rem",
+                                fontSize: "0.8125rem",
                                 lineHeight: "calc(1.25 / 0.875)",
                                 fontWeight: "500",
                                 color: "var(--mui-palette-text-primary)",
@@ -391,13 +386,14 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                         </TableCell>
                         <TableCell>
                           <Chip
+                            sx={{ height: 20, fontSize: 11, fontWeight: 500 }}
                             color={
                               (
                                 {
                                   normal: "success",
                                   warning: "warning",
                                   error: "error",
-                                  disabled: "default",
+                                  disabled: "error",
                                   draft: "default",
                                   archived: "default",
                                 } as const
@@ -422,7 +418,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                             .map((p) => p.provider.name)
                             .join(", ") || "—"}
                         </TableCell>
-                        <TableCell>
+                        <TableCell sx={{ fontSize: 12, color: item.apiKey.log_enabled ? "text.primary" : "text.secondary" }}>
                           {t(item.apiKey.log_enabled ? "开启" : "关闭")}
                         </TableCell>
                         <TableCell>
@@ -464,7 +460,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                                 void toggleEnabled(item, !item.apiKey.enabled);
                               }}
                             >
-                              <Power />
+                              <Power sx={{ fontSize: 16 }} color={item.apiKey.enabled ? "inherit" : "error"} />
                             </Button>
                           </Box>
                         </TableCell>

@@ -184,9 +184,6 @@ export function OAuthPage(props: OAuthPageProps) {
             <Typography variant="subtitle1">
               {t("尚无 Codex OAuth 上游")}
             </Typography>
-            <Typography color="text.secondary" sx={{ mt: 1 }}>
-              {t("创建默认上游后即可登录并管理 Codex 账号。")}
-            </Typography>
             <Box sx={{ mt: 2 }}>
               {
                 <Button

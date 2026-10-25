@@ -187,12 +187,12 @@ const DEFAULT_NAV_ORDER: NavKey[] = [
 const NAVIGATION_SORTABLE_TYPE = "primary-navigation";
 const NAVIGATION_SORT_INSTRUCTIONS_ID = "primary-nav-sort-instructions";
 const NAVIGATION_SORT_TRANSITION = {
-  duration: 180,
+  duration: 120,
   easing: "cubic-bezier(0.22, 1, 0.36, 1)",
   idle: true,
 };
 const NAVIGATION_DROP_ANIMATION = {
-  duration: 160,
+  duration: 110,
   easing: "cubic-bezier(0.22, 1, 0.36, 1)",
 };
 const NAVIGATION_DRAG_SENSORS = [
@@ -208,7 +208,7 @@ const NAVIGATION_DRAG_SENSORS = [
       }
       return [
         new PointerActivationConstraints.Distance({
-          value: 6,
+          value: 3,
         }),
       ];
     },
@@ -430,7 +430,9 @@ function SortableNavigationItem(props: {
   return (
     <ListItemButton
       selected={props.active}
-      style={{ flexGrow: 0 }}
+      disableRipple
+      disableTouchRipple
+      style={{ flexGrow: 0, touchAction: "none", willChange: isDragSource ? "transform" : undefined }}
       ref={ref}
       component={Link}
       to={props.item.to}
@@ -447,9 +449,9 @@ function SortableNavigationItem(props: {
           ...{
             position: "relative",
             display: "flex",
-            minHeight: "2.75rem",
+            minHeight: "2.125rem",
             width: "100%",
-            cursor: "grab",
+            cursor: "pointer",
             WebkitUserSelect: "none",
             userSelect: "none",
             alignItems: "center",
@@ -458,14 +460,13 @@ function SortableNavigationItem(props: {
             borderStyle: "solid",
             borderWidth: "1px",
             paddingInline: "0.5rem",
-            paddingBlock: "0.375rem",
-            fontSize: "0.875rem",
+            paddingBlock: "0.25rem",
+            fontSize: "0.8125rem",
             fontWeight: "500",
             outlineStyle: "none",
-            transitionProperty:
-              "background-color,border-color,color,box-shadow,opacity",
+            transitionProperty: "background-color,border-color,color",
             transitionTimingFunction: "cubic-bezier(0, 0, 0.2, 1)",
-            transitionDuration: "150ms",
+            transitionDuration: "100ms",
             "&:active": { cursor: "grabbing" },
             "@media (prefers-reduced-motion: reduce)": {
               transitionProperty: "none",
@@ -562,19 +563,6 @@ function NavigationDragPreview(props: {
       <NavigationItemContent item={props.item} active={props.active} overlay />
     </Box>
   );
-}
-function pageDescription(pathname: string) {
-  if (pathname.startsWith("/overview")) return "查看请求、用量与响应表现。";
-  if (pathname.startsWith("/keys")) return "创建和管理访问密钥。";
-  if (pathname.startsWith("/logs")) return "筛选并排查最近请求。";
-  if (pathname.startsWith("/models")) return "管理模型库存、路由别名与价格。";
-  if (pathname.startsWith("/upstreams")) return "查看连接目标与健康状态。";
-  if (pathname.startsWith("/oauth"))
-    return "登录并管理 OpenAI Codex OAuth 账号。";
-  if (pathname.startsWith("/notifications"))
-    return "配置定时报表、阈值告警与投递通道。";
-  if (pathname.startsWith("/settings")) return "维护连接信息与高级设置。";
-  return "";
 }
 function TopShell(props: { data: AppDataContext; children: ReactNode }) {
   const { t } = useI18n();
@@ -735,7 +723,7 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
             minHeight: "0",
             flex: "1",
             flexDirection: "column",
-            gap: "0.25rem",
+            gap: 0.25,
             overflowY: "auto",
           }}
           aria-label="Primary"
@@ -789,7 +777,7 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
               lineHeight: "calc(1 / 0.75)",
               fontWeight: "500",
               color: "var(--mui-palette-text-secondary)",
-              marginTop: "1.5rem",
+              mt: 2,
             }}
           >
             {t("管理")}
@@ -825,10 +813,10 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
       </DragDropProvider>
       <Box
         sx={{
-          marginTop: "1.25rem",
+          mt: 1.5,
           display: "flex",
           flexDirection: "column",
-          gap: "0.75rem",
+          gap: 1,
           borderTopStyle: "solid",
           borderTopWidth: "1px",
           borderColor: "var(--mui-palette-divider)",
@@ -842,7 +830,8 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
             borderWidth: "1px",
             borderColor: "var(--mui-palette-divider)",
             backgroundColor: "var(--mui-palette-background-default)",
-            padding: "0.75rem",
+            py: 1,
+            px: 1.25,
           }}
         >
           <Box
@@ -883,20 +872,11 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
           >
             {props.data.settings.apiBase}
           </Box>
-          <Box
-            sx={{
-              marginTop: "0.25rem",
-              maxHeight: "5rem",
-              overflowY: "auto",
-              overflowWrap: "break-word",
-              fontSize: "0.75rem",
-              lineHeight: "1.25rem",
-              color: "var(--mui-palette-text-secondary)",
-            }}
-            component="p"
-          >
-            {props.data.message}
-          </Box>
+          {!props.data.linkOk ? (
+            <Typography role="status" variant="caption" color="error" sx={{ mt: 0.5, overflowWrap: "anywhere" }}>
+              {props.data.message}
+            </Typography>
+          ) : null}
         </Box>
         <Box
           sx={{
@@ -1054,7 +1034,7 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
             minWidth: 0,
             flex: 1,
             width: "100%",
-            padding: { xs: "16px", md: "24px" },
+            p: { xs: 2, md: 2.5 },
           }}
           component="main"
           id="main-content"
@@ -1067,14 +1047,14 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
               width: "100%",
               maxWidth: "1600px",
               flexDirection: "column",
-              gap: "1.5rem",
+              gap: 2,
             }}
           >
             <Box
               sx={{
                 display: "flex",
                 flexDirection: "column",
-                gap: "1rem",
+                gap: 1.5,
                 "@media (width >= 48rem)": {
                   flexDirection: "row",
                   alignItems: "center",
@@ -1084,30 +1064,9 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
               component="header"
             >
               <Box sx={{ minWidth: "0" }}>
-                <Box
-                  sx={{
-                    fontSize: "1.5rem",
-                    lineHeight: "calc(2 / 1.5)",
-                    fontWeight: "600",
-                    letterSpacing: "-0.025em",
-                    color: "var(--mui-palette-text-primary)",
-                  }}
-                  component="h1"
-                >
+                <Typography component="h1" variant="h1" sx={{ lineHeight: 1.3 }}>
                   {t(currentItem.label)}
-                </Box>
-                <Box
-                  sx={{
-                    marginTop: "0.375rem",
-                    maxWidth: "48rem",
-                    fontSize: "0.875rem",
-                    lineHeight: "1.5rem",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                  component="p"
-                >
-                  {t(pageDescription(location.pathname))}
-                </Box>
+                </Typography>
               </Box>
               <Box
                 sx={{
@@ -1124,7 +1083,7 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
                   onChange={(event) =>
                     setMode(event.target.value as "system" | "light" | "dark")
                   }
-                  sx={{ width: 130 }}
+                  sx={{ width: 112, "& .MuiInputBase-root": { height: 30 } }}
                 >
                   <MenuItem value="system">{t("跟随系统")}</MenuItem>
                   <MenuItem value="light">{t("浅色")}</MenuItem>
@@ -1453,10 +1412,7 @@ function ConnectionGate(props: {
                     props.onAdminTokenChange(event.target.value)
                   }
                   placeholder={t("输入管理员口令")}
-                  sx={{
-                    height: "2.75rem",
-                    fontSize: "0.875rem",
-                  }}
+                  sx={{ fontSize: "0.8125rem" }}
                   label={t("管理员口令")}
                   slotProps={{
                     input: {
@@ -1489,7 +1445,7 @@ function ConnectionGate(props: {
                     htmlInput: {
                       ...{
                         "aria-describedby":
-                          "connection-status-message token-storage-hint",
+                          "connection-status-message",
                         "aria-invalid": props.issue === "adminToken",
                       },
                       autoCapitalize: "none",
@@ -1497,16 +1453,6 @@ function ConnectionGate(props: {
                     },
                   }}
                 />
-                <Typography
-                  id="token-storage-hint"
-                  sx={{
-                    fontSize: "0.75rem",
-                    lineHeight: "calc(1 / 0.75)",
-                    color: "var(--mui-palette-text-secondary)",
-                  }}
-                >
-                  {t("只保存在当前标签页。")}
-                </Typography>
               </Box>
               {props.issue ? (
                 <Alert severity="error" role="alert">

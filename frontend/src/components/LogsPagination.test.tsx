@@ -10,6 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { LogsPage } from "./LogsPage";
+import { MemoryRouter } from "react-router";
 import { initializeI18n } from "@/lib/i18n";
 import { theme } from "@/theme";
 
@@ -43,6 +44,7 @@ function row(id: string, status = 200, observed = true) {
 function mount() {
   return render(
     <ThemeProvider theme={theme}>
+      <MemoryRouter>
       <LogsPage
         settings={settings}
         providers={[]}
@@ -50,6 +52,7 @@ function mount() {
         refreshKey={0}
         onMessage={() => undefined}
       />
+      </MemoryRouter>
     </ThemeProvider>,
   );
 }

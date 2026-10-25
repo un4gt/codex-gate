@@ -254,6 +254,10 @@ fn read_cgroup_v1_memory(host_total: Option<u64>, containerized: bool) -> Option
 }
 
 fn read_host_memory(host_total: Option<u64>) -> MemoryReading {
+    #[cfg(windows)]
+    if let Some(reading) = read_windows_memory() {
+        return reading;
+    }
     let meminfo = read_trimmed("/proc/meminfo");
     let parsed = meminfo.as_deref().and_then(parse_meminfo_bytes);
     let total = parsed.and_then(|info| info.total_bytes).or(host_total);
@@ -338,11 +342,57 @@ fn read_cgroup_v1_cpu(containerized: bool) -> Option<CpuReading> {
 }
 
 fn read_host_cpu() -> Option<CpuReading> {
+    #[cfg(windows)]
+    if let Some(reading) = read_windows_cpu() {
+        return Some(reading);
+    }
     let stat = read_trimmed("/proc/stat")?;
     let (total_ticks, idle_ticks) = parse_proc_stat_cpu(&stat)?;
     Some(CpuReading::Host {
         total_ticks,
         idle_ticks,
+        capacity_cores: default_cpu_capacity(),
+    })
+}
+
+#[cfg(windows)]
+fn read_windows_memory() -> Option<MemoryReading> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: status points to a writable, correctly sized MEMORYSTATUSEX.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return None;
+    }
+    Some(MemoryReading {
+        scope: "host",
+        used_bytes: Some(status.ullTotalPhys.saturating_sub(status.ullAvailPhys)),
+        current_bytes: None,
+        reclaimable_bytes: None,
+        total_bytes: Some(status.ullTotalPhys),
+        limited: false,
+    })
+}
+
+#[cfg(windows)]
+fn read_windows_cpu() -> Option<CpuReading> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let mut idle = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: all three pointers refer to distinct, writable FILETIME values.
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    let ticks =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    Some(CpuReading::Host {
+        // Windows kernel time includes idle time; do not add idle a second time.
+        total_ticks: ticks(kernel).saturating_add(ticks(user)),
+        idle_ticks: ticks(idle),
         capacity_cores: default_cpu_capacity(),
     })
 }
@@ -597,6 +647,22 @@ fn default_cpu_capacity() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_host_metrics_are_available() {
+        let memory = read_host_memory(None);
+        assert!(memory.total_bytes.is_some_and(|total| total > 0));
+        assert!(
+            memory
+                .used_bytes
+                .zip(memory.total_bytes)
+                .is_some_and(|(used, total)| used <= total)
+        );
+        assert!(
+            matches!(read_host_cpu(), Some(CpuReading::Host { total_ticks, idle_ticks, .. }) if total_ticks >= idle_ticks)
+        );
+    }
 
     #[test]
     fn parse_cpu_max_returns_quota_cores() {

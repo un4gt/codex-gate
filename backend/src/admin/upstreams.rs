@@ -1,6 +1,35 @@
 use super::*;
 use crate::db::upstream_config::RoutePolicy;
 
+pub(super) async fn log_endpoints(state: SharedState) -> HttpResponse {
+    let snapshot = match state
+        .caches
+        .upstream
+        .get(&state.db, &state.config.master_key)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    };
+    // Log filters need identities, not connection secrets or one detail request per upstream.
+    // Include disabled endpoints so historical requests remain searchable.
+    let mut endpoints = Vec::new();
+    for provider in &snapshot.providers {
+        if let Some(items) = snapshot.endpoints_by_provider.get(&provider.id) {
+            for endpoint in items {
+                endpoints.push(serde_json::json!({
+                    "id": endpoint.id,
+                    "provider_id": provider.id,
+                    "name": endpoint.name,
+                    "provider_name": provider.name,
+                }));
+            }
+        }
+    }
+    endpoints.sort_by_key(|endpoint| endpoint["id"].as_i64());
+    http::json(StatusCode::OK, &endpoints)
+}
+
 pub(super) async fn read(state: SharedState, id: Option<i64>, runtime_only: bool) -> HttpResponse {
     let snap = match state
         .caches

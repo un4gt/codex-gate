@@ -367,7 +367,7 @@ pub async fn build_payload(
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
             version: option_env!("LITTLE_GATE_VERSION")
-                .unwrap_or("dev")
+                .unwrap_or(concat!("v", env!("CARGO_PKG_VERSION")))
                 .to_string(),
             commit: option_env!("LITTLE_GATE_COMMIT")
                 .unwrap_or("unknown")
