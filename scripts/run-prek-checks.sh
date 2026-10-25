@@ -36,7 +36,7 @@ else
 fi
 
 ACTUAL_PREK_VERSION="$("${PREK_COMMAND[@]}" --version)"
-if [[ "$ACTUAL_PREK_VERSION" != "prek ${PREK_VERSION}" ]]; then
+if [[ "$ACTUAL_PREK_VERSION" != "prek ${PREK_VERSION}" && "$ACTUAL_PREK_VERSION" != "prek ${PREK_VERSION} ("*")" ]]; then
   echo "unsupported prek version: ${ACTUAL_PREK_VERSION}; expected prek ${PREK_VERSION}" >&2
   exit 1
 fi
