@@ -45,6 +45,8 @@ Thumbs.db
 # Local agent/reference files
 .claude/
 .codex/
+/.agents/
+/skills-lock.json
 refrence/
 
 # RustRover
@@ -59,6 +61,7 @@ refrence/
 /docs/
 
 # Local screenshots and browser verification artifacts
+/.playwright-cli/
 **/screenshots/
 **/playwright-report/
 **/test-results/
