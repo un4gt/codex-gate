@@ -35,6 +35,9 @@ const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+// Match the browser authorization contract in openai/codex rust-v0.163.0.
+const CODEX_OAUTH_SCOPE: &str =
+    "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CODEX_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1";
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -2425,11 +2428,11 @@ fn build_authorization_url(state: &str, code_challenge: &str) -> Result<String, 
         .append_pair("client_id", CODEX_CLIENT_ID)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", BROWSER_REDIRECT_URI)
-        .append_pair("scope", "openid email profile offline_access")
+        .append_pair("scope", CODEX_OAUTH_SCOPE)
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", state)
-        .append_pair("prompt", "login")
+        .append_pair("originator", CODEX_ORIGINATOR)
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true");
     Ok(url.into())
@@ -2664,13 +2667,24 @@ async fn refresh_tokens(
     state: &SharedState,
     refresh_token: &str,
 ) -> Result<RefreshTokenBundle, CodexOAuthError> {
-    let form = form_urlencode(&[
-        ("client_id", CODEX_CLIENT_ID),
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("scope", "openid profile email"),
+    let body = refresh_token_payload(refresh_token);
+    let headers = HeaderMap::from_iter([
+        (USER_AGENT, HeaderValue::from_static(CODEX_USER_AGENT)),
+        (
+            HeaderName::from_static("originator"),
+            HeaderValue::from_static(CODEX_ORIGINATOR),
+        ),
     ]);
-    let (status, bytes) = request_form(state, TOKEN_URL, form).await?;
+    let (status, bytes) = request_json(
+        state,
+        Method::POST,
+        TOKEN_URL,
+        Some(&body),
+        &headers,
+        REQUEST_TIMEOUT,
+        OAUTH_BODY_MAX_BYTES,
+    )
+    .await?;
     if status != StatusCode::OK {
         let classification = classify_refresh_failure(status, &bytes);
         return Err(classification);
@@ -2692,6 +2706,15 @@ async fn refresh_tokens(
         refresh_token: token.refresh_token,
         id_token: token.id_token,
         expires_in_seconds: token.expires_in.unwrap_or(3_600).max(1),
+    })
+}
+
+fn refresh_token_payload(refresh_token: &str) -> Value {
+    // Omitting scope retains the original grant, including connector permissions.
+    serde_json::json!({
+        "client_id": CODEX_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
     })
 }
 
@@ -2780,6 +2803,8 @@ async fn request_form(
         .uri(uri)
         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
         .header(ACCEPT, "application/json")
+        .header(USER_AGENT, CODEX_USER_AGENT)
+        .header("originator", CODEX_ORIGINATOR)
         .body(Full::new(Bytes::from(form)))
         .map_err(|_| {
             CodexOAuthError::bad_request("oauth_request_invalid", "OAuth request is invalid")
@@ -2908,6 +2933,23 @@ pub fn apply_codex_headers(headers: &mut HeaderMap, auth: &PreparedCodexAuth) {
             HeaderName::from_static("originator"),
             HeaderValue::from_static(CODEX_ORIGINATOR),
         );
+    }
+    // The built-in OpenAI provider sends version explicitly. Custom providers
+    // often omit it while retaining the real Codex user agent; use that version
+    // instead of advertising the gateway's fallback client version.
+    if !headers.contains_key("version")
+        && let Some(version) = headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_ascii_whitespace().next())
+            .and_then(|value| value.split_once('/'))
+            .filter(|(client, version)| {
+                matches!(*client, "codex-tui" | "codex_cli_rs" | "codex_vscode")
+                    && !version.is_empty()
+            })
+            .and_then(|(_, version)| HeaderValue::from_str(version).ok())
+    {
+        headers.insert(HeaderName::from_static("version"), version);
     }
 }
 
@@ -3508,7 +3550,7 @@ mod tests {
         );
         assert_eq!(
             params.get("scope").map(String::as_str),
-            Some("openid email profile offline_access")
+            Some("openid profile email offline_access api.connectors.read api.connectors.invoke")
         );
         assert_eq!(
             params.get("code_challenge").map(String::as_str),
@@ -3519,7 +3561,11 @@ mod tests {
             Some("S256")
         );
         assert_eq!(params.get("state").map(String::as_str), Some("state-value"));
-        assert_eq!(params.get("prompt").map(String::as_str), Some("login"));
+        assert!(!params.contains_key("prompt"));
+        assert_eq!(
+            params.get("originator").map(String::as_str),
+            Some("codex_cli_rs")
+        );
         assert_eq!(
             params.get("id_token_add_organizations").map(String::as_str),
             Some("true")
@@ -3527,6 +3573,18 @@ mod tests {
         assert_eq!(
             params.get("codex_cli_simplified_flow").map(String::as_str),
             Some("true")
+        );
+    }
+
+    #[test]
+    fn refresh_grant_preserves_original_scopes() {
+        assert_eq!(
+            refresh_token_payload("synthetic-refresh-token"),
+            serde_json::json!({
+                "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+                "grant_type": "refresh_token",
+                "refresh_token": "synthetic-refresh-token",
+            })
         );
     }
 
@@ -4081,6 +4139,14 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("client-agent"));
         headers.insert("originator", HeaderValue::from_static("client-origin"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer gateway-key"),
+        );
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("wrong-account"),
+        );
         apply_codex_headers(
             &mut headers,
             &PreparedCodexAuth {
@@ -4113,6 +4179,35 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer access-token")
         );
+        assert!(!headers.contains_key("version"));
+    }
+
+    #[test]
+    fn codex_headers_recover_custom_provider_version_without_overwriting_it() {
+        let auth = PreparedCodexAuth {
+            access_token: "synthetic-access".into(),
+            account_id: "synthetic-account".into(),
+        };
+        for agent in [
+            "codex-tui/0.163.0 (Windows 10.0; x86_64)",
+            "codex_cli_rs/0.163.0 (Linux; x86_64)",
+            "codex_vscode/0.163.0",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(USER_AGENT, HeaderValue::from_static(agent));
+            apply_codex_headers(&mut headers, &auth);
+            assert_eq!(headers["version"], "0.163.0");
+            assert_eq!(headers[USER_AGENT], agent);
+            headers.insert("version", HeaderValue::from_static("explicit-version"));
+            apply_codex_headers(&mut headers, &auth);
+            assert_eq!(headers["version"], "explicit-version");
+        }
+        for agent in ["other-client/1.0", "codex-tui/", ""] {
+            let mut headers = HeaderMap::new();
+            headers.insert(USER_AGENT, HeaderValue::from_static(agent));
+            apply_codex_headers(&mut headers, &auth);
+            assert!(!headers.contains_key("version"));
+        }
     }
 
     #[test]

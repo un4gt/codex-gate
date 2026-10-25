@@ -6,7 +6,7 @@ use futures_util::{Sink, SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::header::{
-    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
+    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
 };
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use serde_json::{Value, json};
@@ -2996,12 +2996,7 @@ fn build_upstream_ws_headers(request_headers: &HeaderMap, upstream_secret: &str)
     let mut headers = HeaderMap::new();
     copy_header_by_name(request_headers, &mut headers, "openai-organization");
     copy_header_by_name(request_headers, &mut headers, "openai-project");
-    copy_header_by_name(request_headers, &mut headers, "x-client-request-id");
-    copy_header_by_name(request_headers, &mut headers, "session-id");
-    copy_header_by_name(request_headers, &mut headers, "thread-id");
-    copy_header_by_name(request_headers, &mut headers, "originator");
-    copy_headers_by_prefix(request_headers, &mut headers, "x-codex-");
-    copy_header(request_headers, &mut headers, USER_AGENT);
+    proxy::copy_codex_client_headers(request_headers, &mut headers);
     insert_beta_header(request_headers, &mut headers);
 
     if let Ok(value) = HeaderValue::from_str(&format!("Bearer {upstream_secret}")) {
@@ -3038,23 +3033,9 @@ fn insert_beta_header(from: &HeaderMap, to: &mut HeaderMap) {
     }
 }
 
-fn copy_header(from: &HeaderMap, to: &mut HeaderMap, name: HeaderName) {
-    if let Some(value) = from.get(&name) {
-        to.insert(name, value.clone());
-    }
-}
-
 fn copy_header_by_name(from: &HeaderMap, to: &mut HeaderMap, name: &'static str) {
     if let Some(value) = from.get(name) {
         to.insert(HeaderName::from_static(name), value.clone());
-    }
-}
-
-fn copy_headers_by_prefix(from: &HeaderMap, to: &mut HeaderMap, prefix: &str) {
-    for (name, value) in from {
-        if name.as_str().starts_with(prefix) {
-            to.append(name.clone(), value.clone());
-        }
     }
 }
 
@@ -3084,7 +3065,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::{ACCEPT, CONTENT_LENGTH};
+    use hyper::header::{ACCEPT, CONTENT_LENGTH, USER_AGENT};
 
     #[test]
     fn build_upstream_ws_url_should_preserve_v1_base_path() {
@@ -3147,6 +3128,61 @@ mod tests {
             headers.get(ACCEPT),
             Some(&HeaderValue::from_static("text/event-stream"))
         );
+    }
+
+    #[test]
+    fn websocket_and_http_bridge_preserve_codex_protocol_headers_with_oauth_auth() {
+        let expected = [
+            ("x-openai-internal-codex-responses-lite", "true"),
+            ("x-openai-subagent", "review"),
+            ("x-openai-memgen-request", "true"),
+            ("x-openai-internal-codex-residency", "us"),
+            ("x-oai-attestation", "synthetic-attestation"),
+            ("x-responsesapi-include-timing-metrics", "true"),
+            ("x-codex-turn-state", "opaque-routing-token"),
+            ("x-codex-window-id", "synthetic-thread:0"),
+            ("x-codex-turn-metadata", "{\"request_kind\":\"turn\"}"),
+            ("x-codex-parent-thread-id", "synthetic-parent"),
+            ("session-id", "synthetic-session"),
+            ("thread-id", "synthetic-thread"),
+            ("x-client-request-id", "synthetic-request"),
+            ("originator", "codex-tui"),
+            ("version", "0.163.0"),
+            ("user-agent", "codex-tui/0.163.0 (Windows 10.0; x86_64)"),
+        ];
+        let mut input = HeaderMap::new();
+        for (name, value) in expected {
+            input.insert(name, HeaderValue::from_static(value));
+        }
+        input.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer gateway-key"),
+        );
+        input.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("wrong-account"),
+        );
+        input.insert("cookie", HeaderValue::from_static("private-cookie"));
+        input.insert("x-forwarded-for", HeaderValue::from_static("192.0.2.1"));
+        for mut headers in [
+            build_upstream_ws_headers(&input, "synthetic-access"),
+            build_upstream_http_bridge_headers(&input, "synthetic-access", 2),
+        ] {
+            crate::codex_oauth::apply_codex_headers(
+                &mut headers,
+                &crate::codex_oauth::PreparedCodexAuth {
+                    access_token: "synthetic-access".into(),
+                    account_id: "selected-account".into(),
+                },
+            );
+            for (name, value) in expected {
+                assert_eq!(headers[name], value, "{name}");
+            }
+            assert_eq!(headers[AUTHORIZATION], "Bearer synthetic-access");
+            assert_eq!(headers["chatgpt-account-id"], "selected-account");
+            assert!(!headers.contains_key("cookie"));
+            assert!(!headers.contains_key("x-forwarded-for"));
+        }
     }
 
     #[test]

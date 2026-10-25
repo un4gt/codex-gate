@@ -5,6 +5,7 @@ Uses only the Python standard library and a temporary database. All credentials
 and upstream responses are synthetic; no OpenAI service is contacted.
 """
 import base64
+from contextlib import closing
 import hashlib
 import http.client
 import json
@@ -65,13 +66,14 @@ def frame_bytes(payload, masked=False, opcode=1):
 
 
 class WsClient:
-    def __init__(self, port, token):
+    def __init__(self, port, token, headers=None):
         self.socket = socket.create_connection(('127.0.0.1', port), timeout=40)
         self.stream = self.socket.makefile('rb')
         key = base64.b64encode(os.urandom(16)).decode()
+        extra_headers = ''.join(f'{name}: {value}\r\n' for name, value in (headers or {}).items())
         self.socket.sendall((f'GET /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n'
                              f'Authorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
-                             f'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n').encode())
+                             f'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n{extra_headers}\r\n').encode())
         status = self.stream.readline()
         assert b'101' in status, status
         while self.stream.readline() != b'\r\n':
@@ -109,6 +111,13 @@ class Mock(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def handle(self):
+        try:
+            super().handle()
+        except ConnectionError:
+            # Disconnect cases intentionally close keep-alive connections.
+            pass
+
     def json(self, value, status=200):
         body = json.dumps(value).encode()
         self.send_response(status)
@@ -118,7 +127,7 @@ class Mock(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def events(self, payload):
-        Mock.seen.append(payload)
+        Mock.seen.append({**payload, '_request_headers': {name.lower(): value for name, value in self.headers.items()}})
         case = payload.get('test_case', '')
         if case == 'preflight_error':
             yield {'type': 'response.failed', 'response': {'status': 'failed', 'service_tier': 'default', 'error': {'code': 'server_error'}}}
@@ -182,6 +191,8 @@ class Mock(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
+        if payload.get('test_case') == 'codex_headers':
+            self.send_header('x-codex-turn-state', 'synthetic-upstream-turn-state')
         self.send_header('Transfer-Encoding', 'chunked')
         self.end_headers()
         try:
@@ -226,7 +237,7 @@ class Regression:
         return json.loads(raw) if raw else None
 
     def logs(self):
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute("SELECT * FROM request_logs WHERE span_kind IN ('request', 'ws_turn') ORDER BY rowid")]
 
@@ -309,6 +320,67 @@ class Regression:
         self.settled(before, 2)
         for model in restrictions:
             self.api('DELETE', f'/key-models/{model["id"]}')
+
+    def check_codex_headers(self, transport):
+        # Synthetic values with the same header names as Codex CLI 0.163.0.
+        expected = {
+            'x-codex-beta-features': 'remote_compaction_v2',
+            'x-codex-window-id': 'synthetic-thread:0',
+            'x-codex-turn-metadata': '{"request_kind":"turn"}',
+            'x-codex-parent-thread-id': 'synthetic-parent',
+            'x-openai-internal-codex-responses-lite': 'true',
+            'x-openai-subagent': 'review',
+            'x-openai-memgen-request': 'true',
+            'x-openai-internal-codex-residency': 'us',
+            'x-oai-attestation': 'synthetic-attestation',
+            'x-responsesapi-include-timing-metrics': 'true',
+            'x-client-request-id': 'synthetic-request',
+            'session-id': 'synthetic-session',
+            'thread-id': 'synthetic-thread',
+            'originator': 'codex-tui',
+            'user-agent': 'codex-tui/0.163.0 (Windows 10.0; x86_64)',
+        }
+        headers = {**expected, 'chatgpt-account-id': 'wrong-client-account',
+                   'cookie': 'private-cookie', 'x-forwarded-for': '192.0.2.1'}
+        before = len(self.logs())
+        start = len(Mock.seen)
+        if transport == 'http':
+            for turn in range(2):
+                conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=8)
+                conn.request('POST', '/v1/responses', json.dumps({'model': MODEL, 'input': 'test', 'stream': True, 'test_case': 'codex_headers'}),
+                             {**headers, 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'Authorization': f'Bearer {self.token}'})
+                response = conn.getresponse()
+                assert response.status == 200, response.status
+                assert response.getheader('x-codex-turn-state') == 'synthetic-upstream-turn-state'
+                assert b'response.done' in response.read()
+                conn.close()
+                self.settled(before, turn + 1)
+                headers['x-codex-turn-state'] = 'synthetic-upstream-turn-state'
+            hits = Mock.seen[start:]
+            assert len(hits) == 2, hits
+            assert 'x-codex-turn-state' not in hits[0]['_request_headers']
+            assert hits[1]['_request_headers']['x-codex-turn-state'] == 'synthetic-upstream-turn-state'
+        else:
+            headers['x-codex-turn-state'] = 'synthetic-upstream-turn-state'
+            ws = WsClient(self.port, self.token, headers)
+            try:
+                ws.send({'test_case': 'codex_headers'})
+                assert ws.complete()['type'] == 'response.done'
+                assert self.settled(before)[0]['transport'] == transport
+            finally:
+                ws.close()
+            hits = Mock.seen[start:]
+            assert len(hits) == 1, hits
+            assert hits[0]['_request_headers']['x-codex-turn-state'] == 'synthetic-upstream-turn-state'
+        for hit in hits:
+            received = hit['_request_headers']
+            for name, value in expected.items():
+                assert received.get(name) == value, (transport, name, received.get(name))
+            assert received['version'] == '0.163.0', received
+            assert received['authorization'] == 'Bearer synthetic-access', received
+            assert received['chatgpt-account-id'] == 'offline-account', received
+            assert 'cookie' not in received and 'x-forwarded-for' not in received, received
+        print(f'OAuth Codex request headers ({transport}): PASS', flush=True)
 
     def check_disconnect_after_terminal(self):
         before = len(self.logs())
@@ -432,7 +504,7 @@ class Regression:
         # this disposable DB to avoid contacting the real OAuth login service.
         credential = json.dumps({'refresh_token': 'offline-refresh', 'id_token': '', 'account_id': 'offline-account', 'email': 'test@example.invalid'})
         carrier = self.api('POST', f'/providers/{self.provider}/keys', {'name': 'credential-envelope', 'secret': credential})['id']
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn, conn:
             encrypted = conn.execute('SELECT secret_enc FROM upstream_keys WHERE id=?', (carrier,)).fetchone()[0]
             now = int(time.time() * 1000)
             conn.execute('INSERT INTO codex_oauth_accounts (upstream_key_id,provider_id,account_hash,credentials_enc,token_expires_at_ms,auth_status,quota_checked_at_ms,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,?,?,?)',
@@ -444,6 +516,10 @@ class Regression:
 
 def main():
     subprocess.run(['cargo', 'build', '--manifest-path', 'backend/Cargo.toml', '--locked'], cwd=ROOT, check=True)
+    target_dir = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'backend/target'))
+    if not target_dir.is_absolute():
+        target_dir = ROOT / target_dir
+    binary = target_dir / 'debug' / ('backend.exe' if os.name == 'nt' else 'backend')
     mock = ThreadingHTTPServer(('127.0.0.1', 0), Mock)
     threading.Thread(target=mock.serve_forever, daemon=True).start()
     with tempfile.TemporaryDirectory(prefix='little-gate-metering-') as tmp:
@@ -451,9 +527,10 @@ def main():
         db = Path(tmp) / 'gateway.sqlite'
         env = {**os.environ, 'LISTEN_ADDR': f'127.0.0.1:{port}', 'PRICE_SYNC_ENABLED': 'false', 'DB_DSN': f'sqlite://{db}', 'ADMIN_TOKEN': ADMIN,
                'MASTER_KEY': 'offline-regression-master', 'STATS_FLUSH_INTERVAL_MS': '100', 'UPSTREAM_REQUEST_TIMEOUT_MS': '45000',
+               'REQUEST_LOG_ARCHIVE_DIR': str(Path(tmp) / 'archive'), 'CODEX_OAUTH_CALLBACK_LISTEN_ADDR': '127.0.0.1:1455',
                'UPSTREAM_CACHE_TTL_MS': '1', 'UPSTREAM_CACHE_STALE_GRACE_MS': '0', 'STATIC_DIR': str(ROOT / 'frontend/dist')}
         with open(Path(tmp) / 'gateway.log', 'w+') as log:
-            process = subprocess.Popen([str(ROOT / 'backend/target/debug/backend')], env=env, stdout=log, stderr=log)
+            process = subprocess.Popen([str(binary)], cwd=ROOT, env=env, stdout=log, stderr=log)
             try:
                 test = Regression(port, db, mock.server_port)
                 until = time.monotonic() + 15
@@ -496,9 +573,12 @@ def main():
                 test.check_availability()
                 test.check_ws('ws_http_bridge')
                 assert any(item.get('service_tier') == 'priority' for item in Mock.seen)
+                test.check_codex_headers('http')
+                test.check_codex_headers('ws_http_bridge')
                 test.api('DELETE', f'/endpoints/{test.endpoint}')
                 test.endpoint = test.api('POST', f'/providers/{test.provider}/endpoints', {'name': 'oauth-native', 'baseUrl': f'http://127.0.0.1:{mock.server_port}/native/v1'})['id']
                 test.check_ws()
+                test.check_codex_headers('ws_native')
                 print('OAuth HTTP, SSE-to-JSON, native WS, HTTP bridge and account availability: PASS', flush=True)
             except Exception:
                 log.flush()
@@ -506,7 +586,10 @@ def main():
                 print(log.read()[-6000:])
                 raise
             finally:
-                process.send_signal(signal.SIGINT)
+                if os.name == 'nt':
+                    process.terminate()
+                else:
+                    process.send_signal(signal.SIGINT)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:

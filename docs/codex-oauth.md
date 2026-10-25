@@ -81,6 +81,45 @@ http://localhost:1455/auth/callback?code=...&state=...
 ssh -L 1455:127.0.0.1:1455 user@example-server
 ```
 
+## Codex CLI 请求头兼容性
+
+对照版本为 [Codex CLI `rust-v0.163.0`](https://github.com/openai/codex/tree/83086188ae0614bd882818ff1aa23f3194962012)，与此次 Reqable 请求头中客户端声明的版本一致。核对只使用 `/v1/responses` 的请求头，测试使用合成令牌和会话标识，不保存真实抓包内容。
+
+HTTP Responses、原生 WebSocket 和 WebSocket 转 HTTP 桥接共用客户端请求头规则：
+
+| 请求头 | 处理方式 |
+| --- | --- |
+| `x-codex-*` | 原样转发，包括 beta、窗口、turn metadata、turn state、父线程和路由提示；保留重复值 |
+| `session-id`、`thread-id`、`x-client-request-id`、`originator`、`user-agent` | 保留客户端值 |
+| `version` | 优先保留显式值；OAuth 模式下缺失时，从 `codex-tui`、`codex_cli_rs` 或 `codex_vscode` 的 User-Agent 提取版本 |
+| `x-openai-internal-codex-responses-lite` | 保留客户端对 Responses Lite 的选择，未提供时不强制开启 |
+| `x-openai-subagent`、`x-openai-memgen-request` | 保留子代理和记忆请求标识 |
+| `x-openai-internal-codex-residency`、`x-oai-attestation`、`x-responsesapi-include-timing-metrics` | 客户端提供时转发，不代替客户端生成 |
+| `Authorization`、`ChatGPT-Account-ID` | 使用网关所选 OAuth 账号的 Access Token 和账号 ID；客户端提供的网关密钥或账号 ID 不作为上游凭据 |
+| `Host`、`Content-Length`、WebSocket 握手字段 | 按实际上游地址、请求体和连接重新生成 |
+
+普通 HTTP 的 `Content-Type`、`Accept` 和 OpenAI API 请求头继续按既有白名单处理。Cookie、代理/CDN 地址头和任意未知 `x-openai-*` 头不在新增白名单内。HTTP 上游返回的 `x-codex-turn-state` 保留给客户端，后续请求携带时继续透传。
+
+此前，抓包中的 `x-openai-internal-codex-responses-lite: true` 会被白名单丢弃；以上额外协议头也未完整覆盖。规则现在由 HTTP 和 WebSocket 共享，避免两条路径再次产生差异。来源见官方 [Responses 请求头构造](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/client.rs)、[线程元数据](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/responses_metadata.rs)及 [Provider 默认 version 头](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider-info/src/lib.rs)。
+
+浏览器授权使用与该版本相同的 `client_id`、PKCE、redirect URI、`id_token_add_organizations` 和 `codex_cli_simplified_flow`，并补齐 `originator=codex_cli_rs` 及完整 scope：
+
+```text
+openid profile email offline_access api.connectors.read api.connectors.invoke
+```
+
+与官方一致，不再强制 `prompt=login`；刷新令牌使用 JSON grant，省略 `scope`，避免把原始授权缩小到 `openid profile email`。来源见官方 [浏览器授权参数](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/login/src/server.rs#L586)和 [令牌刷新](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/login/src/auth/manager.rs#L1625)。**已有账号需要重新进行浏览器授权，才能取得新增 scope；单纯刷新旧令牌不会扩大权限。**
+
+### 与 CLI `/login` 的边界
+
+“在网关登录 OAuth，然后在 CLI 配置自定义 Provider + 网关 API Key”并不等于 CLI 自身已登录 ChatGPT。网关保存 OAuth 凭据，CLI 仍使用 API Key/自定义 Provider 的认证状态；请求头透传无法改变这个状态。官方也区分 [ChatGPT 登录与 API Key 登录](https://learn.chatgpt.com/docs/auth)。
+
+因此，此次核对与回归覆盖上述请求头规则与 OAuth 授权参数。不能据此声称账号展示、额度查询、模型目录、连接器、云端功能或全部传输行为与 `/login` 完全相同。官方客户端还依据认证模式及 Provider 决定压缩、内部元数据等行为；网关自身的账号调度、参数覆盖、请求体兼容化和 WebSocket 握手也独立存在。新增连接器 scope 不会自动启用 CLI 的 ChatGPT 连接器功能。
+
+若必须保留 CLI 的原生 ChatGPT 登录功能，应让 CLI 本身完成 ChatGPT 认证，并另行设计保留该认证的网关接入；当前网关 API Key 接入不能提供这一等价性。不要将网关保存的 Refresh Token 直接复制给 CLI 并发刷新。
+
+离线验证命令为 `cargo test --manifest-path backend/Cargo.toml --locked` 和 `python scripts/run_oauth_metering_regression.py`。后者用临时数据库和本地模拟上游检查三条转发路径的实际请求头、账号凭据替换及 HTTP turn state 的往返，不访问真实 OpenAI 服务。离线通过不代表已经完成真实账号登录或生产流量验收。
+
 ## 管理 API
 
 所有接口都需要现有的管理端 Bearer Token。

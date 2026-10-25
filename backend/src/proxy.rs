@@ -3507,12 +3507,7 @@ pub(crate) fn build_upstream_headers(
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-organization");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-project");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "idempotency-key");
-    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "x-client-request-id");
-    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "session-id");
-    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "thread-id");
-    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "originator");
-    copy_allowed_upstream_headers_by_prefix(request_headers, &mut headers, "x-codex-");
-    copy_allowed_upstream_header(request_headers, &mut headers, USER_AGENT);
+    copy_codex_client_headers(request_headers, &mut headers);
 
     if let Ok(value) = hyper::header::HeaderValue::from_str(&body_len.to_string()) {
         headers.insert(CONTENT_LENGTH, value);
@@ -3521,6 +3516,28 @@ pub(crate) fn build_upstream_headers(
         headers.insert(AUTHORIZATION, value);
     }
     headers
+}
+
+// Shared by HTTP, native WebSocket, and the WebSocket-to-HTTP bridge. Keep
+// protocol metadata separate from credentials, which belong to the selected account.
+pub(crate) fn copy_codex_client_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    for name in [
+        "x-client-request-id",
+        "session-id",
+        "thread-id",
+        "originator",
+        "version",
+        "x-openai-internal-codex-responses-lite",
+        "x-openai-subagent",
+        "x-openai-memgen-request",
+        "x-openai-internal-codex-residency",
+        "x-oai-attestation",
+        "x-responsesapi-include-timing-metrics",
+    ] {
+        copy_allowed_upstream_header_by_name(from, to, name);
+    }
+    copy_allowed_upstream_headers_by_prefix(from, to, "x-codex-");
+    copy_allowed_upstream_header(from, to, USER_AGENT);
 }
 
 fn copy_allowed_upstream_header(
@@ -3542,7 +3559,7 @@ fn copy_allowed_upstream_header_by_name(from: &HeaderMap, to: &mut HeaderMap, na
 fn copy_allowed_upstream_headers_by_prefix(from: &HeaderMap, to: &mut HeaderMap, prefix: &str) {
     for (name, value) in from {
         if name.as_str().starts_with(prefix) {
-            to.insert(name.clone(), value.clone());
+            to.append(name.clone(), value.clone());
         }
     }
 }
@@ -4928,9 +4945,40 @@ mod tests {
             HeaderValue::from_static("019f1a41-81de-7591-8fff-a83093fb98b7"),
         );
         input.insert("originator", HeaderValue::from_static("codex-tui"));
+        let extra_headers = [
+            ("x-codex-turn-state", "opaque-routing-token"),
+            ("x-codex-parent-thread-id", "synthetic-parent"),
+            ("version", "0.163.0"),
+            ("x-openai-internal-codex-responses-lite", "true"),
+            ("x-openai-subagent", "review"),
+            ("x-openai-memgen-request", "true"),
+            ("x-openai-internal-codex-residency", "us"),
+            ("x-oai-attestation", "synthetic-attestation"),
+            ("x-responsesapi-include-timing-metrics", "true"),
+        ];
+        for (name, value) in extra_headers {
+            input.insert(name, HeaderValue::from_static(value));
+        }
+        input.append(
+            "x-codex-beta-features",
+            HeaderValue::from_static("another-feature"),
+        );
 
         let headers = build_upstream_headers(&input, 37, "sk-upstream");
 
+        for (name, value) in extra_headers {
+            assert_eq!(headers[name], value, "{name}");
+        }
+        assert_eq!(
+            headers
+                .get_all("x-codex-beta-features")
+                .iter()
+                .collect::<Vec<_>>(),
+            input
+                .get_all("x-codex-beta-features")
+                .iter()
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             headers.get("x-codex-beta-features"),
             input.get("x-codex-beta-features")
@@ -4997,6 +5045,8 @@ mod tests {
             "cf-connecting-ip",
             "cdn-loop",
             "true-client-ip",
+            "chatgpt-account-id",
+            "x-openai-unrecognized-private-header",
         ] {
             input.insert(
                 HeaderName::from_static(name),
@@ -5020,6 +5070,8 @@ mod tests {
             "true-client-ip",
             "cookie",
             "accept-encoding",
+            "chatgpt-account-id",
+            "x-openai-unrecognized-private-header",
         ] {
             assert!(
                 !headers.contains_key(name),
