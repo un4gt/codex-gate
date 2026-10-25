@@ -9,7 +9,7 @@ RUN npm run build
 
 FROM rust:1.93-bookworm AS backend-builder
 WORKDIR /work
-ARG APP_VERSION=v0.0.48
+ARG APP_VERSION=v0.0.50
 ARG APP_COMMIT=unknown
 ENV LITTLE_GATE_VERSION=${APP_VERSION} \
     LITTLE_GATE_COMMIT=${APP_COMMIT}
