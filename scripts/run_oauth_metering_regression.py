@@ -128,6 +128,9 @@ class Mock(BaseHTTPRequestHandler):
 
     def events(self, payload):
         Mock.seen.append({**payload, '_request_headers': {name.lower(): value for name, value in self.headers.items()}})
+        if error := self.responses_lite_error(payload):
+            yield {'type': 'error', 'error': error}
+            return
         case = payload.get('test_case', '')
         if case == 'preflight_error':
             yield {'type': 'response.failed', 'response': {'status': 'failed', 'service_tier': 'default', 'error': {'code': 'server_error'}}}
@@ -176,8 +179,18 @@ class Mock(BaseHTTPRequestHandler):
                 return
         self.json({'object': 'list', 'data': [{'id': MODEL}, {'id': 'gpt-4.1'}]})
 
+    def responses_lite_error(self, payload):
+        if (self.headers.get('x-openai-internal-codex-responses-lite', '').strip().lower() == 'true'
+                and payload.get('parallel_tool_calls') is not False):
+            return {'message': 'X-OpenAI-Internal-Codex-Responses-Lite requires `parallel_tool_calls` to be false.',
+                    'type': 'invalid_request_error', 'param': 'parallel_tool_calls', 'code': 'unsupported_value'}
+        return None
+
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if error := self.responses_lite_error(payload):
+            self.json({'error': error}, 400)
+            return
         if self.path.startswith('/retry/'):
             self.json({'error': {'code': 'server_error'}, 'service_tier': 'priority'}, 503)
             return

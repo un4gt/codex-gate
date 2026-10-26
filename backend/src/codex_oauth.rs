@@ -3011,7 +3011,10 @@ fn normalize_responses_object(root: &mut Map<String, Value>, upstream_model: &st
         .and_then(Value::as_array)
         .is_some_and(|tools| !tools.is_empty());
     if has_tools {
-        root.insert("parallel_tool_calls".to_string(), Value::Bool(true));
+        // Keep the client's explicit false; Lite enforcement happens at dispatch
+        // using the effective headers, after all provider overrides.
+        root.entry("parallel_tool_calls")
+            .or_insert(Value::Bool(true));
     } else {
         root.remove("parallel_tool_calls");
     }
@@ -4066,6 +4069,22 @@ mod tests {
         assert_eq!(value["tools"][0]["type"], "web_search");
         assert!(value.get("temperature").is_none());
         assert!(value.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn responses_request_preserves_explicit_parallel_tool_calls_false() {
+        let original = serde_json::json!({
+            "model": "m", "input": "hello", "parallel_tool_calls": false,
+            "tools": [{"type": "function", "name": "test", "parameters": {}}]
+        });
+        let (body, _) = normalize_responses_request(original.to_string().as_bytes(), "m").unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["parallel_tool_calls"],
+            false
+        );
+        let mut websocket = original;
+        normalize_response_create_value(&mut websocket, "m");
+        assert_eq!(websocket["parallel_tool_calls"], false);
     }
 
     #[test]

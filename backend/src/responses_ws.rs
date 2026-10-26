@@ -114,6 +114,8 @@ struct ActiveUpstream {
     requested_model: String,
     resolved: ResolvedUpstream,
     transport: ActiveTransport,
+    // Native WS mode is fixed by the successful handshake, not later config edits.
+    responses_lite: bool,
     _provider_capacity: Option<crate::provider_runtime::ProviderCapacityPermit>,
 }
 
@@ -164,6 +166,7 @@ enum NativeWsConnectOutcome {
     Connected(
         Box<UpstreamWs>,
         crate::provider_runtime::ProviderCapacityPermit,
+        bool,
     ),
     Unsupported(WsBridgeError),
     Unavailable(WsBridgeError),
@@ -673,6 +676,11 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     {
                         routed_value["service_tier"] = Value::String("priority".into());
                     }
+                    if selected.responses_lite
+                        && let Some(root) = routed_value.as_object_mut()
+                    {
+                        crate::responses_lite::normalize_object(root);
+                    }
                     let payload = match serde_json::to_string(&routed_value) {
                         Ok(payload) => payload,
                         Err(err) => {
@@ -989,7 +997,7 @@ async fn connect_selected_upstream(
             ctx.state.metrics.record_provider_selection(switched);
         }
         match connect_or_bridge_upstream(ctx, &resolved).await {
-            NativeWsConnectOutcome::Connected(ws, permit) => {
+            NativeWsConnectOutcome::Connected(ws, permit, responses_lite) => {
                 confirm_ws_affinity(
                     ctx,
                     affinity.as_ref(),
@@ -1005,6 +1013,7 @@ async fn connect_selected_upstream(
                     requested_model: requested_model.to_string(),
                     resolved,
                     transport: ActiveTransport::NativeWs(ws),
+                    responses_lite,
                     _provider_capacity: Some(permit),
                 });
             }
@@ -1021,6 +1030,7 @@ async fn connect_selected_upstream(
                     requested_model: requested_model.to_string(),
                     resolved,
                     transport: ActiveTransport::HttpBridge,
+                    responses_lite: false,
                     _provider_capacity: None,
                 });
             }
@@ -1268,6 +1278,7 @@ async fn connect_upstream_ws_once(
         return NativeWsConnectOutcome::Unavailable(target_unavailable_error());
     }
     note_ws_send(ctx, resolved).await;
+    let mut responses_lite = crate::responses_lite::enabled(&headers);
     let mut connected = connect_upstream_ws(ctx, resolved, &ws_url, &headers).await;
     let mut oauth_replayed = false;
     if connected
@@ -1311,6 +1322,7 @@ async fn connect_upstream_ws_once(
                 Some(401),
             );
             oauth_replayed = true;
+            responses_lite = crate::responses_lite::enabled(&retry_headers);
             connected = connect_upstream_ws(ctx, resolved, &ws_url, &retry_headers).await;
         }
     }
@@ -1347,7 +1359,7 @@ async fn connect_upstream_ws_once(
                     scope: proxy::FailureScope::Provider,
                 });
             };
-            NativeWsConnectOutcome::Connected(Box::new(ws), capacity)
+            NativeWsConnectOutcome::Connected(Box::new(ws), capacity, responses_lite)
         }
         Err(err) => {
             finish_ws_trace(ctx, err.status, Some(err.error_type));

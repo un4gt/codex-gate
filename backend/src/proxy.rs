@@ -1731,11 +1731,20 @@ pub(crate) async fn dispatch_upstream_request_with_timeout(
     uri: Uri,
     timeout: std::time::Duration,
 ) -> Result<Response<Incoming>, UpstreamDispatchError> {
+    let mut headers = request_headers.clone();
+    // This boundary covers HTTP, the WS-to-HTTP bridge, and auth/recovery retries.
+    // Use final headers so provider overrides cannot reintroduce the Lite conflict.
+    let body = if request_method == Method::POST && uri.path().ends_with("/responses") {
+        crate::responses_lite::normalize_http_body(&mut headers, body)
+            .map_err(UpstreamDispatchError::Request)?
+    } else {
+        body
+    };
     let mut upstream_req = Request::new(Full::new(body));
     *upstream_req.method_mut() = request_method.clone();
     *upstream_req.uri_mut() = uri;
     *upstream_req.version_mut() = request_version;
-    *upstream_req.headers_mut() = request_headers.clone();
+    *upstream_req.headers_mut() = headers;
 
     time::timeout(timeout, state.upstream.request(upstream_req))
         .await

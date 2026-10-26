@@ -100,6 +100,18 @@ HTTP Responses、原生 WebSocket 和 WebSocket 转 HTTP 桥接共用客户端�
 
 普通 HTTP 的 `Content-Type`、`Accept` 和 OpenAI API 请求头继续按既有白名单处理。Cookie、代理/CDN 地址头和任意未知 `x-openai-*` 头不在新增白名单内。HTTP 上游返回的 `x-codex-turn-state` 保留给客户端，后续请求携带时继续透传。
 
+### Responses Lite 与工具并行参数
+
+`v0.0.50` 新增 Lite 头透传后，暴露了原有请求体处理的冲突：OAuth 请求只要带有工具，就会被改为 `parallel_tool_calls: true`，覆盖客户端的 `false`；没有工具时又会移除此字段。开启 Lite 的上游要求该字段显式为 `false`，因此会报 `unsupported_value`。此前只检查请求头的回归没有模拟这一上游约束。
+
+修复后，普通 OAuth 请求保留客户端显式传入的 `false`；最终发往上游的 Responses 请求头启用 Lite 时，在参数覆盖之后强制设置 `parallel_tool_calls: false`，包括工具为空或字段缺省的情况。HTTP 同步更新 `Content-Length`，HTTP/SSE、原生 WebSocket、WebSocket 转 HTTP、认证刷新重试共用这一约束。原生 WebSocket 按成功握手时的 Lite 模式处理后续回合。该修复也覆盖显式透传 Lite 头的 API Key Responses 上游，不改变工具列表，不默认开启 Lite。
+
+参考 [cockpit-tools PR #2169](https://github.com/jlcodes99/cockpit-tools/pull/2169)；其第三方 API Key 上游删头策略不能直接应用于本项目的 OAuth 上游，本项目保留现有 Lite 头透传语义并修复请求体约束。
+
+仍在运行 `v0.0.50` 时，可临时在对应上游的请求体覆盖中**新增**一条规则：作用域 `responses`、操作 `set`、路径 `parallel_tool_calls`、值为布尔值 `false`，保留其他已有规则。这会让该上游所有 Responses 请求关闭工具并行；部署修复后可移除临时规则，恢复仅在 Lite 模式下强制关闭。
+
+离线专项回归：`python scripts/run_responses_lite_regression.py`。模拟上游会在 Lite 参数不合法时返回同样的错误，检查 OAuth/API Key、HTTP/SSE、原生 WebSocket、HTTP 桥接、缺省/真假参数、工具列表、参数覆盖和连续回合。使用 `--binary /path/to/backend` 可测试现有二进制；回归只启动临时实例，不访问真实账号。
+
 此前，抓包中的 `x-openai-internal-codex-responses-lite: true` 会被白名单丢弃；以上额外协议头也未完整覆盖。规则现在由 HTTP 和 WebSocket 共享，避免两条路径再次产生差异。来源见官方 [Responses 请求头构造](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/client.rs)、[线程元数据](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/responses_metadata.rs)及 [Provider 默认 version 头](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider-info/src/lib.rs)。
 
 浏览器授权使用与该版本相同的 `client_id`、PKCE、redirect URI、`id_token_add_organizations` 和 `codex_cli_simplified_flow`，并补齐 `originator=codex_cli_rs` 及完整 scope：

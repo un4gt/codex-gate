@@ -22,6 +22,7 @@ mod proxy;
 mod request_overrides;
 mod resilience;
 mod response_events;
+mod responses_lite;
 mod responses_via_chat;
 mod responses_ws;
 mod routing_availability;
