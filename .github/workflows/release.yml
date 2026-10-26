@@ -121,6 +121,8 @@ jobs:
           cp deploy/binary.env.example "${package}/.env.example"
           cp docs/binary-deployment.md "${package}/README.binary.md"
           cp LICENSE "${package}/LICENSE"
+          mkdir -p "${package}/licenses/openai-codex"
+          cp backend/assets/codex/{LICENSE,NOTICE,README.md} "${package}/licenses/openai-codex/"
 
           if [[ "${{ matrix.target }}" == linux-* ]]; then
             cp deploy/linux/run-little-gate.sh "${package}/run-little-gate.sh"

@@ -110,13 +110,75 @@ openid profile email offline_access api.connectors.read api.connectors.invoke
 
 与官方一致，不再强制 `prompt=login`；刷新令牌使用 JSON grant，省略 `scope`，避免把原始授权缩小到 `openid profile email`。来源见官方 [浏览器授权参数](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/login/src/server.rs#L586)和 [令牌刷新](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/login/src/auth/manager.rs#L1625)。**已有账号需要重新进行浏览器授权，才能取得新增 scope；单纯刷新旧令牌不会扩大权限。**
 
-### 与 CLI `/login` 的边界
+## Codex CLI 模型目录
 
-“在网关登录 OAuth，然后在 CLI 配置自定义 Provider + 网关 API Key”并不等于 CLI 自身已登录 ChatGPT。网关保存 OAuth 凭据，CLI 仍使用 API Key/自定义 Provider 的认证状态；请求头透传无法改变这个状态。官方也区分 [ChatGPT 登录与 API Key 登录](https://learn.chatgpt.com/docs/auth)。
+自定义 Provider 现在可以通过 `model_catalog_url` 获取 Codex 原生模型目录。参考 [tbphp/gpt-load 的目录设计](https://github.com/tbphp/gpt-load/tree/d3307afa7991e3100a1564bd4f3190b19e78890f/internal/clientcatalog)，网关复用 `/v1/models`，根据客户端附带的非空 `client_version` 参数协商格式：
 
-因此，此次核对与回归覆盖上述请求头规则与 OAuth 授权参数。不能据此声称账号展示、额度查询、模型目录、连接器、云端功能或全部传输行为与 `/login` 完全相同。官方客户端还依据认证模式及 Provider 决定压缩、内部元数据等行为；网关自身的账号调度、参数覆盖、请求体兼容化和 WebSocket 握手也独立存在。新增连接器 scope 不会自动启用 CLI 的 ChatGPT 连接器功能。
+- `GET /v1/models`：保持标准 OpenAI `{object: "list", data: [...]}`。
+- `GET /v1/models?client_version=0.163.0`：返回 Codex 原生 `{models: [...]}`，包含推理档位、上下文窗口、模型提示词及工具能力等元数据。
 
-若必须保留 CLI 的原生 ChatGPT 登录功能，应让 CLI 本身完成 ChatGPT 认证，并另行设计保留该认证的网关接入；当前网关 API Key 接入不能提供这一等价性。不要将网关保存的 Refresh Token 直接复制给 CLI 并发刷新。
+在 Codex 的 `config.toml` 中为现有 Provider 增加 `model_catalog_url`，完整示例：
+
+```toml
+model_provider = "little-gate"
+
+[features]
+api_key_model_discovery = true
+
+[model_providers.little-gate]
+name = "little-gate"
+base_url = "https://api.tumuer.me/v1"
+model_catalog_url = "https://api.tumuer.me/v1/models"
+env_key = "LITTLE_GATE_API_KEY"
+wire_api = "responses"
+```
+
+将本项目签发的 API Key 放入 `LITTLE_GATE_API_KEY` 环境变量；目录与 Responses 请求使用同一个网关凭据。若已有 Provider，只补充该表中的目录字段即可，不要重复创建 TOML 表。无需手动拼接 `client_version`，CLI 会自动添加。Codex `0.163.0` 的 `api_key_model_discovery` 默认开启，示例显式列出以便检查已有配置。修改配置后重启 CLI；CLI 自身会缓存目录，网关权限变更可能需要客户端刷新才能反映到模型选择器，实际请求仍会校验最新权限。
+
+目录复用网关的 Responses 路由规则，只包含调用方 API Key 授权、Provider/端点/Key 启用、模型库存及白名单允许的模型；OAuth 账号还必须处于可路由状态。仅支持 Chat 且未开启 Responses 转换的模型不会进入 Codex 目录。普通 `/v1/models` 的现有行为不变。
+
+能力数据来自随程序嵌入的官方 Codex `rust-v0.163.0` 固定快照，[来源、校验值和更新方式](../backend/assets/codex/README.md)均已记录。已知原生 Responses 模型保留完整元数据；指向同一真实模型的别名使用该模型的能力并保留别名身份。未知模型、多目标异构别名、Responses→Chat 转换使用保守元数据，不声明未经确认的推理档位、上下文容量、图片输入或 Responses Lite 支持。目录中的 `supported_in_api=true` 表示可经本项目 Responses API 路由，不表示用户持有 OpenAI 官方 API 权限。
+
+这是固定能力快照与本项目实时路由权限的组合，不是从每个 OAuth 账号实时获取的官方目录，也不代表该账号拥有快照里全部功能。目录不会扩大现有模型库存；仍需先在管理台同步并启用模型。响应按官方优先级排序，最多 1 MiB；超限时返回能完整容纳的有序模型前缀并记录警告，不截断 JSON。对于 `client_version >= 0.159.2` 的三段数字版本，移除与 `model_messages` 重复的旧 `base_instructions`；旧版或无法识别的版本保留兼容字段。
+
+验证命令：
+
+```bash
+cargo test --manifest-path backend/Cargo.toml --locked
+python scripts/run_codex_catalog_regression.py --codex /path/to/native/codex
+```
+
+回归使用临时数据库、合成凭据和本地上游，覆盖协议协商、权限、别名、转换、禁用与 OAuth 账号失效；可省略 `--codex` 仅运行网关回归。指定原生 Codex 可执行文件时，用独立 `CODEX_HOME` 启动 `app-server` 并调用 `model/list`，验证真实 CLI 能解码目录和显示模型；不读取现有登录文件、不进行真实推理。已在 `codex-cli 0.163.0` 验证通过。若本地运行实例占用默认构建产物，可设置独立 `CARGO_TARGET_DIR` 后运行。
+
+## 与 CLI `/login` 的边界
+
+以下源码核对固定在上述 `rust-v0.163.0` / `83086188ae0614bd882818ff1aa23f3194962012`，项目基线为 `v0.0.50`。结论不是“自定义 Provider 必然无法等价”，而是：**仅在网关完成 OAuth，再向原版 CLI 提供网关 API Key，不会自动给 CLI 建立 ChatGPT 账号身份；只修复 `/responses` 请求头不足以完成全部行为对齐。**
+
+必须区分三种状态：网关保存的上游 OAuth 账号、CLI 的本地 `AuthManager`、模型 Provider 实际使用的请求凭据。官方 [`auth_manager_for_provider` 与 `resolve_provider_auth`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider/src/auth.rs#L184)表明，普通 `env_key` / 显式 Bearer 配置可以覆盖模型请求的凭据，同时保留传入的本地认证管理器；只有命令认证等路径另建 Provider 认证管理器。因此，“使用网关 API Key”不能单独证明本地 `AuthMode` 就是 `ApiKey`。CLI 也可能未登录，或另有有效 ChatGPT 登录。
+
+本地认证类型由凭据构建，见 [`CodexAuth::auth_mode`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/login/src/auth/manager.rs#L509)及 [`AuthDotJson::resolved_mode`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/login/src/auth/manager.rs#L1764)。网关将出站 Bearer 替换成 OAuth Token，不会把这个本地对象同步变成 ChatGPT 登录。
+
+| 核对项 | 该版本源码中的实际条件 | 对本项目的含义 |
+| --- | --- | --- |
+| 账号展示 | [`ConfiguredModelProvider::account_state`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider/src/provider.rs#L510)在 `requires_openai_auth` 为真时读取本地认证对象；邮箱和套餐也取自该对象 | 网关上游账号不会自动成为 CLI 展示的账号。仅启用 `requires_openai_auth` 也不会凭空生成 ChatGPT 凭据 |
+| ChatGPT 内置 Apps | [`apps_enabled_for_auth`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/features/src/lib.rs#L584)要求 Apps 开关和账号条件；[`host_owned_codex_apps_enabled`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-mcp/src/mcp/mod.rs#L347)检查本地 `uses_codex_backend()`，不满足时移除内置 `codex_apps` 服务 | 只有网关 OAuth 而没有 CLI 的相应认证时，新增 scope 不会启用内置 Apps。这不代表自定义 MCP、skills 或插件整体不可用；它们需要分别核对 |
+| 主动账号额度查询 | [`get_account_rate_limits_response`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server/src/request_processors/account_processor.rs#L1192)先检查本地认证，再用该身份访问独立的 `chatgpt_base_url` | 此请求不由模型 Provider 的 `/v1/responses` 代办。响应中携带的限流数据还有[独立解析路径](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-api/src/sse/responses.rs#L38)，不能把主动查询受限表述为所有限流信息都不可用 |
+| 模型目录 | [`supports_api_key_models`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider/src/models_endpoint.rs#L213)支持显式 `model_catalog_url`；[`api_key_model_discovery`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/features/src/lib.rs#L977)在此版本默认开启，也有静态 `model_catalog_json` 路径 | 已补齐目录接口与配置：`/v1/models` 在收到非空 `client_version` 时返回[目录解码](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-api/src/endpoint/models.rs#L69)所需的 `{models: [...]}`，使用官方能力快照并按网关权限过滤。已通过真实 CLI 的 `model/list` 验证；不是实时 OAuth 账号目录或全部账号功能等价性证明 |
+| 模型选择过滤 | [`build_available_models`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/models-manager/src/manager.rs#L170)依据本地认证决定过滤，最终调用 [`filter_by_auth`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/protocol/src/openai_models.rs#L1022) | 无相应账号认证时只展示 `supported_in_api` 模型。目录适配必须定义真实可用性和能力语义，不能只返回模型名称；选择器过滤也不等于已证明所有显式模型请求都被禁止 |
+| WebSocket 与远程上下文压缩 | Provider 有可序列化的 `supports_websockets` 和 [`capabilities.remote_compaction`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider-info/src/capabilities.rs#L10)。[默认能力](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider/src/capabilities.rs#L31)按 Provider 决定，允许覆盖 | 不能把这些差异一律归因于 API Key。此版本压缩 V2 通过普通 Responses 请求发送 `compaction_trigger`，见[请求构造](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/compact_remote_v2_attempt.rs#L167)；需要对该协议单独验证，不能沿用旧版本假设为 `/responses/compact` |
+| HTTP 请求体压缩 | [`responses_request_compression`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/client.rs#L1728)同时检查功能开关、本地 `uses_codex_backend()` 和 Provider 的 `is_openai()` | 请求编码存在条件差异；编码差异本身不能证明模型能力或回答质量下降 |
+| 内部工具元数据 | [`include_internal_metadata`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider/src/provider.rs#L112)取决于目的地址或运行时授权；对应[字段定义](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider-info/src/lib.rs#L202)标注 `#[serde(skip)]` | 存在运行时集成入口，但不能通过在普通 `config.toml` 写 `include_internal_metadata = true` 开启。CLI 没有发出的工具元数据，网关不能通过补请求头恢复 |
+
+### 保留原生账号能力的接入方向
+
+源码提供了保留 ChatGPT 身份的接入机制，因此不应下结论为“任何网关架构都不可能接近原生登录”：
+
+- **CLI 自己持有 ChatGPT 登录，模型请求经网关转发。** 保留本地身份，同时把网关认证与 OpenAI 认证分开。官方的 [`gateway_oauth` 组合认证](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider/src/combined_auth.rs#L22)就支持附加独立网关凭据，但它不是本项目现有“管理台登录上游 OAuth”的同一功能。当前网关入口只校验自身 Bearer API Key，并替换成调度选中的上游账号，仍需设计身份绑定及凭据处理。
+- **通过 app-server 的外部 ChatGPT 凭据接口集成。** [`login_chatgpt_auth_tokens_response`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server/src/request_processors/account_processor.rs#L856)接收 Access Token、账号 ID 和套餐，构建 `ChatgptAuthTokens`；[`ExternalAuthBridge::refresh`](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server/src/external_auth.rs#L33)向宿主请求更新凭据。这是可用的集成机制，不等同于给现有 CLI 配一个网关 API Key，也不是完整等价性已验证。需要接入宿主、凭据刷新和固定账号语义；不需要让 CLI 与网关共享并发轮换同一个 Refresh Token。
+
+内置 Apps 的地址由 `chatgpt_base_url` 形成独立的 [`/ps/mcp` 服务](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-mcp/src/mcp/mod.rs#L620)，并有[目的地址信任判断](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-mcp/src/mcp/mod.rs#L363)。修改模型 `base_url` 不会自动代理这些调用，直接替换 `chatgpt_base_url` 也不足以保留其认证行为。
+
+如果 CLI 本地账号与网关调度账号不同，账号展示、额度、连接器权限和推理实际使用的账号可能分别属于不同身份。完整对齐需要解决这个身份一致性问题，再验证目录、请求/响应协议和账号接口。此前完成的请求头与 OAuth 参数回归不能代替这些验证；本节是源码静态核对，未运行官方仓库测试或真实账号端到端验收。
 
 离线验证命令为 `cargo test --manifest-path backend/Cargo.toml --locked` 和 `python scripts/run_oauth_metering_regression.py`。后者用临时数据库和本地模拟上游检查三条转发路径的实际请求头、账号凭据替换及 HTTP turn state 的往返，不访问真实 OpenAI 服务。离线通过不代表已经完成真实账号登录或生产流量验收。
 

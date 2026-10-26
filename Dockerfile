@@ -29,6 +29,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=backend-builder /work/backend/target/release/backend /app/backend
 COPY --from=frontend-builder /work/frontend/dist /app/static
+COPY backend/assets/codex/LICENSE backend/assets/codex/NOTICE backend/assets/codex/README.md /app/licenses/openai-codex/
 RUN mkdir -p /app/data \
     && chown -R littlegate:littlegate /app
 USER littlegate

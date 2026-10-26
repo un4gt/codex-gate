@@ -101,6 +101,32 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         Err(e) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
+    if let Some(version) = crate::codex_catalog::client_version(req.uri()) {
+        let candidates = codex_catalog_candidates(&snap, &api_key.allowed_provider_ids, now_ms);
+        let catalog = match crate::codex_catalog::build_catalog(candidates, &version) {
+            Ok(catalog) => catalog,
+            Err(error) => return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        };
+        if catalog.included < catalog.total {
+            log::warn!(
+                "Codex model catalog exceeded client byte limit: included {} of {} models",
+                catalog.included,
+                catalog.total
+            );
+        }
+        let mut response = http::empty(StatusCode::OK);
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        response.headers_mut().insert(
+            hyper::header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
+        *response.body_mut() = http::full(Bytes::from(catalog.body), None);
+        return response;
+    }
+
     let data = snap
         .model_registry_ids
         .iter()
@@ -142,6 +168,58 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
             "data": data
         }),
     )
+}
+
+fn codex_catalog_candidates(
+    snap: &UpstreamSnapshot,
+    allowed_provider_ids: &[i64],
+    now_ms: i64,
+) -> Vec<crate::codex_catalog::CatalogCandidate> {
+    snap.model_registry_ids
+        .iter()
+        .filter_map(|model| {
+            let (routes, _) =
+                collect_provider_routes(snap, ApiFormat::Responses, model, true).ok()?;
+            let routes: Vec<_> = routes
+                .into_iter()
+                .filter(|route| {
+                    route.provider.enabled
+                        && allowed_provider_ids.contains(&route.provider.id)
+                        && snap
+                            .endpoints_by_provider
+                            .get(&route.provider.id)
+                            .is_some_and(|items| items.iter().any(|endpoint| endpoint.enabled))
+                        && snap
+                            .keys_by_provider
+                            .get(&route.provider.id)
+                            .is_some_and(|keys| {
+                                keys.iter().any(|key| {
+                                    key.enabled
+                                        && snap.key_allows_model(key.id, &route.upstream_model)
+                                        && (route.provider.provider_type
+                                            != crate::codex_oauth::PROVIDER_TYPE
+                                            || snap
+                                                .codex_oauth_by_key
+                                                .get(&key.id)
+                                                .is_some_and(|account| account.is_routable(now_ms)))
+                                })
+                            })
+                })
+                .collect();
+            let first = routes.first()?;
+            let metadata_model = routes
+                .iter()
+                .all(|route| {
+                    route.protocol.conversion.is_none()
+                        && route.upstream_model == first.upstream_model
+                })
+                .then(|| first.upstream_model.clone());
+            Some(crate::codex_catalog::CatalogCandidate {
+                slug: model.clone(),
+                metadata_model,
+            })
+        })
+        .collect()
 }
 
 async fn proxy_openai(

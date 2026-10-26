@@ -1,6 +1,7 @@
 mod admin;
 mod affinity;
 mod cache;
+mod codex_catalog;
 mod codex_oauth;
 mod codex_oauth_callback;
 mod config;
