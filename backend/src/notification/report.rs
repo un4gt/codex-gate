@@ -98,6 +98,7 @@ pub struct UsagePayload {
 pub struct UsageAggregate {
     pub requests: i64,
     pub failed: i64,
+    #[serde(deserialize_with = "deserialize_json_f64")]
     pub error_rate_percent: f64,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -106,6 +107,7 @@ pub struct UsageAggregate {
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
     pub usage_observed_requests: i64,
+    #[serde(deserialize_with = "deserialize_json_f64")]
     pub usage_coverage_percent: f64,
     pub estimated_cost_usd: String,
     pub unpriced_requests: i64,
@@ -117,6 +119,18 @@ pub struct UsageDimension {
     pub name: String,
     #[serde(flatten)]
     pub aggregate: UsageAggregate,
+}
+
+fn deserialize_json_f64<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f64, D::Error> {
+    // With arbitrary_precision, serde's flatten buffer represents decimal JSON
+    // numbers as a private map. Number understands both that map and plain numbers;
+    // a direct f64 deserializer does not. Keep the wire schema and money precision.
+    serde_json::Number::deserialize(deserializer)?
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| serde::de::Error::custom("expected a finite JSON number"))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -584,6 +598,68 @@ fn percent(numerator: i64, denominator: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn usage_dimension_round_trips_flattened_decimal_percentages() {
+        let original = UsageDimension {
+            id: i64::MAX,
+            name: "测试上游".into(),
+            aggregate: UsageAggregate {
+                requests: i64::MAX,
+                error_rate_percent: 12.5,
+                usage_coverage_percent: 87.125,
+                estimated_cost_usd: "0.1234567890123456789012345678".into(),
+                ..UsageAggregate::default()
+            },
+        };
+        let encoded = serde_json::to_string(&original).unwrap();
+        let decoded: UsageDimension = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.id, original.id);
+        assert_eq!(decoded.aggregate.requests, original.aggregate.requests);
+        assert_eq!(decoded.aggregate.error_rate_percent, 12.5);
+        assert_eq!(decoded.aggregate.usage_coverage_percent, 87.125);
+        assert_eq!(
+            decoded.aggregate.estimated_cost_usd,
+            original.aggregate.estimated_cost_usd
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+    }
+
+    #[test]
+    fn usage_percentages_accept_numbers_and_reject_invalid_types() {
+        let base = serde_json::to_value(UsageDimension {
+            id: 1,
+            name: "test".into(),
+            aggregate: UsageAggregate::default(),
+        })
+        .unwrap();
+        for field in ["error_rate_percent", "usage_coverage_percent"] {
+            for number in ["0", "100", "12.5", "1.25e1"] {
+                let mut value = base.clone();
+                value[field] = serde_json::from_str(number).unwrap();
+                let text = serde_json::to_string(&value).unwrap();
+                assert!(
+                    serde_json::from_str::<UsageDimension>(&text).is_ok(),
+                    "{field}: {number}"
+                );
+            }
+            for invalid in [
+                serde_json::json!({"value": 12.5}),
+                serde_json::json!("12.5"),
+                Value::Null,
+                Value::Bool(true),
+            ] {
+                let mut value = base.clone();
+                value[field] = invalid;
+                let text = serde_json::to_string(&value).unwrap();
+                assert!(serde_json::from_str::<UsageDimension>(&text).is_err());
+            }
+        }
+    }
 
     #[test]
     fn mutable_aggregate_marks_missing_price_as_unpriced() {

@@ -26,6 +26,8 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 const MAX_CHAT_MESSAGE_CHARS: usize = 16_000;
+// https://developer.work.weixin.qq.com/document/path/99110 (text.content)
+const MAX_WECOM_TEXT_BYTES: usize = 2_048;
 const MAX_DISCORD_MESSAGE_CHARS: usize = 2_000;
 const USER_AGENT_VALUE: &str = "little-gate-notifications/1";
 
@@ -394,15 +396,12 @@ fn build_webhook_body(
         .map_err(|error| DeliveryError::permanent("invalid_payload", error.to_string()))?;
     let rendered = render_email(&payload)
         .map_err(|error| DeliveryError::permanent("webhook_render_failed", error))?;
-    let max_chars = if config.format == WebhookFormat::Discord {
-        MAX_DISCORD_MESSAGE_CHARS
-    } else {
-        MAX_CHAT_MESSAGE_CHARS
+    let message = format!("{}\n\n{}", rendered.subject, rendered.text);
+    let message = match config.format {
+        WebhookFormat::Wecom => truncate_utf8_bytes(&message, MAX_WECOM_TEXT_BYTES),
+        WebhookFormat::Discord => truncate_chars(&message, MAX_DISCORD_MESSAGE_CHARS),
+        _ => truncate_chars(&message, MAX_CHAT_MESSAGE_CHARS),
     };
-    let message = truncate_chars(
-        &format!("{}\n\n{}", rendered.subject, rendered.text),
-        max_chars,
-    );
     let body = match config.format {
         WebhookFormat::Generic => unreachable!("generic webhook returned before rendering"),
         WebhookFormat::Feishu => {
@@ -488,6 +487,22 @@ fn sign_feishu_webhook(secret: &str, timestamp: &str) -> Result<String, Delivery
     let mac = HmacSha256::new_from_slice(string_to_sign.as_bytes())
         .map_err(|error| DeliveryError::permanent("invalid_signing_secret", error.to_string()))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let suffix = if max_bytes >= '…'.len_utf8() {
+        "…"
+    } else {
+        ""
+    };
+    let mut end = max_bytes - suffix.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &value[..end])
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -743,6 +758,85 @@ mod tests {
     fn reserved_headers_are_rejected() {
         let error = validate_custom_header("Content-Length", "5").unwrap_err();
         assert_eq!(error.code, "reserved_webhook_header");
+    }
+
+    #[test]
+    fn platform_webhooks_render_persisted_usage_dimensions() {
+        let mut payload = sample_payload();
+        payload.usage.providers.push(UsageDimension {
+            id: 1,
+            name: "上游 A".into(),
+            aggregate: UsageAggregate {
+                error_rate_percent: 12.5,
+                usage_coverage_percent: 87.125,
+                ..UsageAggregate::default()
+            },
+        });
+        payload.usage.client_keys = payload.usage.providers.clone();
+        let persisted = serde_json::to_string(&payload).unwrap();
+        for format in [
+            WebhookFormat::Wecom,
+            WebhookFormat::Feishu,
+            WebhookFormat::Dingtalk,
+            WebhookFormat::Slack,
+            WebhookFormat::Discord,
+        ] {
+            let body = build_webhook_body(&webhook_config(format), &persisted, "10").unwrap();
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if format == WebhookFormat::Wecom {
+                assert_eq!(value["msgtype"], "text");
+                assert!(
+                    value["text"]["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("上游 A")
+                );
+            }
+        }
+        // SMTP uses this same persisted payload reader before rendering.
+        let decoded: NotificationPayload = serde_json::from_str(&persisted).unwrap();
+        assert!(render_email(&decoded).unwrap().text.contains("上游 A"));
+    }
+
+    #[test]
+    fn wecom_text_respects_utf8_byte_limit_and_platform_response() {
+        let mut payload = sample_payload();
+        payload.rule.name = "中文🙂".repeat(1_000);
+        let body = build_webhook_body(
+            &webhook_config(WebhookFormat::Wecom),
+            &serde_json::to_string(&payload).unwrap(),
+            "10",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["msgtype"], "text");
+        let message = value["text"]["content"].as_str().unwrap();
+        assert!(message.len() <= 2_048);
+        assert!(message.ends_with('…'));
+        assert!(
+            validate_platform_response(
+                WebhookFormat::Wecom,
+                Some(r#"{"errcode":0,"errmsg":"ok"}"#)
+            )
+            .is_ok()
+        );
+        let error = validate_platform_response(
+            WebhookFormat::Wecom,
+            Some(r#"{"errcode":40058,"errmsg":"invalid parameter"}"#),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "webhook_platform_rejected");
+    }
+
+    #[test]
+    fn utf8_truncation_keeps_boundaries_and_counts_the_suffix() {
+        let exact = "a".repeat(2_048);
+        assert_eq!(truncate_utf8_bytes(&exact, 2_048), exact);
+        for text in ["a".repeat(3_000), "中".repeat(1_000), "🙂".repeat(1_000)] {
+            for limit in [0, 1, 2, 3, 2_048] {
+                assert!(truncate_utf8_bytes(&text, limit).len() <= limit);
+            }
+        }
     }
 
     #[test]

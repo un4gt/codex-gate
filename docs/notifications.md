@@ -33,7 +33,7 @@ Webhook 请求使用 `application/json`。通道的“消息格式”决定请�
 
 - `generic`：发送版本化 little-gate 事件 JSON，并使用 little-gate HMAC 请求签名。
 - `feishu`：发送飞书文本消息，顶层包含 `msg_type: "text"` 和 `content.text`；填写飞书机器人签名密钥后还会包含 `timestamp` 和 `sign`。
-- `wecom`、`dingtalk`：发送平台文本消息，顶层包含 `msgtype: "text"` 和 `text.content`。
+- `wecom`、`dingtalk`：发送平台文本消息，顶层包含 `msgtype: "text"` 和 `text.content`。企业微信遵循[官方文本消息规范](https://developer.work.weixin.qq.com/document/path/99110)，将 `text.content` 限制在 2048 个 UTF-8 字节内，超出时按字符边界截断并添加省略号；不会截断中文或 emoji 的编码。
 - `slack`：发送包含 `text` 的 Incoming Webhook 消息。
 - `discord`：发送包含 `content` 的 Webhook 消息，并按 Discord 文本长度限制截断。
 
@@ -69,3 +69,11 @@ Idempotency-Key: <delivery_id>
 发送历史的详情会保留最近一次尝试的实际请求体摘要、HTTP 状态和平台响应体摘要，便于排查平台业务错误。请求与响应摘要最多各保留 16 KiB，历史仍按 90 天清理。
 
 管理 API 不返回 SMTP 密码、Webhook 签名密钥、自定义请求头值或完整 Webhook 路径/查询内容。只有通用 Webhook 会在密钥留空时自动生成 little-gate HMAC 密钥，并在创建响应中显示一次；消息平台格式不会自动生成平台密钥。
+
+## 排查 `invalid_payload`
+
+`invalid_payload` 表示投递器读取本地保存的通知 JSON 失败，此时尚未发出企业微信请求；平台返回非零 `errcode` 时记录的是 `webhook_platform_rejected`。
+
+已修复带用量明细时出现的 `invalid type: map, expected f64`：`serde_json` 的 `arbitrary_precision` 与 `serde(flatten)` 组合会把统计百分比小数以内部映射形式传递给反序列化器。现在通过 JSON Number 读取失败率和用量覆盖率，保持现有 JSON 结构、大整数及金额精度，无需迁移数据库。企业微信、其他消息平台和 SMTP 共用这份通知数据，因此同时受益。部署修复后，可在发送历史中重试原有失败记录，或重新点击“发送测试”。
+
+离线回归：`python scripts/run_wecom_notification_regression.py`。脚本启动临时网关和本地模拟企业微信接口，产生真实用量统计后调用通道测试 API，验证带小数的统计明细、UTF-8 长度限制、业务错误识别、投递诊断和保存报表的重试；不向真实企业微信群发送消息。可用 `--binary /path/to/backend` 指定现有程序，或设置独立 `CARGO_TARGET_DIR` 避免覆盖运行中的构建产物。
