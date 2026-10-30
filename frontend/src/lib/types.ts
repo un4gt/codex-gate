@@ -48,6 +48,9 @@ export interface RequestLogRow {
     "http" | "ws" | "ws_native" | "ws_http_bridge" | "ws_setup" | string;
   parent_id: string | null;
   ws_session_id: string | null;
+  ttft_source?: "delta" | "output_done" | "response_done" | string | null;
+  requested_reasoning_effort?: string | null;
+  upstream_reasoning_effort?: string | null;
   requested_service_tier?: string | null;
   upstream_service_tier?: string | null;
   service_tier?: string | null;

@@ -6,6 +6,88 @@ use serde_json::Value;
 pub(crate) const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const DISCONNECT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Explicit request setting only; an omitted effort does not imply a model default.
+pub(crate) fn reasoning_effort(value: &Value) -> Option<String> {
+    value
+        .pointer("/reasoning/effort")
+        .or_else(|| value.get("reasoning_effort"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .map(str::to_owned)
+}
+
+fn nonempty_string(value: &Value, field: &str) -> bool {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
+
+fn output_part(value: &Value) -> bool {
+    nonempty_string(value, "text") || nonempty_string(value, "refusal")
+}
+
+fn output_item(value: &Value) -> bool {
+    match value.get("type").and_then(Value::as_str) {
+        Some("message" | "reasoning") => ["content", "summary"].iter().any(|field| {
+            value
+                .get(field)
+                .and_then(Value::as_array)
+                .is_some_and(|parts| parts.iter().any(output_part))
+        }),
+        Some("function_call" | "mcp_call") => nonempty_string(value, "arguments"),
+        Some("custom_tool_call") => nonempty_string(value, "input"),
+        Some("code_interpreter_call") => nonempty_string(value, "code"),
+        Some("image_generation_call") => nonempty_string(value, "result"),
+        _ => false,
+    }
+}
+
+/// First observable output, including APIs that send completed items without deltas.
+/// Keep the source so completed-output timing is not presented as an exact token arrival.
+/// Lifecycle/usage-only/error events and opaque encrypted reasoning are not output.
+pub(crate) fn output_event_kind(value: &Value) -> Option<&'static str> {
+    let kind = value.get("type").and_then(Value::as_str)?;
+    if kind.starts_with("response.") && kind.ends_with(".delta") && nonempty_string(value, "delta")
+    {
+        return Some("delta");
+    }
+    let (has_output, source) = match kind {
+        "response.audio.delta" => (nonempty_string(value, "data"), "delta"),
+        "response.image_generation_call.partial_image" => {
+            (nonempty_string(value, "partial_image_b64"), "delta")
+        }
+        "response.shell_call_command.added" | "response.shell_call_command.done" => {
+            (nonempty_string(value, "command"), "output_done")
+        }
+        "response.output_text.done"
+        | "response.reasoning_text.done"
+        | "response.reasoning_summary_text.done" => (nonempty_string(value, "text"), "output_done"),
+        "response.refusal.done" => (nonempty_string(value, "refusal"), "output_done"),
+        "response.function_call_arguments.done" | "response.mcp_call_arguments.done" => {
+            (nonempty_string(value, "arguments"), "output_done")
+        }
+        "response.custom_tool_call_input.done" => (nonempty_string(value, "input"), "output_done"),
+        "response.code_interpreter_call_code.done" => {
+            (nonempty_string(value, "code"), "output_done")
+        }
+        "response.content_part.done" | "response.reasoning_summary_part.done" => {
+            (value.get("part").is_some_and(output_part), "output_done")
+        }
+        "response.output_item.done" => (value.get("item").is_some_and(output_item), "output_done"),
+        "response.completed" | "response.done" | "response.incomplete" => (
+            value
+                .pointer("/response/output")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(output_item)),
+            "response_done",
+        ),
+        _ => (false, "delta"),
+    };
+    has_output.then_some(source)
+}
+
 #[derive(Default)]
 pub(crate) struct SseDecoder {
     line: Vec<u8>,
@@ -194,6 +276,7 @@ pub(crate) fn event_usage(value: &Value) -> Option<Usage> {
 
 #[derive(Default)]
 pub(crate) struct Observation {
+    pub first_output_kind: Option<&'static str>,
     pub usage: Option<Usage>,
     pub service_tier: Option<String>,
     pub terminal: bool,
@@ -201,6 +284,9 @@ pub(crate) struct Observation {
 }
 impl Observation {
     pub fn observe(&mut self, value: &Value) {
+        if self.first_output_kind.is_none() {
+            self.first_output_kind = output_event_kind(value);
+        }
         let terminal = is_terminal_response_event(value);
         if let Some(usage) = event_usage(value)
             && (terminal || !self.terminal_usage)
@@ -373,6 +459,69 @@ fn error_fields(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn first_output_covers_completed_items_without_counting_metadata_or_errors() {
+        for event in [
+            json!({"type":"response.created"}),
+            json!({"type":"response.output_item.added","item":{"type":"message","content":[]}}),
+            json!({"type":"response.output_text.delta","delta":""}),
+            json!({"type":"response.output_text.delta","delta":{}}),
+            json!({"type":"response.output_item.done","item":{"type":"reasoning","encrypted_content":"opaque"}}),
+            json!({"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":5}}}),
+            json!({"type":"response.failed","response":{"error":{"message":"bad"}}}),
+            json!({"type":"error","error":{"message":"bad"}}),
+        ] {
+            assert_eq!(output_event_kind(&event), None, "{event}");
+        }
+        for event in [
+            json!({"type":"response.output_text.done","text":"hello"}),
+            json!({"type":"response.function_call_arguments.done","arguments":"{}"}),
+            json!({"type":"response.custom_tool_call_input.done","input":"ls"}),
+            json!({"type":"response.output_item.done","item":{"type":"message","content":[{"text":"hello"}]}}),
+            json!({"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":"thinking"}]}}),
+            json!({"type":"response.output_item.done","item":{"type":"function_call","arguments":"{}"}}),
+            json!({"type":"response.content_part.done","part":{"refusal":"cannot"}}),
+        ] {
+            assert_eq!(output_event_kind(&event), Some("output_done"), "{event}");
+        }
+        let delta = json!({"type":"response.reasoning_text.delta","delta":"thinking"});
+        assert_eq!(output_event_kind(&delta), Some("delta"));
+        assert_eq!(
+            output_event_kind(&json!({"type":"response.audio.delta","data":"encoded"})),
+            Some("delta")
+        );
+        let completed = json!({"type":"response.completed","response":{"output":[{"type":"custom_tool_call","input":"ls"}]}});
+        assert_eq!(output_event_kind(&completed), Some("response_done"));
+        let mut observation = Observation::default();
+        observation.observe(&delta);
+        observation.observe(&completed);
+        assert_eq!(observation.first_output_kind, Some("delta"));
+    }
+
+    #[test]
+    fn reasoning_effort_uses_explicit_responses_or_chat_setting_only() {
+        assert_eq!(
+            reasoning_effort(&json!({"reasoning":{"effort":"xhigh"}})).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            reasoning_effort(&json!({"reasoning_effort":"high"})).as_deref(),
+            Some("high")
+        );
+        for value in [
+            json!({}),
+            json!({"reasoning":{"effort":" "}}),
+            json!({"reasoning_effort":123}),
+            json!({"reasoning_effort":"x".repeat(65)}),
+        ] {
+            assert!(reasoning_effort(&value).is_none());
+        }
+        assert_eq!(
+            reasoning_effort(&json!({"reasoning":{"effort":"none"}})).as_deref(),
+            Some("none")
+        );
+    }
 
     #[test]
     fn data_only_done_metering_is_independent_of_model_name() {

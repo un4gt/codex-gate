@@ -54,6 +54,8 @@ struct WsContext {
     session_log_id: String,
     session_started_at_ms: i64,
     disconnected_at: tokio::sync::watch::Sender<Option<Instant>>,
+    requested_reasoning_effort: Option<String>,
+    upstream_reasoning_effort: Option<String>,
     requested_service_tier: Option<String>,
     upstream_service_tier: Option<String>,
     observation: std::sync::Arc<parking_lot::Mutex<crate::response_events::Observation>>,
@@ -275,6 +277,8 @@ pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpRespo
         session_log_id: util::new_ulid(),
         session_started_at_ms: util::now_ms(),
         disconnected_at: tokio::sync::watch::channel(None).0,
+        requested_reasoning_effort: None,
+        upstream_reasoning_effort: None,
         requested_service_tier: None,
         upstream_service_tier: None,
         observation: Default::default(),
@@ -403,6 +407,7 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                 };
 
                 let mut ctx = ctx.clone();
+                ctx.requested_reasoning_effort = crate::response_events::reasoning_effort(&value);
                 ctx.requested_service_tier = crate::response_events::service_tier(&value);
                 let Some(event_type) = value.get("type").and_then(Value::as_str) else {
                     let _ = send_ws_error(
@@ -604,6 +609,9 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                 let original_value = value;
                 let mut turn_complete = false;
                 let mut turn_ctx = ctx.clone();
+                turn_ctx.requested_reasoning_effort =
+                    crate::response_events::reasoning_effort(&original_value);
+                turn_ctx.upstream_reasoning_effort = None;
                 turn_ctx.requested_service_tier =
                     crate::response_events::service_tier(&original_value);
                 turn_ctx.pending_turn_log = Default::default();
@@ -708,6 +716,8 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     let Some(active_upstream) = active.as_mut() else {
                         break;
                     };
+                    turn_ctx.upstream_reasoning_effort =
+                        crate::response_events::reasoning_effort(&routed_value);
                     turn_ctx.upstream_service_tier =
                         crate::response_events::service_tier(&routed_value);
                     turn_ctx.observation = Default::default();
@@ -1749,7 +1759,9 @@ where
                 first_byte_ms.get_or_insert_with(|| turn_start.elapsed().as_millis() as i64);
                 if let Ok(event) = serde_json::from_str::<Value>(&text) {
                     ctx.observation.lock().observe(&event);
-                    if first_token_ms.is_none() && is_responses_delta_event(&event) {
+                    if first_token_ms.is_none()
+                        && crate::response_events::output_event_kind(&event).is_some()
+                    {
                         first_token_ms = Some(turn_start.elapsed().as_millis() as i64);
                     }
                     if is_terminal_response_event(&event) {
@@ -2408,7 +2420,9 @@ where
         };
         for event in events {
             ctx.observation.lock().observe(&event);
-            if first_token_ms.is_none() && is_responses_delta_event(&event) {
+            if first_token_ms.is_none()
+                && crate::response_events::output_event_kind(&event).is_some()
+            {
                 first_token_ms = Some(turn_start.elapsed().as_millis() as i64);
             }
             let terminal_event = is_terminal_response_event(&event);
@@ -2598,6 +2612,10 @@ fn record_turn(
         outcome.usage_observed = true;
     }
     let service_tier = observation.service_tier.clone();
+    let ttft_source = outcome
+        .t_first_token_ms
+        .and(observation.first_output_kind)
+        .map(str::to_owned);
     drop(observation);
     let disconnected = *ctx.disconnected_at.borrow();
     if let Some(at) = disconnected {
@@ -2721,8 +2739,11 @@ fn record_turn(
         transport: transport.as_log_value(),
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_reasoning_effort: ctx.requested_reasoning_effort.clone(),
+        upstream_reasoning_effort: ctx.upstream_reasoning_effort.clone(),
         requested_service_tier: ctx.requested_service_tier.clone(),
         upstream_service_tier: ctx.upstream_service_tier.clone(),
+        ttft_source,
         service_tier,
         routing_trace: Some(ws_trace_value(ctx)),
     };
@@ -2793,8 +2814,11 @@ fn record_ws_setup_failed_turn(
         transport: TurnTransport::WsSetup.as_log_value(),
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_reasoning_effort: ctx.requested_reasoning_effort.clone(),
+        upstream_reasoning_effort: ctx.upstream_reasoning_effort.clone(),
         requested_service_tier: ctx.requested_service_tier.clone(),
         upstream_service_tier: None,
+        ttft_source: None,
         service_tier: None,
         routing_trace: Some(ws_trace_value(ctx)),
     });
@@ -2831,8 +2855,11 @@ fn record_session_open(ctx: &WsContext) {
         transport: "ws",
         parent_id: None,
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_reasoning_effort: None,
+        upstream_reasoning_effort: None,
         requested_service_tier: None,
         upstream_service_tier: None,
+        ttft_source: None,
         service_tier: None,
         routing_trace: None,
     });
@@ -2887,19 +2914,14 @@ fn record_session_close(
         transport: "ws",
         parent_id: Some(ctx.session_log_id.clone()),
         ws_session_id: Some(ctx.session_id.clone()),
+        requested_reasoning_effort: None,
+        upstream_reasoning_effort: None,
         requested_service_tier: None,
         upstream_service_tier: None,
+        ttft_source: None,
         service_tier: None,
         routing_trace: None,
     });
-}
-
-fn is_responses_delta_event(value: &Value) -> bool {
-    value
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|event_type| event_type.ends_with(".delta"))
-        && proxy::responses_has_delta(value)
 }
 
 use crate::response_events::{is_terminal_response_event, terminal_status};

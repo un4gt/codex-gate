@@ -49,7 +49,7 @@ const DEFAULT_LOG_VISIBLE_COLUMNS: [&str; 7] = [
     "cost",
     "api_key",
 ];
-const LOG_COLUMN_IDS: [&str; 16] = [
+const LOG_COLUMN_IDS: [&str; 18] = [
     "time",
     "model",
     "service_tier",
@@ -63,6 +63,8 @@ const LOG_COLUMN_IDS: [&str; 16] = [
     "transport",
     "first_byte",
     "ttft",
+    "output_rate",
+    "reasoning_effort",
     "cost",
     "request_id",
     "error_type",

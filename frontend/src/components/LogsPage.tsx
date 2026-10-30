@@ -1,3 +1,4 @@
+import { formatOutputRate, formatTtft, ttftHelp, OUTPUT_RATE_HELP } from "@/lib/logMetrics";
 import ChevronRight from "@mui/icons-material/ChevronRightOutlined";
 import CloseOutlined from "@mui/icons-material/CloseOutlined";
 import Copy from "@mui/icons-material/ContentCopyOutlined";
@@ -206,6 +207,8 @@ export const LOG_COLUMN_DEFINITIONS = [
     minWidth: 80,
     maxWidth: 240,
   },
+  { id: "output_rate", label: "平均输出速度", defaultWidth: 130, minWidth: 100, maxWidth: 240 },
+  { id: "reasoning_effort", label: "思考级别", defaultWidth: 130, minWidth: 100, maxWidth: 240 },
   { id: "ttft", label: "TTFT", defaultWidth: 100, minWidth: 80, maxWidth: 240 },
   { id: "cost", label: "成本", defaultWidth: 110, minWidth: 88, maxWidth: 240 },
   {
@@ -1513,7 +1516,7 @@ export function LogsPage(props: LogsPageProps) {
                               color: "var(--mui-palette-text-primary)",
                             }}
                           >
-                            {formatMaybeMs(row.t_first_token_ms)}
+                            {formatTtft(row)}
                           </Box>
                         }
                       </Box>
@@ -2075,6 +2078,21 @@ export function LogsPage(props: LogsPageProps) {
                               {row.upstream_service_tier ?? "—"}
                             </Box>
                             {null}
+                          </Box>
+                          {[
+                            [t("客户端思考级别"), row.requested_reasoning_effort ?? "—"],
+                            [t("上游思考级别"), row.upstream_reasoning_effort ?? "—"],
+                            [t("平均输出速度"), formatOutputRate(row)],
+                          ].map(([label, value]) => (
+                            <Box key={label} sx={{ p: 1.5, borderBottom: 1, borderRight: 1, borderColor: "divider" }}>
+                              <Typography variant="caption" color="text.secondary">{label}</Typography>
+                              <Typography variant="body2">{value}</Typography>
+                            </Box>
+                          ))}
+                          <Box sx={{ p: 1.5, gridColumn: "1 / -1", borderBottom: 1, borderColor: "divider" }}>
+                            <Typography variant="caption" component="p" color="text.secondary">{ttftHelp(row)}</Typography>
+                            <Typography variant="caption" component="p" color="text.secondary">{t(OUTPUT_RATE_HELP)}</Typography>
+                            <Typography variant="caption" component="p" color="text.secondary">{t("记录发送给上游的思考级别；未指定时不推断模型默认值。")}</Typography>
                           </Box>
                           <Box
                             sx={{
@@ -5135,6 +5153,11 @@ function LogColumnValue(props: {
           <Box component="span" sx={{ display: "block", fontWeight: 500 }}>
             {isWsSession(row) ? t("WS 会话") : formatModelName(row.model)}
           </Box>
+          {row.upstream_reasoning_effort ? (
+            <Typography component="span" variant="caption" sx={{ display: "block", color: "text.secondary" }}>
+              {t("思考级别")} · {row.upstream_reasoning_effort}
+            </Typography>
+          ) : null}
           {row.provider_id ? (
             <Box component="span" sx={{ display: "block", fontSize: 11, color: "text.secondary", mt: "2px" }}>
               {props.providerNameMap.get(row.provider_id) ?? `#${row.provider_id}`}
@@ -5187,9 +5210,12 @@ function LogColumnValue(props: {
           <Box component="span" sx={{ display: "block", fontVariantNumeric: "tabular-nums" }}>
             {formatMaybeMs(primaryLatency(row))}
           </Box>
+          <Typography variant="caption" component="span" sx={{ display: "block", color: "text.secondary" }} title={t(OUTPUT_RATE_HELP)}>
+            {formatOutputRate(row)}
+          </Typography>
           {row.t_first_token_ms != null ? (
             <Box component="span" sx={{ display: "block", fontSize: 11, color: "text.secondary", mt: "2px" }}>
-              TTFT {formatMaybeMs(row.t_first_token_ms)}
+              TTFT {formatTtft(row)}
             </Box>
           ) : null}
         </Box>
@@ -5295,16 +5321,13 @@ function LogColumnValue(props: {
         </Box>
       );
     case "ttft":
-      return (
-        <Box
-          sx={{
-            fontSize: "0.75rem",
-            lineHeight: "calc(1 / 0.75)",
-          }}
-        >
-          {formatMaybeMs(row.t_first_token_ms)}
-        </Box>
-      );
+      return <Tooltip title={ttftHelp(row)}><Box component="span" tabIndex={0}>{formatTtft(row)}</Box></Tooltip>;
+    case "output_rate":
+      return <Tooltip title={t(OUTPUT_RATE_HELP)}><Box component="span" tabIndex={0}>{formatOutputRate(row)}</Box></Tooltip>;
+    case "reasoning_effort":
+      return <Tooltip title={t("记录发送给上游的思考级别；未指定时不推断模型默认值。") }>
+        <Box component="span" tabIndex={0}>{row.upstream_reasoning_effort ?? "—"}</Box>
+      </Tooltip>;
     case "cost": {
       const pricing = calculateRequestPricing(
         row,

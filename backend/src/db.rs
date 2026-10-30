@@ -31,7 +31,7 @@ const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
   request_logs.price_version_id, request_logs.price_tier_index,
   request_logs.t_stream_ms, request_logs.t_first_byte_ms, request_logs.t_first_token_ms, request_logs.duration_ms,
   request_logs.span_kind, request_logs.transport, request_logs.parent_id, request_logs.ws_session_id,
-  request_logs.routing_trace_json, request_logs.requested_service_tier, request_logs.upstream_service_tier, request_logs.service_tier,
+  request_logs.routing_trace_json, request_logs.ttft_source, request_logs.requested_reasoning_effort, request_logs.upstream_reasoning_effort, request_logs.requested_service_tier, request_logs.upstream_service_tier, request_logs.service_tier,
   request_logs.created_at_ms
 "#;
 
@@ -3379,6 +3379,7 @@ INSERT INTO request_logs (
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   requested_service_tier, upstream_service_tier, service_tier,
+  ttft_source, requested_reasoning_effort, upstream_reasoning_effort,
   created_at_ms
 ) VALUES (
   ?, ?, ?, ?, ?, ?,
@@ -3388,6 +3389,7 @@ INSERT INTO request_logs (
   ?, ?,
   ?, ?, ?, ?,
   ?, ?, ?, ?, ?,
+  ?, ?, ?,
   ?, ?, ?,
   ?
 )
@@ -3429,6 +3431,9 @@ INSERT INTO request_logs (
         .bind(&r.requested_service_tier)
         .bind(&r.upstream_service_tier)
         .bind(&r.service_tier)
+        .bind(&r.ttft_source)
+        .bind(&r.requested_reasoning_effort)
+        .bind(&r.upstream_reasoning_effort)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -3457,6 +3462,7 @@ INSERT INTO request_logs (
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   requested_service_tier, upstream_service_tier, service_tier,
+  ttft_source, requested_reasoning_effort, upstream_reasoning_effort,
   created_at_ms
 ) VALUES (
   $1, $2, $3, $4, $5, $6,
@@ -3467,7 +3473,8 @@ INSERT INTO request_logs (
   $21, $22, $23, $24,
   $25, $26, $27, $28, $29,
   $30, $31, $32,
-  $33
+  $33, $34, $35,
+  $36
 )
 "#,
         )
@@ -3507,6 +3514,9 @@ INSERT INTO request_logs (
         .bind(&r.requested_service_tier)
         .bind(&r.upstream_service_tier)
         .bind(&r.service_tier)
+        .bind(&r.ttft_source)
+        .bind(&r.requested_reasoning_effort)
+        .bind(&r.upstream_reasoning_effort)
         .bind(r.created_at_ms)
         .execute(&mut *tx)
         .await?;
@@ -4162,6 +4172,7 @@ SELECT
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   requested_service_tier, upstream_service_tier, service_tier,
+  ttft_source, requested_reasoning_effort, upstream_reasoning_effort,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < ?
@@ -4238,6 +4249,7 @@ SELECT
   t_stream_ms, t_first_byte_ms, t_first_token_ms, duration_ms,
   span_kind, transport, parent_id, ws_session_id, routing_trace_json,
   requested_service_tier, upstream_service_tier, service_tier,
+  ttft_source, requested_reasoning_effort, upstream_reasoning_effort,
   created_at_ms
 	FROM request_logs
 	WHERE time_ms < $1
@@ -4781,6 +4793,9 @@ fn row_to_request_log_sqlite(row: sqlx::sqlite::SqliteRow) -> RequestLogRow {
         transport: row.get::<String, _>("transport"),
         parent_id: row.get::<Option<String>, _>("parent_id"),
         ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
+        ttft_source: row.get::<Option<String>, _>("ttft_source"),
+        requested_reasoning_effort: row.get::<Option<String>, _>("requested_reasoning_effort"),
+        upstream_reasoning_effort: row.get::<Option<String>, _>("upstream_reasoning_effort"),
         requested_service_tier: row.get::<Option<String>, _>("requested_service_tier"),
         upstream_service_tier: row.get::<Option<String>, _>("upstream_service_tier"),
         service_tier: row.get::<Option<String>, _>("service_tier"),
@@ -4821,6 +4836,9 @@ fn row_to_request_log_postgres(row: sqlx::postgres::PgRow) -> RequestLogRow {
         transport: row.get::<String, _>("transport"),
         parent_id: row.get::<Option<String>, _>("parent_id"),
         ws_session_id: row.get::<Option<String>, _>("ws_session_id"),
+        ttft_source: row.get::<Option<String>, _>("ttft_source"),
+        requested_reasoning_effort: row.get::<Option<String>, _>("requested_reasoning_effort"),
+        upstream_reasoning_effort: row.get::<Option<String>, _>("upstream_reasoning_effort"),
         requested_service_tier: row.get::<Option<String>, _>("requested_service_tier"),
         upstream_service_tier: row.get::<Option<String>, _>("upstream_service_tier"),
         service_tier: row.get::<Option<String>, _>("service_tier"),
@@ -5589,6 +5607,21 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     ensure_sqlite_model_prices_active(pool).await?;
     ensure_sqlite_responses_via_chat_columns(pool).await?;
     crate::notification::migrate_sqlite(pool).await?;
+    if !sqlite_column_exists(pool, "request_logs", "ttft_source").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN ttft_source TEXT")
+            .execute(pool)
+            .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "requested_reasoning_effort").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN requested_reasoning_effort TEXT")
+            .execute(pool)
+            .await?;
+    }
+    if !sqlite_column_exists(pool, "request_logs", "upstream_reasoning_effort").await? {
+        sqlx::query("ALTER TABLE request_logs ADD COLUMN upstream_reasoning_effort TEXT")
+            .execute(pool)
+            .await?;
+    }
     if !sqlite_column_exists(pool, "request_logs", "requested_service_tier").await? {
         sqlx::query("ALTER TABLE request_logs ADD COLUMN requested_service_tier TEXT")
             .execute(pool)
@@ -6012,6 +6045,17 @@ CREATE INDEX IF NOT EXISTS idx_stats_events_time ON stats_events(time_ms DESC);
     migrate_postgres_pricing_storage(pool).await?;
     ensure_postgres_model_prices_active(pool).await?;
     crate::notification::migrate_postgres(pool).await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS ttft_source TEXT")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS requested_reasoning_effort TEXT",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS upstream_reasoning_effort TEXT")
+        .execute(pool)
+        .await?;
     sqlx::query("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS requested_service_tier TEXT")
         .execute(pool)
         .await?;
@@ -8251,6 +8295,9 @@ CREATE TABLE stats_events (
             "requested_service_tier",
             "upstream_service_tier",
             "service_tier",
+            "ttft_source",
+            "requested_reasoning_effort",
+            "upstream_reasoning_effort",
         ] {
             sqlx::query(&format!("ALTER TABLE request_logs DROP COLUMN {field}"))
                 .execute(pool)
@@ -8271,6 +8318,14 @@ CREATE TABLE stats_events (
                 && row.upstream_service_tier.is_none()
                 && row.service_tier.is_none()
         );
+        assert!(
+            row.ttft_source.is_none()
+                && row.requested_reasoning_effort.is_none()
+                && row.upstream_reasoning_effort.is_none()
+        );
+        row.ttft_source = Some("delta".into());
+        row.requested_reasoning_effort = Some("xhigh".into());
+        row.upstream_reasoning_effort = Some("high".into());
         row.id = "new-tier".into();
         row.requested_service_tier = Some("fast".into());
         row.upstream_service_tier = Some("priority".into());
@@ -8290,6 +8345,40 @@ CREATE TABLE stats_events (
         let archive = serde_json::to_value(row).expect("archive JSON");
         assert_eq!(archive["requested_service_tier"], "fast");
         assert_eq!(archive["upstream_service_tier"], "priority");
+        assert_eq!(archive["ttft_source"], "delta");
+        assert_eq!(archive["requested_reasoning_effort"], "xhigh");
+        assert_eq!(archive["upstream_reasoning_effort"], "high");
+    }
+
+    #[tokio::test]
+    async fn log_metrics_migrate_existing_sqlite_rows_without_inventing_values() {
+        let db = sqlite_memory_db().await;
+        let Database::Sqlite(pool) = &db else {
+            panic!("expected SQLite")
+        };
+        for field in [
+            "ttft_source",
+            "requested_reasoning_effort",
+            "upstream_reasoning_effort",
+        ] {
+            sqlx::query(&format!("ALTER TABLE request_logs DROP COLUMN {field}"))
+                .execute(pool)
+                .await
+                .expect("legacy schema");
+        }
+        sqlx::query("INSERT INTO request_logs (id,time_ms,api_key_id,api_format,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,created_at_ms) VALUES ('legacy-metrics',1,1,'responses',0,0,0,0,1)")
+            .execute(pool).await.expect("legacy log");
+        db.migrate().await.expect("upgrade");
+        db.migrate().await.expect("idempotent upgrade");
+        let rows = db
+            .list_request_logs_before(2, 10)
+            .await
+            .expect("archive query");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].ttft_source.is_none());
+        assert!(rows[0].requested_reasoning_effort.is_none());
+        assert!(rows[0].upstream_reasoning_effort.is_none());
+        assert!(rows[0].t_first_token_ms.is_none());
     }
 
     #[tokio::test]
@@ -8328,6 +8417,9 @@ CREATE TABLE stats_events (
             transport: "http".to_string(),
             parent_id: None,
             ws_session_id: None,
+            ttft_source: Some("output_done".into()),
+            requested_reasoning_effort: Some("xhigh".into()),
+            upstream_reasoning_effort: Some("high".into()),
             requested_service_tier: Some("fast".into()),
             upstream_service_tier: Some("priority".into()),
             service_tier: Some("default".into()),
@@ -8353,6 +8445,10 @@ CREATE TABLE stats_events (
         assert_eq!(queried[0].service_tier.as_deref(), Some("default"));
         let archive = serde_json::to_value(&queried[0]).expect("archive serialization");
         assert_eq!(archive["requested_service_tier"], "fast");
+        assert_eq!(archive["ttft_source"], "output_done");
+        assert_eq!(archive["requested_reasoning_effort"], "xhigh");
+        assert_eq!(archive["upstream_reasoning_effort"], "high");
+        assert_eq!(rows[0].upstream_reasoning_effort.as_deref(), Some("high"));
         assert_eq!(rows[0].routing_trace, Some(trace));
         assert_eq!(
             rows[0].upstream_api_format.as_deref(),

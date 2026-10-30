@@ -309,6 +309,7 @@ async fn proxy_openai(
         let _ = permit.send(event);
     }
 
+    let request_efforts = parking_lot::Mutex::new((None::<String>, None::<String>));
     let request_tiers = parking_lot::Mutex::new((None::<String>, None::<String>, None::<String>));
     let submit_err = |permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
                       status: StatusCode,
@@ -325,6 +326,8 @@ async fn proxy_openai(
         }));
         let (requested_service_tier, upstream_service_tier, service_tier) =
             request_tiers.lock().clone();
+        let (requested_reasoning_effort, upstream_reasoning_effort) =
+            request_efforts.lock().clone();
         submit_with_permit(
             permit,
             TelemetryEvent {
@@ -356,6 +359,9 @@ async fn proxy_openai(
                 transport: "http",
                 parent_id: None,
                 ws_session_id: None,
+                ttft_source: None,
+                requested_reasoning_effort,
+                upstream_reasoning_effort,
                 requested_service_tier,
                 upstream_service_tier,
                 service_tier,
@@ -386,6 +392,10 @@ async fn proxy_openai(
             }
         };
 
+    request_efforts.lock().0 = serde_json::from_slice::<Value>(&body_bytes)
+        .ok()
+        .as_ref()
+        .and_then(crate::response_events::reasoning_effort);
     request_tiers.lock().0 = serde_json::from_slice::<Value>(&body_bytes)
         .ok()
         .as_ref()
@@ -723,6 +733,11 @@ async fn proxy_openai(
             out_body = encrypted_recovery.filter_known(&state.encrypted_content, out_body);
             routing_trace.lock().encrypted_content_recovery = encrypted_recovery.trace.clone();
         }
+        let upstream_reasoning_effort = serde_json::from_slice::<Value>(&out_body)
+            .ok()
+            .as_ref()
+            .and_then(crate::response_events::reasoning_effort);
+        request_efforts.lock().1 = upstream_reasoning_effort.clone();
         let upstream_service_tier = serde_json::from_slice::<Value>(&out_body)
             .ok()
             .as_ref()
@@ -1319,6 +1334,8 @@ async fn proxy_openai(
                     .min(provider_timeout(&resolved.provider, &state)),
             client_duration_ms: None,
             terminal_observed: false,
+            requested_reasoning_effort: request_efforts.lock().0.clone(),
+            upstream_reasoning_effort,
             requested_service_tier: serde_json::from_slice::<Value>(&body_bytes)
                 .ok()
                 .as_ref()
@@ -3986,12 +4003,15 @@ struct TapConfig {
     first_read_deadline: time::Instant,
     client_duration_ms: Option<i64>,
     terminal_observed: bool,
+    requested_reasoning_effort: Option<String>,
+    upstream_reasoning_effort: Option<String>,
     requested_service_tier: Option<String>,
     upstream_service_tier: Option<String>,
     service_tier: Option<String>,
 }
 
 struct TapFinalizeInputs<'a> {
+    ttft_source: Option<String>,
     first_byte_ms: Option<i64>,
     first_token_ms: Option<i64>,
     usage: &'a mut Usage,
@@ -4113,6 +4133,9 @@ impl ProxyTapBody {
             }
             if let Some(parser) = sse.as_mut() {
                 let out = parser.finish();
+                if out.saw_first_token {
+                    first_token_ms.get_or_insert_with(|| cfg.start.elapsed().as_millis() as i64);
+                }
                 if out.saw_error_event {
                     error_type = Some("upstream_stream_error".into());
                     error_message =
@@ -4158,6 +4181,10 @@ impl ProxyTapBody {
                 &mut reservation,
                 &mut false,
                 TapFinalizeInputs {
+                    ttft_source: sse
+                        .as_ref()
+                        .and_then(|p| p.observation.first_output_kind)
+                        .map(str::to_owned),
                     first_byte_ms,
                     first_token_ms,
                     usage: &mut usage,
@@ -4385,6 +4412,9 @@ fn finalize_tap(
         transport: "http",
         parent_id: None,
         ws_session_id: None,
+        ttft_source: inputs.ttft_source,
+        requested_reasoning_effort: cfg.requested_reasoning_effort.clone(),
+        upstream_reasoning_effort: cfg.upstream_reasoning_effort.clone(),
         requested_service_tier: cfg.requested_service_tier.clone(),
         upstream_service_tier: cfg.upstream_service_tier.clone(),
         service_tier: cfg.service_tier.clone(),
@@ -4710,9 +4740,9 @@ impl SseParser {
             if !self.done_first_token
                 && ((self.api_format == "chat_completions" && chat_has_output_delta(&value))
                     || (self.api_format == "responses"
-                        && event_type.is_some_and(|kind| kind.ends_with(".delta"))
-                        && responses_has_delta(&value)))
+                        && self.observation.first_output_kind.is_some()))
             {
+                self.observation.first_output_kind.get_or_insert("delta");
                 self.done_first_token = true;
                 out.saw_first_token = true;
             }
@@ -4741,12 +4771,23 @@ fn chat_has_output_delta(v: &Value) -> bool {
     let Some(choices) = v.get("choices").and_then(|c| c.as_array()) else {
         return false;
     };
-    let Some(first) = choices.first() else {
-        return false;
-    };
-    let Some(delta) = first.get("delta") else {
-        return false;
-    };
+    choices
+        .iter()
+        .any(|choice| choice.get("delta").is_some_and(chat_delta_has_output))
+}
+
+fn chat_delta_has_output(delta: &Value) -> bool {
+    if ["reasoning_content", "reasoning", "refusal"]
+        .iter()
+        .any(|key| {
+            delta
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+        })
+    {
+        return true;
+    }
     if delta
         .get("content")
         .and_then(|x| x.as_str())
@@ -4758,22 +4799,33 @@ fn chat_has_output_delta(v: &Value) -> bool {
     if delta
         .get("tool_calls")
         .and_then(|x| x.as_array())
-        .map(|a| !a.is_empty())
+        .map(|calls| {
+            calls.iter().any(|call| {
+                call.get("function").is_some_and(chat_function_has_output)
+                    || call.get("custom").is_some_and(|custom| {
+                        custom
+                            .get("input")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty())
+                    })
+            })
+        })
         .unwrap_or(false)
     {
         return true;
     }
-    if delta.get("function_call").is_some() {
-        return true;
-    }
-    false
+    delta
+        .get("function_call")
+        .is_some_and(chat_function_has_output)
 }
 
-pub(crate) fn responses_has_delta(v: &Value) -> bool {
-    v.get("delta")
-        .and_then(|x| x.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
+fn chat_function_has_output(value: &Value) -> bool {
+    ["name", "arguments"].iter().any(|field| {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    })
 }
 
 /// Revalidate an existing WebSocket target without touching concurrency or request quotas.
@@ -4809,10 +4861,10 @@ mod tests {
     use super::{
         AttemptOutcome, FailureScope, OutcomeOrigin, ProtocolPlan, ProviderRoute, RouteDiagnostics,
         SchedulableProvider, SseParser, UpstreamAttemptReservation, UsageCaptureBuffer,
-        build_scheduled_attempts, build_upstream_headers, classify_failure_scope,
-        classify_failure_scope_with_body, collect_provider_routes, extract_usage_from_capture,
-        parse_chat_usage, parse_responses_usage, provider_protocol_plan,
-        responses_websocket_upgrade_required, should_retry_response_status,
+        build_scheduled_attempts, build_upstream_headers, chat_has_output_delta,
+        classify_failure_scope, classify_failure_scope_with_body, collect_provider_routes,
+        extract_usage_from_capture, parse_chat_usage, parse_responses_usage,
+        provider_protocol_plan, responses_websocket_upgrade_required, should_retry_response_status,
         upstream_path_and_query,
     };
     use crate::cache::upstream_cache::{ProviderModelState, UpstreamSnapshot};
@@ -4831,6 +4883,48 @@ mod tests {
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    #[test]
+    fn sse_ttft_handles_split_completed_output_and_unterminated_final_frame() {
+        let mut parser = SseParser::new("responses");
+        assert!(
+            !parser
+                .push_bytes(&Bytes::from_static(
+                    b"data: {\"type\":\"response.created\"}\n\n"
+                ))
+                .saw_first_token
+        );
+        let data = b"event: response.output_item.done\r\ndata: {\"item\":{\"type\":\"function_call\",\"arguments\":\"{}\"}}";
+        for chunk in data.chunks(3) {
+            assert!(
+                !parser
+                    .push_bytes(&Bytes::copy_from_slice(chunk))
+                    .saw_first_token
+            );
+        }
+        assert!(parser.finish().saw_first_token);
+        assert_eq!(parser.observation.first_output_kind, Some("output_done"));
+        assert!(!parser.finish().saw_first_token);
+    }
+
+    #[test]
+    fn chat_ttft_ignores_role_and_empty_tool_deltas_but_includes_reasoning() {
+        for delta in [
+            json!({"role":"assistant"}),
+            json!({"tool_calls":[{"index":0,"id":"call"}]}),
+            json!({"function_call":{}}),
+        ] {
+            assert!(!chat_has_output_delta(
+                &json!({"choices":[{"delta":delta}]})
+            ));
+        }
+        assert!(chat_has_output_delta(
+            &json!({"choices":[{"delta":{}},{"delta":{"reasoning_content":"think"}}]})
+        ));
+        assert!(chat_has_output_delta(
+            &json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{"}}]}}]})
+        ));
+    }
 
     #[test]
     fn responses_websocket_without_upgrade_should_return_426() {

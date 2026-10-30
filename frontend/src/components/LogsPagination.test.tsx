@@ -68,6 +68,25 @@ afterEach(() => {
 });
 
 describe("submitted server log queries", () => {
+  it("shows throughput and effort while distinguishing completed-output TTFT", async () => {
+    fetchMock.mockImplementation(async (input) =>
+      String(input).includes("console-preferences")
+        ? response({ log_visible_columns: ["model", "ttft", "output_rate", "reasoning_effort"] })
+        : response([{ ...row("metrics"), duration_ms: 20000, output_tokens: 1000,
+          reasoning_output_tokens: 800, t_first_token_ms: 1000, ttft_source: "output_done",
+          requested_reasoning_effort: "xhigh", upstream_reasoning_effort: "high" }]),
+    );
+    mount();
+    expect(await screen.findByText("50.0 tokens/s")).toBeTruthy();
+    expect(screen.getByText(/≈/)).toBeTruthy();
+    expect(screen.getByText("high")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /metrics details/ }));
+    const detail = await screen.findByRole("dialog", { name: "metrics" });
+    expect(within(detail).getByText("xhigh")).toBeTruthy();
+    expect(within(detail).getByText("high")).toBeTruthy();
+    expect(within(detail).getByText(/no earlier delta was observed/)).toBeTruthy();
+  });
+
   it("paginates on the server, submits on Enter, and resets the page for query and page size changes", async () => {
     const requests: URL[] = [];
     fetchMock.mockImplementation(async (input) => {

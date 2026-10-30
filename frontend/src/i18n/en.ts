@@ -1,4 +1,16 @@
 export const dict: Record<string, string> = {
+  "平均输出速度": "Average output speed",
+  "思考级别": "Reasoning effort",
+  "客户端思考级别": "Client reasoning effort",
+  "上游思考级别": "Upstream reasoning effort",
+  "输出 Token（已包含推理 Token）÷ 请求总耗时，包含首个输出前的等待时间。": "Output tokens (including reasoning tokens) ÷ total request duration, including the wait before the first output.",
+  "未观测到输出事件；非流式响应或历史记录可能没有此指标。": "No output event was observed; non-streaming responses and historical logs may lack this metric.",
+  "首次观测到完整输出项的时间；没有更早的增量事件，仅作为 TTFT 近似值。": "Time to the first complete output item; no earlier delta was observed, so TTFT is approximate.",
+  "仅在最终响应中观测到输出；此时间是 TTFT 的上界，不是精确的首 Token 时间。": "Output was observed only in the final response; this is an upper bound on TTFT, not an exact first-token time.",
+  "从请求开始到首次非空输出增量，包含文本、推理或工具参数。": "Time from request start to the first non-empty text, reasoning, or tool-argument delta.",
+  "历史记录未保存 TTFT 采集来源。": "This historical log has no TTFT collection source.",
+  "记录发送给上游的思考级别；未指定时不推断模型默认值。": "Records the reasoning effort sent upstream; omitted settings do not imply a model default.",
+
   "本页": "This page",
   "近 7 天": "Last 7 days",
   "近 30 天": "Last 30 days",
