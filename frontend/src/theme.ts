@@ -91,6 +91,7 @@ export const theme = createTheme({
       styleOverrides: { root: { backgroundImage: "none" } },
     },
     MuiTextField: { defaultProps: { size: "small", fullWidth: true } },
+    MuiFormControl: { defaultProps: { size: "small", variant: "outlined" } },
     MuiSelect: { defaultProps: { size: "small", variant: "outlined" } },
     MuiFormLabel: { styleOverrides: { root: { fontSize: 13 } } },
     MuiInputBase: { styleOverrides: { root: { fontSize: 13 } } },
@@ -120,6 +121,16 @@ export const theme = createTheme({
         transitionDuration: { enter: 180, exit: 120 },
         fullWidth: true,
         maxWidth: "sm",
+      },
+    },
+    MuiDialogContent: {
+      styleOverrides: {
+        root: ({ theme }) => ({
+          // Keep floating labels inside the scroll viewport below a dialog title.
+          ".MuiDialogTitle-root + &:not(.MuiDialogContent-dividers)": {
+            paddingTop: theme.spacing(2),
+          },
+        }),
       },
     },
     MuiCollapse: { defaultProps: { timeout: 150 } },

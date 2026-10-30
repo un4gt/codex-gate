@@ -10,6 +10,7 @@ import Power from "@mui/icons-material/PowerSettingsNewOutlined";
 import Globe2 from "@mui/icons-material/PublicOutlined";
 import RefreshCw from "@mui/icons-material/RefreshOutlined";
 import Send from "@mui/icons-material/SendOutlined";
+import TuneOutlined from "@mui/icons-material/TuneOutlined";
 import Chip from "@mui/material/Chip";
 import { useEffect,useMemo,useRef,useState,type FormEvent } from "react";
 import { UpstreamKeyModels } from "./UpstreamKeyModels";
@@ -1327,7 +1328,15 @@ function AccountActions(props: {
           </ListItemIcon>
           {t("刷新余量")}
         </MenuItem>
-        <MenuItem onClick={run(props.onModels)}>{t("模型限制")}</MenuItem>
+        <MenuItem onClick={run(props.onModels)}>
+          <ListItemIcon>
+            <TuneOutlined
+              sx={{ width: "0.875rem", height: "0.875rem" }}
+              aria-hidden="true"
+            />
+          </ListItemIcon>
+          {t("模型限制")}
+        </MenuItem>
         <MenuItem onClick={run(props.onRelogin)}>
           <ListItemIcon>
             <LogIn

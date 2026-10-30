@@ -1,3 +1,4 @@
+import { useId } from "react";
 import Plus from "@mui/icons-material/AddOutlined";
 import Sparkles from "@mui/icons-material/AutoAwesomeOutlined";
 import Braces from "@mui/icons-material/DataObjectOutlined";
@@ -11,7 +12,7 @@ import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import FormControl from "@mui/material/FormControl";
 import FormHelperText from "@mui/material/FormHelperText";
-import FormLabel from "@mui/material/FormLabel";
+import InputLabel from "@mui/material/InputLabel";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import TextField from "@mui/material/TextField";
@@ -52,6 +53,7 @@ export function RequestOverridesEditor({
   onChange,
   disabled = false,
 }: RequestOverridesEditorProps) {
+  const formId = useId();
   const { t } = useI18n();
   const ruleCount = value.headers.length + value.body.length;
 
@@ -79,6 +81,8 @@ export function RequestOverridesEditor({
   return (
     <Box
       sx={{
+        minWidth: 0,
+        containerType: "inline-size",
         borderStyle: "solid",
         borderWidth: "1px",
         borderColor:
@@ -98,7 +102,7 @@ export function RequestOverridesEditor({
           borderColor:
             "color-mix(in oklab, var(--mui-palette-divider) 40%, transparent)",
           padding: "1rem",
-          "@media (width >= 64rem)": {
+          "@container (min-width: 64rem)": {
             flexDirection: "row",
             alignItems: "flex-start",
             justifyContent: "space-between",
@@ -289,15 +293,23 @@ export function RequestOverridesEditor({
                   backgroundColor:
                     "color-mix(in oklab, var(--mui-palette-background-default) 70%, transparent)",
                   padding: "0.75rem",
-                  "@media (width >= 80rem)": {
+                  gridTemplateColumns: "minmax(0, 1fr)",
+                  "@container (min-width: 32rem)": {
+                    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                  },
+                  "@container (min-width: 64rem)": {
                     gridTemplateColumns:
                       "8rem 8rem minmax(10rem,0.8fr) minmax(14rem,1fr) 2.5rem",
                   },
                 }}
               >
                 <FormControl size="small">
-                  <FormLabel>{t("作用域")}</FormLabel>
+                  <InputLabel id={`${formId}-header-scope-${rule.id}`}>
+                    {t("作用域")}
+                  </InputLabel>
                   <Select
+                    labelId={`${formId}-header-scope-${rule.id}`}
+                    label={t("作用域")}
                     value={rule.scope}
                     disabled={disabled}
                     inputProps={{
@@ -319,8 +331,12 @@ export function RequestOverridesEditor({
                   </Select>
                 </FormControl>
                 <FormControl size="small">
-                  <FormLabel>{t("操作")}</FormLabel>
+                  <InputLabel id={`${formId}-header-operation-${rule.id}`}>
+                    {t("操作")}
+                  </InputLabel>
                   <Select
+                    labelId={`${formId}-header-operation-${rule.id}`}
+                    label={t("操作")}
                     value={rule.operation}
                     disabled={disabled}
                     inputProps={{
@@ -500,15 +516,23 @@ export function RequestOverridesEditor({
                     backgroundColor:
                       "color-mix(in oklab, var(--mui-palette-background-default) 70%, transparent)",
                     padding: "0.75rem",
-                    "@media (width >= 80rem)": {
+                    gridTemplateColumns: "minmax(0, 1fr)",
+                    "@container (min-width: 32rem)": {
+                      gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                    },
+                    "@container (min-width: 64rem)": {
                       gridTemplateColumns:
                         "8rem 8rem minmax(14rem,0.9fr) minmax(16rem,1fr) 2.5rem",
                     },
                   }}
                 >
                   <FormControl size="small">
-                    <FormLabel>{t("作用域")}</FormLabel>
+                    <InputLabel id={`${formId}-body-scope-${rule.id}`}>
+                      {t("作用域")}
+                    </InputLabel>
                     <Select
+                      labelId={`${formId}-body-scope-${rule.id}`}
+                      label={t("作用域")}
                       value={rule.scope}
                       disabled={disabled}
                       inputProps={{
@@ -530,8 +554,12 @@ export function RequestOverridesEditor({
                     </Select>
                   </FormControl>
                   <FormControl size="small">
-                    <FormLabel>{t("操作")}</FormLabel>
+                    <InputLabel id={`${formId}-body-operation-${rule.id}`}>
+                      {t("操作")}
+                    </InputLabel>
                     <Select
+                      labelId={`${formId}-body-operation-${rule.id}`}
+                      label={t("操作")}
                       value={rule.operation}
                       disabled={disabled}
                       inputProps={{

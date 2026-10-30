@@ -1,7 +1,7 @@
 import { routingAvailabilityLabel } from "@/lib/routingAvailability";
 import Plus from "@mui/icons-material/AddOutlined";
 import Chip from "@mui/material/Chip";
-import { useEffect,useMemo,useRef,useState } from "react";
+import { useId, useEffect,useMemo,useRef,useState } from "react";
 
 import {
 CodexOAuthLoginDialog,
@@ -19,7 +19,7 @@ import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import FormControl from "@mui/material/FormControl";
-import FormLabel from "@mui/material/FormLabel";
+import InputLabel from "@mui/material/InputLabel";
 import LinearProgress from "@mui/material/LinearProgress";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
@@ -60,6 +60,7 @@ interface PendingLogin {
 }
 
 export function OAuthPage(props: OAuthPageProps) {
+  const formId = useId();
   const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const [creatingProvider, setCreatingProvider] = useState(false);
@@ -278,8 +279,10 @@ export function OAuthPage(props: OAuthPageProps) {
                   "@media (width >= 64rem)": { width: "20rem" },
                 }}
               >
-                <FormLabel>{t("Codex 上游")}</FormLabel>
+                <InputLabel id={`${formId}-provider`}>{t("Codex 上游")}</InputLabel>
                 <Select
+                  labelId={`${formId}-provider`}
+                  label={t("Codex 上游")}
                   value={selected.provider.id}
                   inputProps={{ "aria-label": t("Codex 上游") }}
                   onChange={(event) =>

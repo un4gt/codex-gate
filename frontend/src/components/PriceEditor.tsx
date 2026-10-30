@@ -3,7 +3,7 @@ import CloseOutlined from "@mui/icons-material/CloseOutlined";
 import Trash2 from "@mui/icons-material/DeleteOutlined";
 import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
-import { useEffect,useRef,useState,type FormEvent } from "react";
+import { useId, useEffect,useRef,useState,type FormEvent } from "react";
 
 import { createPrice,updatePrice } from "@/lib/api";
 import { formatCompactInteger } from "@/lib/format";
@@ -23,7 +23,7 @@ import Button from "@mui/material/Button";
 import CircularProgress from "@mui/material/CircularProgress";
 import FormControl from "@mui/material/FormControl";
 import FormHelperText from "@mui/material/FormHelperText";
-import FormLabel from "@mui/material/FormLabel";
+import InputLabel from "@mui/material/InputLabel";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Table from "@mui/material/Table";
@@ -231,6 +231,7 @@ function PriceFields(props: {
   onChange: (draft: PriceDraft) => void;
   onNewTier: () => TierDraft;
 }) {
+  const formId = useId();
   const { t } = useI18n();
   const updateBase = (key: keyof RateDraft, value: string) => {
     props.onChange({
@@ -268,8 +269,11 @@ function PriceFields(props: {
         }}
       >
         <FormControl>
-          <FormLabel>{t("作用范围")}</FormLabel>
+          <InputLabel id={`${formId}-provider`} shrink>{t("作用范围")}</InputLabel>
           <Select
+            labelId={`${formId}-provider`}
+            label={t("作用范围")}
+            notched
             displayEmpty
             disabled={props.disabled || props.identityReadOnly}
             inputProps={{ "aria-label": t("作用范围") }}

@@ -18,6 +18,7 @@ import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
 import {
+useId,
 useCallback,
 useEffect,
 useMemo,
@@ -41,7 +42,7 @@ import Divider from "@mui/material/Divider";
 import FormControl from "@mui/material/FormControl";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import FormHelperText from "@mui/material/FormHelperText";
-import FormLabel from "@mui/material/FormLabel";
+import InputLabel from "@mui/material/InputLabel";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Switch from "@mui/material/Switch";
@@ -2545,6 +2546,7 @@ function ChannelDialog(props: {
   onClose: () => void;
   onSubmit: (event: FormEvent) => void;
 }) {
+  const formId = useId();
   const { t } = useI18n();
   const draft = props.draft;
   const smtpUsernameChanged =
@@ -2576,9 +2578,7 @@ function ChannelDialog(props: {
           <DialogTitle id="channel-dialog-title">
             {t(draft.id === null ? "添加通知通道" : "编辑通知通道")}
           </DialogTitle>
-          <DialogContent
-            sx={{ display: "grid", gap: "1.25rem", paddingTop: "0.5rem" }}
-          >
+          <DialogContent sx={{ display: "grid", gap: 2.5 }}>
             <Box
               sx={{
                 display: "grid",
@@ -2660,8 +2660,10 @@ function ChannelDialog(props: {
                   </FormControl>
                 </Box>
                 <FormControl>
-                  <FormLabel>{t("连接安全")}</FormLabel>
+                  <InputLabel id={`${formId}-security`}>{t("连接安全")}</InputLabel>
                   <Select
+                    labelId={`${formId}-security`}
+                    label={t("连接安全")}
                     value={draft.security}
                     inputProps={{ "aria-label": t("连接安全") }}
                     onChange={(event) =>
@@ -2800,8 +2802,10 @@ function ChannelDialog(props: {
                   }}
                 >
                   <FormControl>
-                    <FormLabel>{t("消息格式")}</FormLabel>
+                    <InputLabel id={`${formId}-format`}>{t("消息格式")}</InputLabel>
                     <Select
+                      labelId={`${formId}-format`}
+                      label={t("消息格式")}
                       value={draft.webhookFormat}
                       inputProps={{ "aria-label": t("消息格式") }}
                       onChange={(event) => {
@@ -3040,6 +3044,7 @@ function RuleDialog(props: {
   onSubmit: (event: FormEvent) => void;
   onPreview: () => Promise<void>;
 }) {
+  const formId = useId();
   const { t } = useI18n();
   const draft = props.draft;
   const update = <K extends keyof RuleDraft>(key: K, value: RuleDraft[K]) => {
@@ -3070,9 +3075,7 @@ function RuleDialog(props: {
                 : "编辑通知规则",
             )}
           </DialogTitle>
-          <DialogContent
-            sx={{ display: "grid", gap: "1.25rem", paddingTop: "0.5rem" }}
-          >
+          <DialogContent sx={{ display: "grid", gap: 2.5 }}>
             {props.channels.length === 0 ? (
               <Alert severity="warning">
                 {t("请先创建至少一个通知通道。")}
@@ -3099,8 +3102,10 @@ function RuleDialog(props: {
                 />
               </FormControl>
               <FormControl>
-                <FormLabel>{t("通知语言")}</FormLabel>
+                <InputLabel id={`${formId}-locale`}>{t("通知语言")}</InputLabel>
                 <Select
+                  labelId={`${formId}-locale`}
+                  label={t("通知语言")}
                   value={draft.locale}
                   inputProps={{ "aria-label": t("通知语言") }}
                   onChange={(event) =>
@@ -3113,8 +3118,10 @@ function RuleDialog(props: {
               </FormControl>
             </Box>
             <FormControl>
-              <FormLabel>{t("投递通道")}</FormLabel>
+              <InputLabel id={`${formId}-channels`}>{t("投递通道")}</InputLabel>
               <Select
+                labelId={`${formId}-channels`}
+                label={t("投递通道")}
                 multiple
                 value={draft.channelIds}
                 inputProps={{ "aria-label": t("投递通道") }}
@@ -3207,45 +3214,37 @@ function RuleDialog(props: {
                     />
                     <FormHelperText>{t("范围 5–100")}</FormHelperText>
                   </FormControl>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "flex-end",
-                      gap: "0.5rem",
-                    }}
+                  <Button
+                    type="button"
+                    variant="outlined"
+                    sx={{ alignSelf: "start" }}
+                    onClick={() => void props.onPreview()}
                   >
-                    <Button
-                      type="button"
-                      variant="outlined"
-                      onClick={() => void props.onPreview()}
+                    <CalendarClock
+                      sx={{
+                        marginRight: "0.375rem",
+                        width: "0.875rem",
+                        height: "0.875rem",
+                      }}
+                    />
+                    {t("预览未来执行时间")}
+                  </Button>
+                  {props.preview.length > 0 ? (
+                    <Box
+                      sx={{
+                        display: "grid",
+                        gridColumn: "1 / -1",
+                        gap: 0.5,
+                        typography: "caption",
+                        color: "text.secondary",
+                      }}
+                      aria-live="polite"
                     >
-                      <CalendarClock
-                        sx={{
-                          marginRight: "0.375rem",
-                          width: "0.875rem",
-                          height: "0.875rem",
-                        }}
-                      />
-                      {t("预览未来执行时间")}
-                    </Button>
-                    {props.preview.length > 0 ? (
-                      <Box
-                        sx={{
-                          display: "grid",
-                          gap: "0.25rem",
-                          fontSize: "0.75rem",
-                          lineHeight: "calc(1 / 0.75)",
-                          color: "var(--mui-palette-text-secondary)",
-                        }}
-                        aria-live="polite"
-                      >
-                        {props.preview.map((value) => (
-                          <Box key={value}>{formatDateTime(value)}</Box>
-                        ))}
-                      </Box>
-                    ) : null}
-                  </Box>
+                      {props.preview.map((value) => (
+                        <Box key={value}>{formatDateTime(value)}</Box>
+                      ))}
+                    </Box>
+                  ) : null}
                 </Box>
               </>
             ) : (
@@ -3260,8 +3259,10 @@ function RuleDialog(props: {
                   }}
                 >
                   <FormControl>
-                    <FormLabel>{t("指标")}</FormLabel>
+                    <InputLabel id={`${formId}-metric`}>{t("指标")}</InputLabel>
                     <Select
+                      labelId={`${formId}-metric`}
+                      label={t("指标")}
                       value={draft.metric}
                       inputProps={{ "aria-label": t("指标") }}
                       onChange={(event) => {
@@ -3287,8 +3288,10 @@ function RuleDialog(props: {
                     </Select>
                   </FormControl>
                   <FormControl>
-                    <FormLabel>{t("运算符")}</FormLabel>
+                    <InputLabel id={`${formId}-operator`}>{t("运算符")}</InputLabel>
                     <Select
+                      labelId={`${formId}-operator`}
+                      label={t("运算符")}
                       value={draft.operator}
                       inputProps={{ "aria-label": t("运算符") }}
                       onChange={(event) =>
@@ -3329,8 +3332,10 @@ function RuleDialog(props: {
                   }}
                 >
                   <FormControl>
-                    <FormLabel>{t("统计范围")}</FormLabel>
+                    <InputLabel id={`${formId}-scope`}>{t("统计范围")}</InputLabel>
                     <Select
+                      labelId={`${formId}-scope`}
+                      label={t("统计范围")}
                       value={draft.scopeKind}
                       inputProps={{ "aria-label": t("统计范围") }}
                       disabled={
@@ -3356,8 +3361,10 @@ function RuleDialog(props: {
                   </FormControl>
                   {draft.scopeKind !== "global" ? (
                     <FormControl>
-                      <FormLabel>{t("范围对象")}</FormLabel>
+                      <InputLabel id={`${formId}-scope-object`}>{t("范围对象")}</InputLabel>
                       <Select
+                        labelId={`${formId}-scope-object`}
+                        label={t("范围对象")}
                         value={draft.scopeId}
                         inputProps={{ "aria-label": t("范围对象") }}
                         onChange={(event) =>

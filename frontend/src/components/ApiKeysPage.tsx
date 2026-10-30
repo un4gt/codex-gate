@@ -13,7 +13,7 @@ import Drawer from "@mui/material/Drawer";
 import Grid from "@mui/material/Grid";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
-import { useState,type FormEvent } from "react";
+import { useId, useState,type FormEvent } from "react";
 
 import { useI18n } from "@/lib/i18n";
 import Alert from "@mui/material/Alert";
@@ -24,7 +24,7 @@ import CardContent from "@mui/material/CardContent";
 import Checkbox from "@mui/material/Checkbox";
 import FormControl from "@mui/material/FormControl";
 import FormHelperText from "@mui/material/FormHelperText";
-import FormLabel from "@mui/material/FormLabel";
+import InputLabel from "@mui/material/InputLabel";
 import ListItemText from "@mui/material/ListItemText";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
@@ -93,6 +93,7 @@ function keyStatus(item: ApiKeyWorkspace) {
   };
 }
 export function ApiKeysPage(props: ApiKeysPageProps) {
+  const formId = useId();
   const { t } = useI18n();
   const [removeItem, setRemoveItem] = useState<ApiKeyWorkspace | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -549,13 +550,18 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   label={t("到期时间")}
                   name="expires_at"
                   type="datetime-local"
+                  slotProps={{ inputLabel: { shrink: true } }}
                 />
                 <FormHelperText>{t("留空表示不过期。")}</FormHelperText>
               </FormControl>
               <Box>
                 <FormControl fullWidth>
-                  <FormLabel>{t("允许使用的上游")}</FormLabel>
+                  <InputLabel id={`${formId}-create-providers`}>
+                    {t("允许使用的上游")}
+                  </InputLabel>
                   <Select
+                    labelId={`${formId}-create-providers`}
+                    label={t("允许使用的上游")}
                     multiple
                     value={createGroupIds}
                     onChange={(event) => {
@@ -930,6 +936,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                             label={t("到期时间")}
                             name="expires_at"
                             type="datetime-local"
+                            slotProps={{ inputLabel: { shrink: true } }}
                             defaultValue={formatDateTimeLocalInput(
                               data.apiKey.expires_at_ms,
                             )}
@@ -937,8 +944,12 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                         </FormControl>
                         <Box>
                           <FormControl fullWidth>
-                            <FormLabel>{t("允许使用的上游")}</FormLabel>
+                            <InputLabel id={`${formId}-edit-providers`}>
+                              {t("允许使用的上游")}
+                            </InputLabel>
                             <Select
+                              labelId={`${formId}-edit-providers`}
+                              label={t("允许使用的上游")}
                               multiple
                               value={editGroupIds}
                               onChange={(event) => {
