@@ -724,10 +724,8 @@ fn parse_relative_duration_ms(value: &str) -> Option<i64> {
         (number, 1_000.0)
     } else if let Some(number) = value.strip_suffix('m') {
         (number, 60_000.0)
-    } else if let Some(number) = value.strip_suffix('h') {
-        (number, 3_600_000.0)
     } else {
-        return None;
+        (value.strip_suffix('h')?, 3_600_000.0)
     };
     let parsed = number.trim().parse::<f64>().ok()?;
     if !parsed.is_finite() || parsed < 0.0 {
