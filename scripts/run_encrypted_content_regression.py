@@ -7,6 +7,7 @@ synthetic. No real OAuth login, token refresh or OpenAI request is needed.
 """
 import argparse
 import base64
+from contextlib import closing
 import hashlib
 import http.client
 import json
@@ -100,10 +101,11 @@ class Mock(BaseHTTPRequestHandler):
         self.note(payload, 'http')
         if '/fail-' in self.path:
             return self.respond(503, {'error': {'message': 'synthetic outage'}})
-        if payload.get('test_case') in ('sse', 'always_sse', 'late', 'error_event'):
+        if payload.get('test_case') in ('sse', 'sse_missing_type', 'always_sse', 'late', 'error_event'):
             # Split UTF-8/JSON across HTTP chunks to exercise incremental parsing.
             self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
+            if payload.get('test_case') != 'sse_missing_type':
+                self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Transfer-Encoding', 'chunked')
             self.end_headers()
             for event in self.events(payload):
@@ -274,14 +276,14 @@ class Regression:
         self.setting(True)
         self.passed('disable immediately bypasses both recovery and cached filtering')
 
-        for case in ('other', 'usage', 'always', 'sse', 'always_sse', 'error_event', 'late'):
+        for case in ('other', 'usage', 'always', 'sse', 'sse_missing_type', 'always_sse', 'error_event', 'late'):
             body = self.payload('normal', 'http-' + case, case)
-            body['stream'] = case in ('sse', 'always_sse', 'error_event', 'late')
+            body['stream'] = case in ('sse', 'sse_missing_type', 'always_sse', 'error_event', 'late')
             start = len(Mock.hits)
             status, raw = self.call(body)
-            expected = 2 if case in ('always', 'always_sse', 'sse', 'error_event') else 1
+            expected = 2 if case in ('always', 'always_sse', 'sse', 'sse_missing_type', 'error_event') else 1
             assert len(Mock.hits) - start == expected, (case, Mock.hits[start:])
-            if case in ('sse', 'error_event'):
+            if case in ('sse', 'sse_missing_type', 'error_event'):
                 assert status == 200 and b'response.completed' in raw and b'invalid_encrypted_content' not in raw
             elif case == 'late':
                 assert b'new-tool' in raw and b'invalid_encrypted_content' in raw
@@ -390,7 +392,7 @@ class Regression:
         envelope = json.dumps({'refresh_token': 'offline-refresh', 'id_token': '',
                                'account_id': 'offline-account', 'email': 'test@example.invalid'})
         carrier = self.api('POST', f'/providers/{provider_id}/keys', {'name': 'envelope', 'secret': envelope})['id']
-        with sqlite3.connect(self.database) as conn:
+        with closing(sqlite3.connect(self.database)) as conn, conn:
             encrypted = conn.execute('SELECT secret_enc FROM upstream_keys WHERE id=?', (carrier,)).fetchone()[0]
             now = int(time.time() * 1000)
             conn.execute('INSERT INTO codex_oauth_accounts '
@@ -403,7 +405,7 @@ class Regression:
     def check_logs(self):
         deadline = time.monotonic() + 10
         while True:
-            with sqlite3.connect(self.database) as conn:
+            with closing(sqlite3.connect(self.database)) as conn:
                 rows = conn.execute('SELECT transport, routing_trace_json FROM request_logs WHERE routing_trace_json IS NOT NULL').fetchall()
             recovered = [(transport, json.loads(raw)) for transport, raw in rows
                          if json.loads(raw).get('encrypted_content_recovery', {}).get('retries') == 1]

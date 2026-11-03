@@ -2330,7 +2330,10 @@ where
         }
     };
 
-    let t_stream_ms = Some(turn_start.elapsed().as_millis() as i64);
+    let t_stream_ms = Some(proxy::upstream_response_elapsed_ms(
+        &upstream_resp,
+        turn_start,
+    ));
     let status = upstream_resp.status();
     let status_i32 = status.as_u16() as i32;
     ctx.state.quota.observe_response(

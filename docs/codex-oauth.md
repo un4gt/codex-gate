@@ -166,6 +166,8 @@ python scripts/run_codex_catalog_regression.py --codex /path/to/native/codex
 
 - **TTFT** 从网关收到请求（WS 为当前回合开始）计时，包含路由和重试等待。支持非空文本、推理、工具参数增量及完整输出事件；不会用 `response.created`、心跳、纯用量或错误事件填充。HTTP/SSE、原生 WS、WS 转 HTTP 使用相同 Responses 事件判定；SSE 在 EOF 才完成的最后一个事件也会参与统计。非流式 JSON 不伪造首 Token 时间；OAuth 在上游强制 SSE 时仍可记录上游输出的观测时间。
 - `ttft_source=delta` 表示首个有效增量；`output_done` 表示首次看到完整输出项；`response_done` 表示只在最终响应中看到输出。后两种在界面显示 `≈` 并说明是近似值或上界。未收到有效输出则保持空值；历史日志不补造时间。
+- TTFT 是网关观测耗时，包含网关到上游的传输、排队及生成等待；仅靠接收时间无法拆出本次网络抖动，不能用 ping/RTT 估值直接扣除。客户端到网关的额外等待也不由这个指标完整反映。
+- 上游流式请求成功但漏写/误写 `Content-Type` 时，会在原请求超时内检查最多 64 字节的正文前缀识别 SSE，保留原始帧并补齐下游流类型。支持 MIME 大小写、分片字段和心跳前缀，普通 JSON 保持 JSON 路径；响应头到达时间独立记录，不被预读等待覆盖。流式客户端继续逐段接收，只有明确的非流式请求（包括 OAuth 强制上游流式后的转换）才聚合成 JSON。
 - **平均输出速度**（`tokens/s`）为 `output_tokens × 1000 / duration_ms`，包含首个输出前的等待时间。输出已包含推理 Token，不再重复加算，也不包含输入或缓存 Token。缺失用量、无效耗时、失败/断连请求及 WS 会话汇总不计算；成功请求实测零输出显示 `0.0`。它不是扣除 TTFT 后的解码速度，也不等同于客户端整轮（含本地工具执行）的吞吐率。
 - **思考级别**分别记录 `requested_reasoning_effort`（客户端原始值）和 `upstream_reasoning_effort`（协议转换、OAuth 规范化及 Provider 参数覆盖后发往上游的值）。支持 Responses `reasoning.effort` 和 Chat Completions `reasoning_effort`；缺省保持空值，不由模型名称、推理 Token 或目录默认值推断。表格展示发往上游的值，详情可对照客户端值；这不代表上游已回报实际执行档位。
 - 日志模型列附带思考级别、耗时列附带平均速度；列设置新增“思考级别”和“平均输出速度”，保留既有列选择顺序。详情展示 TTFT 来源和两份思考级别。SQLite/PostgreSQL 启动迁移新增三个可空文本字段，日志 API 和归档均保留；旧记录仍为空，旧后端缺字段时界面可正常显示。
@@ -174,9 +176,10 @@ python scripts/run_codex_catalog_regression.py --codex /path/to/native/codex
 
 - [CLIProxyAPI Responses TTFT 判定](https://github.com/router-for-me/CLIProxyAPI/blob/1f917e77c4562623aa49e9804d999524151a2f96/internal/runtime/executor/helps/responses_ttft_helpers.go)：覆盖完整输出项和工具参数完成。本项目没有采用其无输出终态/错误事件也可触发 TTFT 的兜底规则。
 - [Sub2API TTFT 模式](https://github.com/Wei-Shaw/sub2api/blob/ba81c7fd758e425d67f856d601147ef0c5263d3f/backend/internal/service/openai_gateway_passthrough.go)有语义事件及可见输出两种口径；[平均输出速率](https://github.com/Wei-Shaw/sub2api/blob/ba81c7fd758e425d67f856d601147ef0c5263d3f/frontend/src/utils/latencyHealth.ts)使用总耗时。本项目明确标注自身口径，不能假定三个项目数值完全一致。
+- 再次核对 [Sub2API `d851a38` 流式计时](https://github.com/Wei-Shaw/sub2api/blob/d851a38477597157e78450d30af2d8504764d085/backend/internal/service/openai_gateway_passthrough.go)：按首个符合所选模式的事件接收时间计时，未扣除网络抖动；[请求思考级别](https://github.com/Wei-Shaw/sub2api/blob/d851a38477597157e78450d30af2d8504764d085/backend/internal/service/openai_gateway_request_body.go)与[响应服务档位](https://github.com/Wei-Shaw/sub2api/blob/d851a38477597157e78450d30af2d8504764d085/backend/internal/service/upstream_response_model.go)分别提取。本项目继续只记录显式思考参数，不采用模型后缀推断。
 - 核对官方 Codex `rust-v0.163.0` 和 [`main@b6a4378` 的 status line](https://github.com/openai/codex/blob/b6a4378862f89683a8a19cbfd253f6f4f972c40a/codex-rs/tui/src/bottom_pane/status_line_setup.rs)，有累计输入/输出 Token、上下文及思考级别，但这两个版本没有 tokens/s 项或相应 status line 公式。此处速率不宣称复用官方 Codex status line 算法。
 
-离线回归：`python scripts/run_log_metrics_regression.py --binary /path/to/backend`。使用临时数据库和合成上游，覆盖 API Key/OAuth × HTTP/SSE/原生 WS/HTTP 桥接、完整输出/增量/无输出、SSE 分片与 EOF、参数覆盖和连续回合；不会读取真实账号或请求内容。
+离线回归：`python scripts/run_log_metrics_regression.py --binary /path/to/backend`。使用临时数据库和合成上游，覆盖 API Key/OAuth × HTTP/SSE/原生 WS/HTTP 桥接、完整输出/增量/无输出、SSE 分片与 EOF、缺失/错误响应头、普通 JSON、首增量先于终态交付、返回档位更新、参数覆盖和连续回合；不会读取真实账号或请求内容。
 
 ## 与 CLI `/login` 的边界
 
@@ -311,6 +314,8 @@ OAuth 请求中的 `service_tier: "fast"` 和 `"priority"` 均转换为 `"priori
 | `service_tier` | 上游实际返回的档位 |
 
 返回 `fast` 或 `priority` 显示 **Fast**，返回 `default` 显示 **Standard**，其他返回值原样显示。未返回实际档位时显示“未确认”。[OpenAI Fast mode 文档](https://developers.openai.com/api/docs/guides/fast-mode#rate-limits-and-ramp-rate)明确说明，Fast 请求可能降至 Standard 并返回 `service_tier: "default"`，所以不能用请求档位代替实际档位。
+
+`service_tier` 从响应根节点或 SSE 的 `response.service_tier` 提取，后续事件可更新初始值（例如 `auto` → `default`）。它表示上游报告的服务档位，与 `reasoning.effort` 的 `high`/`xhigh` 思考级别无关，不应互相填充，也不能据此独立证明上游内部实际执行策略。
 
 SQLite 和 PostgreSQL 启动时幂等添加这些字段，历史行保持空值。默认日志布局增加“服务档位”，已经保存的自定义列及列顺序保持不变，日志详情始终展示三个字段。本次仅记录档位，不引入差异化计费规则。没有原始响应的历史请求保持原用量状态，不追溯推算。
 
