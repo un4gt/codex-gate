@@ -261,7 +261,7 @@ function ModelInventory(props: InventoryProps) {
     useState<ProviderModelInventory | null>(null);
   const search = params.get("q") ?? "";
   const providerId = params.get("provider_id") ?? "";
-  const protocol = ["chat_completions", "responses"].includes(
+  const protocol = ["chat_completions", "responses", "messages"].includes(
     params.get("protocol") ?? "",
   )
     ? params.get("protocol")!
@@ -301,7 +301,7 @@ function ModelInventory(props: InventoryProps) {
           if (
             protocol &&
             !model.native_api_formats.includes(
-              protocol as "chat_completions" | "responses",
+              protocol as "chat_completions" | "responses" | "messages",
             )
           )
             return false;
@@ -315,10 +315,11 @@ function ModelInventory(props: InventoryProps) {
             model.provider_type !== "openai_compatible"
           )
             return false;
-          if (conversion === "enabled" && !model.responses_via_chat_enabled)
-            return false;
-          if (conversion === "disabled" && model.responses_via_chat_enabled)
-            return false;
+          const conversionEnabled =
+            model.responses_via_chat_enabled ||
+            model.messages_via_chat_enabled;
+          if (conversion === "enabled" && !conversionEnabled) return false;
+          if (conversion === "disabled" && conversionEnabled) return false;
           return true;
         }),
       ),
@@ -452,6 +453,7 @@ function ModelInventory(props: InventoryProps) {
                   <MenuItem value="">{t("全部原生协议")}</MenuItem>
                   <MenuItem value="chat_completions">Chat Completions</MenuItem>
                   <MenuItem value="responses">Responses</MenuItem>
+                  <MenuItem value="messages">Messages</MenuItem>
                 </Select>
                 <Select
                   displayEmpty
@@ -587,7 +589,13 @@ function ModelInventory(props: InventoryProps) {
                           <Chip
                             key={format}
                             variant="filled"
-                            label={format === "responses" ? "Responses" : "Chat"}
+                            label={
+                              format === "responses"
+                                ? "Responses"
+                                : format === "messages"
+                                  ? "Messages"
+                                  : "Chat"
+                            }
                             sx={{
                               height: 18,
                               borderRadius: "4px",
@@ -889,7 +897,9 @@ function ModelInventory(props: InventoryProps) {
                             label={
                               format === "responses"
                                 ? "Responses"
-                                : "Chat Completions"
+                                : format === "messages"
+                                  ? "Messages"
+                                  : "Chat Completions"
                             }
                           />
                         ))}
@@ -940,49 +950,81 @@ function ModelInventory(props: InventoryProps) {
                           }
                           label={t("在此上游启用")}
                         />
-                        <FormControlLabel
-                          control={
-                            <Checkbox
-                              checked={model.responses_via_chat_enabled}
-                              disabled={
-                                busy ||
-                                model.provider_type !== "openai_compatible" ||
-                                !model.available
+                        {model.provider_type === "openai_compatible" ? (
+                          <>
+                            <FormControlLabel
+                              control={
+                                <Checkbox
+                                  checked={model.responses_via_chat_enabled}
+                                  disabled={busy || !model.available}
+                                  slotProps={{
+                                    input: {
+                                      "aria-label": t(
+                                        "切换 {{model}} 的 Responses 转协议",
+                                        { model: model.upstream_model },
+                                      ),
+                                    },
+                                  }}
+                                  onChange={(_, enabled) =>
+                                    void run(
+                                      () =>
+                                        updateProviderModel(
+                                          props.settings,
+                                          model.id,
+                                          {
+                                            responses_via_chat_enabled: enabled,
+                                          },
+                                        ),
+                                      props.inventory.reload,
+                                      enabled
+                                        ? "已开启 Chat → Responses 转协议。"
+                                        : "已关闭 Chat → Responses 转协议。",
+                                    )
+                                  }
+                                />
                               }
-                              slotProps={{
-                                input: {
-                                  "aria-label": t(
-                                    "切换 {{model}} 的 Responses 转协议",
-                                    { model: model.upstream_model },
-                                  ),
-                                },
-                              }}
-                              onChange={(_, enabled) =>
-                                void run(
-                                  () =>
-                                    updateProviderModel(
-                                      props.settings,
-                                      model.id,
-                                      { responses_via_chat_enabled: enabled },
-                                    ),
-                                  props.inventory.reload,
-                                  enabled
-                                    ? "已开启 Responses 转协议。"
-                                    : "已关闭 Responses 转协议。",
-                                )
-                              }
+                              label="Chat → Responses"
                             />
-                          }
-                          label={
-                            model.provider_type === "openai_compatible"
-                              ? "Chat → Responses"
-                              : t(
-                                  model.native_api_formats.includes("responses")
-                                    ? "原生 Responses"
-                                    : "不支持",
-                                )
-                          }
-                        />
+                            <FormControlLabel
+                              control={
+                                <Checkbox
+                                  checked={model.messages_via_chat_enabled}
+                                  disabled={busy || !model.available}
+                                  slotProps={{
+                                    input: {
+                                      "aria-label": t(
+                                        "切换 {{model}} 的 Messages 转协议",
+                                        { model: model.upstream_model },
+                                      ),
+                                    },
+                                  }}
+                                  onChange={(_, enabled) =>
+                                    void run(
+                                      () =>
+                                        updateProviderModel(
+                                          props.settings,
+                                          model.id,
+                                          {
+                                            messages_via_chat_enabled: enabled,
+                                          },
+                                        ),
+                                      props.inventory.reload,
+                                      enabled
+                                        ? "已开启 Chat → Messages 转协议。"
+                                        : "已关闭 Chat → Messages 转协议。",
+                                    )
+                                  }
+                                />
+                              }
+                              label="Chat → Messages"
+                            />
+                          </>
+                        ) : model.native_api_formats.includes("responses") ? (
+                          <FormControlLabel
+                            control={<Checkbox checked disabled />}
+                            label={t("原生 Responses")}
+                          />
+                        ) : null}
                         <Button
                           color="error"
                           disabled={busy}

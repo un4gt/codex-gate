@@ -114,6 +114,7 @@ pub struct ProviderModel {
     pub enabled: bool,
     pub available: bool,
     pub responses_via_chat_enabled: bool,
+    pub messages_via_chat_enabled: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -180,6 +181,7 @@ pub struct Usage {
 pub enum ApiFormat {
     ChatCompletions,
     Responses,
+    AnthropicMessages,
 }
 
 #[derive(Clone, Debug, Serialize)]

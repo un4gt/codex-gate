@@ -124,6 +124,7 @@ export function formatModelName(value: string | null | undefined): string {
 export const REQUEST_TYPE_OPTIONS = [
   { value: "chat_completions", endpoint: "v1/chat/completions" },
   { value: "responses", endpoint: "v1/responses" },
+  { value: "messages", endpoint: "v1/messages" },
 ] as const;
 
 const requestTypeEndpointMap = new Map<string, string>(

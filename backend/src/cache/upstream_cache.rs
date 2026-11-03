@@ -208,6 +208,7 @@ pub struct ProviderModelState {
     pub enabled: bool,
     pub available: bool,
     pub responses_via_chat_enabled: bool,
+    pub messages_via_chat_enabled: bool,
 }
 
 impl ProviderModelState {
@@ -380,6 +381,7 @@ impl UpstreamCache {
                         enabled: model.enabled,
                         available: model.available,
                         responses_via_chat_enabled: model.responses_via_chat_enabled,
+                        messages_via_chat_enabled: model.messages_via_chat_enabled,
                     },
                 );
 
@@ -580,6 +582,7 @@ mod tests {
             enabled: true,
             available: true,
             responses_via_chat_enabled,
+            messages_via_chat_enabled: false,
         }
     }
 

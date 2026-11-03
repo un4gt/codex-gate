@@ -272,20 +272,32 @@ bash scripts/run-prek-checks.sh pre-push
 
 ### 上游 API Base URL
 
-管理台中的服务地址表示完整的 API Base URL。网关会在这个前缀后追加 `/models`、`/chat/completions` 或 `/responses`：
+管理台中的服务地址表示完整的 API Base URL。网关会在这个前缀后追加 `/models`、`/chat/completions`、`/responses` 或 `/messages`：
 
-| 配置值 | 模型列表地址 | Chat Completions 地址 |
-| --- | --- | --- |
-| `https://api.openai.com` | `https://api.openai.com/v1/models` | `https://api.openai.com/v1/chat/completions` |
-| `https://api.openai.com/v1` | `https://api.openai.com/v1/models` | `https://api.openai.com/v1/chat/completions` |
-| `https://gateway.example.com/openai/v2` | `https://gateway.example.com/openai/v2/models` | `https://gateway.example.com/openai/v2/chat/completions` |
-| `https://ark.cn-beijing.volces.com/api/coding/v3` | `https://ark.cn-beijing.volces.com/api/coding/v3/models` | `https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions` |
+| 配置值 | 模型列表地址 | Chat Completions 地址 | Messages 地址 |
+| --- | --- | --- | --- |
+| `https://api.openai.com` | `https://api.openai.com/v1/models` | `https://api.openai.com/v1/chat/completions` | `https://api.openai.com/v1/messages` |
+| `https://api.openai.com/v1` | `https://api.openai.com/v1/models` | `https://api.openai.com/v1/chat/completions` | `https://api.openai.com/v1/messages` |
+| `https://gateway.example.com/openai/v2` | `https://gateway.example.com/openai/v2/models` | `https://gateway.example.com/openai/v2/chat/completions` | `https://gateway.example.com/openai/v2/messages` |
+| `https://ark.cn-beijing.volces.com/api/coding/v3` | `https://ark.cn-beijing.volces.com/api/coding/v3/models` | `https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions` | `https://ark.cn-beijing.volces.com/api/coding/v3/messages` |
 
 只有裸域名会为了兼容自动补 `/v1`；只要配置值已有路径，网关就会完整保留该路径。Base URL 不接受查询参数，模型同步固定请求 API Base URL 下的纯 `/models`。
 
+Anthropic 上游只有一个 Provider 类型 `anthropic`，且上游鉴权固定使用 `x-api-key`。网关客户端入站仍接受 `x-api-key` 或 `Authorization: Bearer`（Claude Code 的 `ANTHROPIC_AUTH_TOKEN` 走后者），两者是不同层次。网关支持原生 `/v1/messages`、原生 `/v1/messages/count_tokens` 透传，以及 `openai_compatible` 模型的 Chat → Messages 转换。`anthropic-version` / `anthropic-beta` 会透传，缺失版本时补 `2023-06-01`。
+
+`Chat → Messages` 的含义与 `Chat → Responses` 一致：上游是 Chat Completions，本地客户端用 `/v1/messages`。在模型详情中勾选 `Chat → Messages` 后，Claude / Anthropic SDK 才能通过该 `openai_compatible` 模型使用 `/v1/messages`。
+
+Prompt cache 的关键规则：
+
+- 原生 Messages 请求不改写请求体，客户端 `system` / `tools` / 消息断点原样保留。
+- Chat → Messages 保留客户端 `cache_control` 到对应的 OpenAI content part / tool，不额外合成断点；Chat 上游通常使用自动前缀缓存。
+- 中途 system/developer 消息保留在消息原位，不提升到顶层，避免追加 reminder 时改变前缀。
+- 转换不注入时间戳、随机 ID 或每轮变化的内容；同一 Messages 历史重复转换得到相同的 Chat 消息顺序和工具顺序。
+- OpenAI usage 的 `prompt_tokens` 会拆成 Anthropic 的未缓存输入与 cache read/write，避免重复计量。
+
 ### Provider 请求覆写
 
-新建 Provider 的可选高级区和 Provider 详情页都提供“请求覆写”编辑器，可按 `all`、`chat_completions`、`responses` 作用域对发往该上游的 Header 和 JSON Body 执行 `set` / `remove`。Body 路径使用点路径，例如 `client_metadata.x-codex-window-id`；不存在的中间对象会自动创建。匹配具体协议的规则会在 `all` 规则之后执行，因此可用于覆盖通用值。
+新建 Provider 的可选高级区和 Provider 详情页都提供“请求覆写”编辑器，可按 `all`、`chat_completions`、`responses`、`messages` 作用域对发往该上游的 Header 和 JSON Body 执行 `set` / `remove`。Body 路径使用点路径，例如 `client_metadata.x-codex-window-id`；不存在的中间对象会自动创建。匹配具体协议的规则会在 `all` 规则之后执行，因此可用于覆盖通用值。
 
 覆写发生在模型改写、Responses→Chat 转换、Codex 请求规范化和 `include_usage` 注入之后，并在网关完成上游鉴权 Header 构造后执行，因此最终发送内容与管理台预览一致。HTTP Responses、Responses WebSocket 原生转发和 HTTP bridge 都会应用规则；`all` Header 规则也会用于普通兼容 Provider 的 `/models` 同步请求。
 
@@ -399,7 +411,7 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 
 模型路由先按访问密钥允许的上游、模型库存、协议能力及启停状态筛选候选，再按模型路由目标的优先级与顺序 / 加权策略选择。未单独配置的模型使用默认路由；上游全局权重和组内优先级覆盖不再参与执行。路由级 Sticky 和跨上游 Failover 默认开启；会话绑定按“访问密钥 + 会话 + 请求模型”隔离，原请求缓存标识保持不变。
 
-`GET /v1/models` 要求有效的客户端 Bearer Key，并按直接授权、模型路由、启停、库存、协议支持和 Key 模型限制过滤。临时 Endpoint 健康、quota 和 circuit 不决定模型是否出现在列表中；实际可执行性由请求时的运行状态决定。旧组授权在升级时取上游并集迁移，直接编辑允许列表后不再跟随旧组变化。
+`GET /v1/models` 要求有效的客户端 Bearer Key，并按直接授权、模型路由、启停、库存、协议支持和 Key 模型限制过滤。Anthropic 客户端携带 `anthropic-version`（或仅用 `x-api-key`）时返回 Anthropic 的 `data / has_more / first_id / last_id` 模型列表结构。临时 Endpoint 健康、quota 和 circuit 不决定模型是否出现在列表中；实际可执行性由请求时的运行状态决定。旧组授权在升级时取上游并集迁移，直接编辑允许列表后不再跟随旧组变化。
 
 网关在尚未请求上游时使用 OpenAI 风格结构化错误。常见 `error.code` 如下：
 
@@ -415,7 +427,7 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | `503` | `no_enabled_upstream_endpoint` | 没有启用的上游 Endpoint。 |
 | `503` | `all_upstreams_temporarily_unavailable` | 候选因熔断、quota、健康、并发或亲和回避而暂时不可用。 |
 
-一旦上游已经返回响应，网关不会使用上述本地错误包装它：上游状态码、正文和安全响应头直接透传；模型级 `model_not_found` 错误也不会累计 Provider 熔断。
+一旦上游已经返回响应，网关不会使用上述本地错误包装它：上游状态码、正文和安全响应头直接透传；模型级 `model_not_found` 错误也不会累计 Provider 熔断。`/v1/messages` 的网关本地错误使用 Anthropic `{"type":"error","error":{"type","message"}}` 结构。
 
 每个请求总共最多 **3 次目标尝试**，包含 HTTP、WebSocket 建连、HTTP 桥接和 OAuth 刷新后的重放。正式界面使用 `max_retries`（0–2，默认 1），原 `max_attempts` 在兼容层保留，均受这项总上限约束。第二次尝试前等待 500–750 毫秒，第三次前等待 1000–1250 毫秒；退避与首个响应共同受 `UPSTREAM_REQUEST_TIMEOUT_MS` 截止时间约束。已开始正常输出的长流继续使用原来的读取超时。
 
@@ -464,7 +476,8 @@ MOCK_PORT=19130 GW_PORT=18130 scripts/test_openai_compatible_responses.sh
 
 - **加密内容恢复（Beta）**：默认关闭，可在「设置 → 高级设置 → Beta 功能」开启。遇到 `invalid_encrypted_content` 时尝试清理加密历史并有限重试，支持 HTTP/SSE、WebSocket 及 Codex OAuth。清理加密压缩项可能丢失早期上下文，详见[恢复行为与边界](docs/encrypted-content-recovery.md)。
 - `python3 scripts/run_encrypted_content_regression.py`：使用真实网关和 Python 模拟上游验证加密内容恢复，所有测试账号及数据库均为临时数据。
-- `python3 scripts/mock_upstream.py`：本地模拟上游（支持带任意 API 前缀的 chat/responses/models）
+- `python3 scripts/run_messages_regression.py`：验证原生 `/v1/messages`、`/v1/messages/count_tokens` 与 Chat → Messages 转换、SSE、usage 和缓存断点
+- `python3 scripts/mock_upstream.py`：本地模拟上游（支持带任意 API 前缀的 chat/responses/messages/models）
 - `python3 scripts/bench_gateway.py ...`：基础并发 / 长压 / RSS 采样
 - `python3 scripts/bench_failover.py ...`：endpoint / key failover 基线
 - `python3 scripts/run_regression.py --archive-compress`：一键跑 build / 长压 / failover / archive 回归

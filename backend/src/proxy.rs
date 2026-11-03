@@ -22,8 +22,13 @@ use crate::affinity::{AffinityBinding, AffinityIdentity, extract_affinity_identi
 use crate::cache::upstream_cache::UpstreamSnapshot;
 use crate::health::RuntimeHealthAttemptGuard;
 use crate::http::{self, HttpResponse};
+use crate::messages_via_chat::{
+    ChatSseToMessages, chat_response_to_messages, messages_request_to_chat,
+};
 use crate::metrics::{FailoverKind, RequestMetric};
-use crate::openai::{OpenAiRequestInfo, ensure_include_usage, parse_request_info};
+use crate::openai::{
+    OpenAiRequestInfo, ensure_include_usage, parse_request_info, rewrite_root_string_field,
+};
 use crate::pricing::{PriceVersion, PricingEvaluation, evaluate_price};
 use crate::provider_runtime::{BreakerTransition, ProviderAttemptGuard, ProviderCapacityPermit};
 use crate::request_overrides::RequestOverrideContext;
@@ -40,6 +45,40 @@ use crate::util;
 
 const CODEX_NON_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProxyOperation {
+    Messages,
+    CountTokens,
+}
+
+fn anthropic_error_type(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        500 => "api_error",
+        503 => "overloaded_error",
+        504 => "timeout_error",
+        _ => "api_error",
+    }
+}
+
+fn proxy_error(
+    api_format: ApiFormat,
+    status: StatusCode,
+    message: impl Into<String>,
+) -> HttpResponse {
+    match api_format {
+        ApiFormat::AnthropicMessages => {
+            http::anthropic_error(status, anthropic_error_type(status), message)
+        }
+        _ => http::json_error(status, message),
+    }
+}
+
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     match (req.method(), path) {
@@ -48,10 +87,36 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
             crate::responses_ws::handle(req, state).await
         }
         (&Method::GET, "/v1/responses") => responses_websocket_upgrade_required(),
-        (&Method::POST, "/v1/chat/completions") => {
-            proxy_openai(ApiFormat::ChatCompletions, req, state).await
+        (&Method::POST, "/v1/messages") => {
+            proxy_openai(
+                ApiFormat::AnthropicMessages,
+                ProxyOperation::Messages,
+                req,
+                state,
+            )
+            .await
         }
-        (&Method::POST, "/v1/responses") => proxy_openai(ApiFormat::Responses, req, state).await,
+        (&Method::POST, "/v1/messages/count_tokens") => {
+            proxy_openai(
+                ApiFormat::AnthropicMessages,
+                ProxyOperation::CountTokens,
+                req,
+                state,
+            )
+            .await
+        }
+        (&Method::POST, "/v1/chat/completions") => {
+            proxy_openai(
+                ApiFormat::ChatCompletions,
+                ProxyOperation::Messages,
+                req,
+                state,
+            )
+            .await
+        }
+        (&Method::POST, "/v1/responses") => {
+            proxy_openai(ApiFormat::Responses, ProxyOperation::Messages, req, state).await
+        }
         _ => http::json_error(StatusCode::NOT_FOUND, "not found"),
     }
 }
@@ -70,9 +135,11 @@ fn responses_websocket_upgrade_required() -> HttpResponse {
 async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let now_ms = util::now_ms();
 
-    let Some(api_key_plaintext) = http::bearer_token(&req) else {
+    let Some(api_key_plaintext) = http::api_key_token(&req) else {
         return http::json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
+    let anthropic_client = req.headers().contains_key("anthropic-version")
+        || (req.headers().contains_key("x-api-key") && !req.headers().contains_key(AUTHORIZATION));
 
     let auth = match state
         .caches
@@ -127,30 +194,64 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
         return response;
     }
 
+    let formats: &[ApiFormat] = if anthropic_client {
+        &[ApiFormat::AnthropicMessages]
+    } else {
+        &[
+            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
+            ApiFormat::AnthropicMessages,
+        ]
+    };
     let data = snap
         .model_registry_ids
         .iter()
         .filter(|model| {
-            [ApiFormat::ChatCompletions, ApiFormat::Responses]
-                .into_iter()
-                .any(|format| {
-                    collect_provider_routes(&snap, format, model, true).is_ok_and(|(routes, _)| {
-                        routes.iter().any(|r| {
-                            r.provider.enabled
-                                && api_key.allowed_provider_ids.contains(&r.provider.id)
-                                && snap
-                                    .keys_by_provider
-                                    .get(&r.provider.id)
-                                    .is_some_and(|keys| {
-                                        keys.iter().any(|k| {
-                                            k.enabled
-                                                && key_allows_model(&snap, k.id, &r.upstream_model)
-                                        })
+            formats.iter().copied().any(|format| {
+                collect_provider_routes(&snap, format, model, true).is_ok_and(|(routes, _)| {
+                    routes.iter().any(|r| {
+                        r.provider.enabled
+                            && api_key.allowed_provider_ids.contains(&r.provider.id)
+                            && snap
+                                .keys_by_provider
+                                .get(&r.provider.id)
+                                .is_some_and(|keys| {
+                                    keys.iter().any(|k| {
+                                        k.enabled
+                                            && key_allows_model(&snap, k.id, &r.upstream_model)
                                     })
-                        })
+                                })
                     })
                 })
+            })
         })
+        .collect::<Vec<_>>();
+
+    if anthropic_client {
+        let data = data
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "type": "model",
+                    "id": id,
+                    "display_name": id,
+                    "created_at": "1970-01-01T00:00:00Z",
+                })
+            })
+            .collect::<Vec<_>>();
+        return http::json(
+            StatusCode::OK,
+            &serde_json::json!({
+                "data": data,
+                "has_more": false,
+                "first_id": data.first().and_then(|item| item.get("id")).cloned(),
+                "last_id": data.last().and_then(|item| item.get("id")).cloned(),
+            }),
+        );
+    }
+
+    let data = data
+        .into_iter()
         .map(|id| {
             serde_json::json!({
                 "id": id,
@@ -224,6 +325,7 @@ fn codex_catalog_candidates(
 
 async fn proxy_openai(
     api_format: ApiFormat,
+    operation: ProxyOperation,
     req: Request<Incoming>,
     state: SharedState,
 ) -> HttpResponse {
@@ -244,12 +346,12 @@ async fn proxy_openai(
         );
     };
 
-    let Some(api_key_plaintext) = http::bearer_token(&req) else {
+    let Some(api_key_plaintext) = http::api_key_token(&req) else {
         record_request_metric(
             Some(StatusCode::UNAUTHORIZED.as_u16() as i32),
             Some("missing_bearer_token"),
         );
-        return http::json_error(StatusCode::UNAUTHORIZED, "missing bearer token");
+        return proxy_error(api_format, StatusCode::UNAUTHORIZED, "missing bearer token");
     };
 
     let auth = match state
@@ -269,7 +371,7 @@ async fn proxy_openai(
                 Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i32),
                 Some("api_key_validate_failed"),
             );
-            return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+            return proxy_error(api_format, StatusCode::INTERNAL_SERVER_ERROR, e);
         }
     };
 
@@ -278,7 +380,7 @@ async fn proxy_openai(
             Some(StatusCode::UNAUTHORIZED.as_u16() as i32),
             Some("invalid_api_key"),
         );
-        return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
+        return proxy_error(api_format, StatusCode::UNAUTHORIZED, "invalid api key");
     };
     let routing_trace = std::sync::Arc::new(parking_lot::Mutex::new(RoutingTrace {
         attempt_limit: crate::resilience::MAX_ATTEMPTS,
@@ -337,10 +439,7 @@ async fn proxy_openai(
                 provider_id,
                 endpoint_id,
                 upstream_key_id,
-                api_format: match api_format {
-                    ApiFormat::ChatCompletions => "chat_completions",
-                    ApiFormat::Responses => "responses",
-                },
+                api_format: api_format_name(api_format),
                 upstream_api_format: None,
                 model,
                 http_status: Some(status.as_u16() as i32),
@@ -373,7 +472,7 @@ async fn proxy_openai(
     let (parts, body_bytes) =
         match http::read_body_limited(req, state.config.max_request_bytes).await {
             Ok(v) => v,
-            Err(resp) => {
+            Err(_resp) => {
                 submit_err(
                     &mut telemetry_permit,
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -388,7 +487,11 @@ async fn proxy_openai(
                     Some(StatusCode::PAYLOAD_TOO_LARGE.as_u16() as i32),
                     Some("request_too_large"),
                 );
-                return resp;
+                return proxy_error(
+                    api_format,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body too large",
+                );
             }
         };
 
@@ -416,7 +519,7 @@ async fn proxy_openai(
             Some(StatusCode::BAD_REQUEST.as_u16() as i32),
             Some("missing_model"),
         );
-        return http::json_error(StatusCode::BAD_REQUEST, "missing model");
+        return proxy_error(api_format, StatusCode::BAD_REQUEST, "missing model");
     };
 
     let request_method = parts.method.clone();
@@ -435,10 +538,7 @@ async fn proxy_openai(
             .record_affinity_lookup(existing_affinity_binding.is_some());
     }
 
-    let api_format_str = match api_format {
-        ApiFormat::ChatCompletions => "chat_completions",
-        ApiFormat::Responses => "responses",
-    };
+    let api_format_str = api_format_name(api_format);
 
     let mut plan = match build_upstream_plan(
         &state,
@@ -519,6 +619,51 @@ async fn proxy_openai(
             return route_resolution_error_response(&error, &model_name, api_format);
         }
     }
+    if operation == ProxyOperation::CountTokens {
+        let mut rejected_conversion_candidates = HashSet::new();
+        plan.attempts.retain(|attempt| {
+            if !attempt.protocol.is_messages_via_chat() {
+                return true;
+            }
+            rejected_conversion_candidates
+                .insert((attempt.provider.id, attempt.upstream_model.clone()));
+            false
+        });
+        for (provider_id, upstream_model) in rejected_conversion_candidates {
+            plan.diagnostics.reject(
+                Some(provider_id),
+                &upstream_model,
+                "protocol",
+                "count_tokens_requires_native_messages",
+                "count_tokens requires a native Anthropic Messages upstream",
+            );
+        }
+        apply_route_diagnostics(&routing_trace, &plan.diagnostics);
+        if plan.attempts.is_empty() {
+            let error = RouteResolutionError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "count_tokens_requires_native_messages",
+                "count_tokens requires a native Anthropic Messages upstream",
+                plan.diagnostics.clone(),
+            );
+            submit_err(
+                &mut telemetry_permit,
+                error.status,
+                error.code,
+                error.message.clone(),
+                None,
+                None,
+                None,
+                Some(model_name.clone()),
+            );
+            record_request_metric(
+                Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                Some("count_tokens_requires_native_messages"),
+            );
+            return route_resolution_error_response(&error, &model_name, api_format);
+        }
+    }
     routing_trace.lock().model_route = plan.route_policy.clone();
     let affinity_identity = if plan.sticky { affinity_identity } else { None };
     let affinity_binding = apply_affinity_to_plan(
@@ -594,7 +739,10 @@ async fn proxy_openai(
             state.metrics.record_provider_selection(provider_switched);
         }
         last_attempted_provider_id = Some(resolved.provider.id);
-        let (mut out_body, conversion_context) = if resolved.protocol.is_responses_via_chat() {
+        let (mut out_body, responses_conversion_context) = if resolved
+            .protocol
+            .is_responses_via_chat()
+        {
             match responses_request_to_chat(
                 &body_bytes,
                 &resolved.upstream_model,
@@ -628,10 +776,53 @@ async fn proxy_openai(
                     return http::json_error(StatusCode::BAD_REQUEST, error);
                 }
             }
+        } else if resolved.protocol.is_messages_via_chat() {
+            match messages_request_to_chat(
+                &body_bytes,
+                &resolved.upstream_model,
+                affinity_identity.as_ref(),
+            ) {
+                Ok(converted) => {
+                    routing_trace.lock().conversion = Some(serde_json::json!({
+                        "mode": "messages_via_chat",
+                        "client_api_format": "messages",
+                        "upstream_api_format": "chat_completions",
+                        "warnings": converted.context.warnings,
+                    }));
+                    (converted.body, None)
+                }
+                Err(error) => {
+                    reservation.neutral();
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_REQUEST,
+                        "messages_via_chat_request_failed",
+                        error.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                        Some("messages_via_chat_request_failed"),
+                    );
+                    return proxy_error(api_format, StatusCode::BAD_REQUEST, error);
+                }
+            }
         } else if resolved.upstream_model == model_name {
             (body_bytes.clone(), None)
         } else {
-            match rewrite_model_name(body_bytes.clone(), &resolved.upstream_model) {
+            let rewritten = if api_format == ApiFormat::AnthropicMessages {
+                rewrite_root_string_field(body_bytes.clone(), b"model", &resolved.upstream_model)
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        rewrite_model_name(body_bytes.clone(), &resolved.upstream_model)
+                    })
+            } else {
+                rewrite_model_name(body_bytes.clone(), &resolved.upstream_model)
+            };
+            match rewritten {
                 Ok(v) => (v, None),
                 Err(_) => {
                     submit_err(
@@ -648,7 +839,7 @@ async fn proxy_openai(
                         Some(StatusCode::BAD_REQUEST.as_u16() as i32),
                         Some("invalid_model"),
                     );
-                    return http::json_error(StatusCode::BAD_REQUEST, "invalid model");
+                    return proxy_error(api_format, StatusCode::BAD_REQUEST, "invalid model");
                 }
             }
         };
@@ -716,7 +907,7 @@ async fn proxy_openai(
                     Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i32),
                     Some("request_override_failed"),
                 );
-                return http::json_error(StatusCode::INTERNAL_SERVER_ERROR, message);
+                return proxy_error(api_format, StatusCode::INTERNAL_SERVER_ERROR, message);
             }
         };
 
@@ -747,8 +938,11 @@ async fn proxy_openai(
             tiers.1 = upstream_service_tier.clone();
             tiers.2 = None;
         }
-        let upstream_path_and_query =
-            upstream_path_and_query(request_path_and_query.as_ref(), resolved.protocol);
+        let upstream_path_and_query = upstream_path_and_query(
+            request_path_and_query.as_ref(),
+            resolved.protocol,
+            operation,
+        );
         let upstream_uri = match build_upstream_uri(
             &resolved.endpoint.base_url,
             upstream_path_and_query.as_ref(),
@@ -813,7 +1007,7 @@ async fn proxy_openai(
                     Some(StatusCode::BAD_REQUEST.as_u16() as i32),
                     Some("invalid_upstream_uri"),
                 );
-                return http::json_error(StatusCode::BAD_REQUEST, error);
+                return proxy_error(api_format, StatusCode::BAD_REQUEST, error);
             }
         };
 
@@ -877,7 +1071,12 @@ async fn proxy_openai(
             .map_or(resolved.key.secret.as_str(), |auth| {
                 auth.access_token.as_str()
             });
-        let mut headers = build_upstream_headers(&request_headers, out_body.len(), upstream_secret);
+        let mut headers = build_upstream_headers_for(
+            resolved.protocol,
+            &request_headers,
+            out_body.len(),
+            upstream_secret,
+        );
         if let Some(auth) = prepared_codex_auth.as_ref() {
             crate::codex_oauth::apply_codex_headers(&mut headers, auth);
         }
@@ -937,8 +1136,12 @@ async fn proxy_openai(
                 .prepare_auth(&state, resolved.key.id, true)
                 .await
         {
-            let mut retry_headers =
-                build_upstream_headers(&request_headers, out_body.len(), &refreshed.access_token);
+            let mut retry_headers = build_upstream_headers_for(
+                resolved.protocol,
+                &request_headers,
+                out_body.len(),
+                &refreshed.access_token,
+            );
             crate::codex_oauth::apply_codex_headers(&mut retry_headers, &refreshed);
             if let Err(error) = resolved.provider.request_overrides.apply_headers(
                 &mut retry_headers,
@@ -1020,8 +1223,6 @@ async fn proxy_openai(
             headers = retry_headers;
         }
 
-        let mut upstream_response =
-            upstream_response.map(|response| response.map(ReplayIncomingBody::new));
         if encrypted_recovery.enabled
             && !resolved.protocol.is_responses_via_chat()
             && let Ok(response) = &mut upstream_response
@@ -1075,8 +1276,7 @@ async fn proxy_openai(
                             .remaining()
                             .min(provider_timeout(&resolved.provider, &state)),
                     )
-                    .await
-                    .map(|response| response.map(ReplayIncomingBody::new));
+                    .await;
                 }
             }
         }
@@ -1141,12 +1341,17 @@ async fn proxy_openai(
                     Some(model_name.clone()),
                 );
                 record_request_metric(Some(status.as_u16() as i32), Some(error_type));
-                return retry_error_response(status, error_message, plan_retry_at(&state, &plan));
+                return retry_error_response(
+                    api_format,
+                    status,
+                    error_message,
+                    plan_retry_at(&state, &plan),
+                );
             }
         };
 
         let mut upstream_resp = upstream_resp;
-        let t_stream_ms = start.elapsed().as_millis() as i64;
+        let t_stream_ms = upstream_response_elapsed_ms(&upstream_resp, start);
         let status_code = upstream_resp.status();
         let status_i32 = status_code.as_u16() as i32;
         state.quota.observe_response(
@@ -1288,7 +1493,6 @@ async fn proxy_openai(
         }
 
         let (mut resp_parts, body) = upstream_resp.into_parts();
-        sanitize_hop_headers(&mut resp_parts.headers);
 
         let is_sse = resp_parts
             .headers
@@ -1342,6 +1546,7 @@ async fn proxy_openai(
                 .and_then(crate::response_events::service_tier),
             upstream_service_tier,
             service_tier: None,
+            conversion_mode: resolved.protocol.conversion_name(),
         };
         if !status_code.is_success() {
             if should_retry_response_status(status_i32) {
@@ -1467,7 +1672,7 @@ async fn proxy_openai(
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
                         Some("upstream_sse_preflight_failed"),
                     );
-                    return http::json_error(StatusCode::BAD_GATEWAY, error);
+                    return proxy_error(api_format, StatusCode::BAD_GATEWAY, error);
                 }
             }
         } else {
@@ -1476,14 +1681,14 @@ async fn proxy_openai(
 
         if resolved.protocol.is_responses_via_chat() {
             resp_parts.headers.remove(CONTENT_LENGTH);
-            let context = conversion_context.unwrap_or_default();
+            let context = responses_conversion_context.unwrap_or_default();
             if is_sse {
                 resp_parts.headers.insert(
                     CONTENT_TYPE,
                     hyper::header::HeaderValue::from_static("text/event-stream; charset=utf-8"),
                 );
                 let converted =
-                    ConvertedSseBody::new(body, context, state.config.max_request_bytes);
+                    ConvertedSseBody::responses(body, context, state.config.max_request_bytes);
                 let tap =
                     ProxyTapBody::new(converted, tap_config, telemetry_permit.take(), reservation);
                 return Response::from_parts(resp_parts, http::boxed(tap));
@@ -1545,7 +1750,8 @@ async fn proxy_openai(
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
                         Some("responses_via_chat_response_too_large"),
                     );
-                    return http::json_error(
+                    return proxy_error(
+                        api_format,
                         StatusCode::BAD_GATEWAY,
                         "converted upstream response exceeded the configured buffer",
                     );
@@ -1596,7 +1802,147 @@ async fn proxy_openai(
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
                         Some("responses_via_chat_response_failed"),
                     );
-                    return http::json_error(StatusCode::BAD_GATEWAY, error);
+                    return proxy_error(api_format, StatusCode::BAD_GATEWAY, error);
+                }
+            };
+            resp_parts.headers.insert(
+                CONTENT_TYPE,
+                hyper::header::HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            if let Ok(length) = hyper::header::HeaderValue::from_str(&converted.len().to_string()) {
+                resp_parts.headers.insert(CONTENT_LENGTH, length);
+            }
+            let tap = ProxyTapBody::new(
+                Full::new(converted),
+                tap_config,
+                telemetry_permit.take(),
+                reservation,
+            );
+            return Response::from_parts(resp_parts, http::boxed(tap));
+        }
+
+        if resolved.protocol.is_messages_via_chat() {
+            resp_parts.headers.remove(CONTENT_LENGTH);
+            if is_sse {
+                resp_parts.headers.insert(
+                    CONTENT_TYPE,
+                    hyper::header::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+                );
+                let converted = ConvertedSseBody::messages(body, state.config.max_request_bytes);
+                let tap =
+                    ProxyTapBody::new(converted, tap_config, telemetry_permit.take(), reservation);
+                return Response::from_parts(resp_parts, http::boxed(tap));
+            }
+
+            let collected = match time::timeout(
+                budget
+                    .remaining()
+                    .min(provider_timeout(&resolved.provider, &state)),
+                Limited::new(body, state.config.max_request_bytes).collect(),
+            )
+            .await
+            {
+                Ok(Ok(collected)) => collected.to_bytes(),
+                result => {
+                    let message = match result {
+                        Ok(Err(error)) => error.to_string(),
+                        _ => "upstream response deadline exceeded".into(),
+                    };
+                    reservation.finish(
+                        AttemptOutcome::local_provider(
+                            Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                            "messages_via_chat_response_too_large",
+                            &message,
+                            Some(t_stream_ms),
+                        ),
+                        &state.metrics,
+                    );
+                    trace_attempt(
+                        &routing_trace,
+                        resolved,
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("messages_via_chat_response_too_large"),
+                        attempt_start.elapsed().as_millis() as i64,
+                    );
+                    exclusions.note_attempt(resolved);
+                    exclusions.avoid_endpoint(resolved.endpoint.id);
+                    last_failure = Some(AttemptFailure::new(
+                        resolved,
+                        StatusCode::BAD_GATEWAY,
+                        "messages_via_chat_response_too_large",
+                        message.clone(),
+                    ));
+                    if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
+                        state.metrics.record_failover(FailoverKind::Endpoint);
+                        continue;
+                    }
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_GATEWAY,
+                        "messages_via_chat_response_too_large",
+                        message,
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("messages_via_chat_response_too_large"),
+                    );
+                    return proxy_error(
+                        api_format,
+                        StatusCode::BAD_GATEWAY,
+                        "converted upstream response exceeded the configured buffer",
+                    );
+                }
+            };
+            let converted = match chat_response_to_messages(&collected, &model_name) {
+                Ok(converted) => converted,
+                Err(error) => {
+                    reservation.finish(
+                        AttemptOutcome::local_provider(
+                            Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                            "messages_via_chat_response_failed",
+                            &error,
+                            Some(t_stream_ms),
+                        ),
+                        &state.metrics,
+                    );
+                    trace_attempt(
+                        &routing_trace,
+                        resolved,
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("messages_via_chat_response_failed"),
+                        attempt_start.elapsed().as_millis() as i64,
+                    );
+                    exclusions.note_attempt(resolved);
+                    exclusions.avoid_endpoint(resolved.endpoint.id);
+                    last_failure = Some(AttemptFailure::new(
+                        resolved,
+                        StatusCode::BAD_GATEWAY,
+                        "messages_via_chat_response_failed",
+                        error.clone(),
+                    ));
+                    if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
+                        state.metrics.record_failover(FailoverKind::Endpoint);
+                        continue;
+                    }
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_GATEWAY,
+                        "messages_via_chat_response_failed",
+                        error.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
+                        Some("messages_via_chat_response_failed"),
+                    );
+                    return proxy_error(api_format, StatusCode::BAD_GATEWAY, error);
                 }
             };
             resp_parts.headers.insert(
@@ -1643,6 +1989,7 @@ async fn proxy_openai(
         Some(failure.error_type),
     );
     retry_error_response(
+        api_format,
         failure.status,
         failure.error_message,
         plan_retry_at(&state, &plan),
@@ -1697,11 +2044,12 @@ fn add_retry_after(headers: &mut HeaderMap, retry_at_ms: Option<i64>) {
 }
 
 fn retry_error_response(
+    api_format: ApiFormat,
     status: StatusCode,
     message: String,
     retry_at_ms: Option<i64>,
 ) -> HttpResponse {
-    let mut response = http::json_error(status, message);
+    let mut response = proxy_error(api_format, status, message);
     add_retry_after(response.headers_mut(), retry_at_ms);
     response
 }
@@ -1717,7 +2065,7 @@ fn should_inject_include_usage(
     }
     match api_format {
         ApiFormat::ChatCompletions => info.stream,
-        ApiFormat::Responses => false,
+        ApiFormat::Responses | ApiFormat::AnthropicMessages => false,
     }
 }
 
@@ -1739,6 +2087,18 @@ pub(crate) enum UpstreamDispatchError {
     Timeout,
 }
 
+#[derive(Clone)]
+struct UpstreamHeadersReceivedAt(Instant);
+
+pub(crate) fn upstream_response_elapsed_ms<B>(response: &Response<B>, start: Instant) -> i64 {
+    response
+        .extensions()
+        .get::<UpstreamHeadersReceivedAt>()
+        .map_or_else(Instant::now, |received| received.0)
+        .saturating_duration_since(start)
+        .as_millis() as i64
+}
+
 pub(crate) async fn dispatch_upstream_request_with_timeout(
     state: &SharedState,
     request_method: &Method,
@@ -1747,7 +2107,8 @@ pub(crate) async fn dispatch_upstream_request_with_timeout(
     body: Bytes,
     uri: Uri,
     timeout: std::time::Duration,
-) -> Result<Response<Incoming>, UpstreamDispatchError> {
+) -> Result<Response<ReplayIncomingBody>, UpstreamDispatchError> {
+    let deadline = time::Instant::now() + timeout;
     let mut headers = request_headers.clone();
     // This boundary covers HTTP, the WS-to-HTTP bridge, and auth/recovery retries.
     // Use final headers so provider overrides cannot reintroduce the Lite conflict.
@@ -1757,16 +2118,102 @@ pub(crate) async fn dispatch_upstream_request_with_timeout(
     } else {
         body
     };
+    #[derive(serde::Deserialize)]
+    struct StreamRequest {
+        #[serde(default)]
+        stream: bool,
+    }
+    let expects_stream =
+        serde_json::from_slice::<StreamRequest>(&body).is_ok_and(|request| request.stream);
     let mut upstream_req = Request::new(Full::new(body));
     *upstream_req.method_mut() = request_method.clone();
     *upstream_req.uri_mut() = uri;
     *upstream_req.version_mut() = request_version;
     *upstream_req.headers_mut() = headers;
 
-    time::timeout(timeout, state.upstream.request(upstream_req))
+    let mut response = time::timeout_at(deadline, state.upstream.request(upstream_req))
         .await
         .map_err(|_| UpstreamDispatchError::Timeout)?
-        .map_err(|e| UpstreamDispatchError::Request(e.to_string()))
+        .map_err(|e| UpstreamDispatchError::Request(e.to_string()))?
+        .map(ReplayIncomingBody::new);
+    response
+        .extensions_mut()
+        .insert(UpstreamHeadersReceivedAt(Instant::now()));
+    sanitize_hop_headers(response.headers_mut());
+    let declared_sse = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"));
+    // Some compatible upstreams omit/mislabel Content-Type even though the wire body is SSE.
+    // Only inspect successful streaming requests, and replay every frame unchanged.
+    let is_sse = declared_sse
+        || (expects_stream
+            && response.status().is_success()
+            && time::timeout_at(deadline, sniff_sse(response.body_mut()))
+                .await
+                .map_err(|_| UpstreamDispatchError::Timeout)?);
+    if is_sse {
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        );
+    }
+    Ok(response)
+}
+
+/// None means the prefix is still ambiguous (e.g. a split `data:` field).
+fn sse_prefix(prefix: &[u8]) -> Option<bool> {
+    let start = prefix
+        .iter()
+        .position(|byte| !matches!(byte, b'\r' | b'\n'))
+        .unwrap_or(prefix.len());
+    let prefix = &prefix[start..];
+    if prefix.starts_with(b":") {
+        return Some(true);
+    }
+    let fields: [&[u8]; 4] = [b"data:", b"event:", b"id:", b"retry:"];
+    if fields.iter().any(|field| prefix.starts_with(field)) {
+        return Some(true);
+    }
+    if fields.iter().any(|field| field.starts_with(prefix)) {
+        return None;
+    }
+    Some(false)
+}
+
+async fn sniff_sse(body: &mut ReplayIncomingBody) -> bool {
+    const MAX_PREFIX_BYTES: usize = 64;
+    let mut prefix = Vec::with_capacity(MAX_PREFIX_BYTES);
+    // Bound frames as well as bytes so empty frames cannot build an unbounded queue.
+    for _ in 0..MAX_PREFIX_BYTES {
+        match body.inner.frame().await {
+            Some(Ok(frame)) => {
+                let has_data = if let Some(data) = frame.data_ref() {
+                    prefix.extend_from_slice(
+                        &data[..data.len().min(MAX_PREFIX_BYTES - prefix.len())],
+                    );
+                    true
+                } else {
+                    false
+                };
+                body.buffered.push_back(frame);
+                if let Some(is_sse) = sse_prefix(&prefix) {
+                    return is_sse;
+                }
+                if !has_data || prefix.len() == MAX_PREFIX_BYTES {
+                    break;
+                }
+            }
+            Some(Err(error)) => {
+                body.buffered_error = Some(error);
+                break;
+            }
+            None => break,
+        }
+    }
+    false
 }
 
 pub(crate) fn dispatch_error_to_http(
@@ -1791,12 +2238,14 @@ pub(crate) fn dispatch_error_to_http(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConversionMode {
     ResponsesViaChat,
+    MessagesViaChat,
 }
 
 impl ConversionMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::ResponsesViaChat => "responses_via_chat",
+            Self::MessagesViaChat => "messages_via_chat",
         }
     }
 }
@@ -1825,8 +2274,20 @@ impl ProtocolPlan {
         }
     }
 
+    fn messages_via_chat() -> Self {
+        Self {
+            client_api_format: ApiFormat::AnthropicMessages,
+            upstream_api_format: ApiFormat::ChatCompletions,
+            conversion: Some(ConversionMode::MessagesViaChat),
+        }
+    }
+
     fn is_responses_via_chat(self) -> bool {
         self.conversion == Some(ConversionMode::ResponsesViaChat)
+    }
+
+    fn is_messages_via_chat(self) -> bool {
+        self.conversion == Some(ConversionMode::MessagesViaChat)
     }
 
     fn conversion_name(self) -> Option<&'static str> {
@@ -1842,7 +2303,9 @@ fn provider_protocol_plan(
     allow_responses_via_chat: bool,
 ) -> Option<ProtocolPlan> {
     match (provider.provider_type.as_str(), client_api_format) {
-        ("openai", api_format) => Some(ProtocolPlan::native(api_format)),
+        ("openai", ApiFormat::ChatCompletions | ApiFormat::Responses) => {
+            Some(ProtocolPlan::native(client_api_format))
+        }
         ("openai_compatible", ApiFormat::ChatCompletions) => {
             Some(ProtocolPlan::native(ApiFormat::ChatCompletions))
         }
@@ -1855,8 +2318,19 @@ fn provider_protocol_plan(
         {
             Some(ProtocolPlan::responses_via_chat())
         }
+        ("openai_compatible", ApiFormat::AnthropicMessages)
+            if snap
+                .provider_model_state(provider.id, upstream_model)
+                .map(|state| state.is_active() && state.messages_via_chat_enabled)
+                .unwrap_or(false) =>
+        {
+            Some(ProtocolPlan::messages_via_chat())
+        }
         ("openai_compatible_responses", ApiFormat::Responses) => {
             Some(ProtocolPlan::native(ApiFormat::Responses))
+        }
+        ("anthropic", ApiFormat::AnthropicMessages) => {
+            Some(ProtocolPlan::native(ApiFormat::AnthropicMessages))
         }
         (crate::codex_oauth::PROVIDER_TYPE, ApiFormat::Responses) => {
             Some(ProtocolPlan::native(ApiFormat::Responses))
@@ -2067,22 +2541,30 @@ fn route_resolution_error_response(
     model: &str,
     api_format: ApiFormat,
 ) -> HttpResponse {
-    let mut response = http::json(
-        error.status,
-        &serde_json::json!({
-            "error": {
-                "message": error.message,
-                "type": error.error_type,
-                "code": error.code,
-                "details": {
-                    "retry_at_ms": error.retry_at_ms,
-                    "model": model,
-                    "client_api_format": api_format_name(api_format),
-                    "reasons": error.diagnostics.public_reason_counts(error.code),
+    let mut response = if api_format == ApiFormat::AnthropicMessages {
+        http::anthropic_error(
+            error.status,
+            anthropic_error_type(error.status),
+            error.message.clone(),
+        )
+    } else {
+        http::json(
+            error.status,
+            &serde_json::json!({
+                "error": {
+                    "message": error.message,
+                    "type": error.error_type,
+                    "code": error.code,
+                    "details": {
+                        "retry_at_ms": error.retry_at_ms,
+                        "model": model,
+                        "client_api_format": api_format_name(api_format),
+                        "reasons": error.diagnostics.public_reason_counts(error.code),
+                    }
                 }
-            }
-        }),
-    );
+            }),
+        )
+    };
     if error.code == "all_upstreams_temporarily_unavailable" {
         let seconds = error
             .retry_at_ms
@@ -2989,6 +3471,24 @@ fn protocol_rejection(
     upstream_model: &str,
     allow_responses_via_chat: bool,
 ) -> (&'static str, &'static str) {
+    if api_format == ApiFormat::AnthropicMessages {
+        if provider.provider_type == "openai_compatible" {
+            if snap
+                .provider_model_state(provider.id, upstream_model)
+                .is_some_and(|state| !state.messages_via_chat_enabled)
+            {
+                return (
+                    "messages_via_chat_disabled",
+                    "Chat-to-Messages conversion is disabled for this provider model",
+                );
+            }
+        } else if provider.provider_type != "anthropic" {
+            return (
+                "messages_provider_protocol_unsupported",
+                "the Messages API requires an Anthropic Messages upstream or an enabled Chat-to-Messages conversion",
+            );
+        }
+    }
     if provider.provider_type == "openai_compatible" && api_format == ApiFormat::Responses {
         if !allow_responses_via_chat {
             return (
@@ -3553,14 +4053,22 @@ pub(crate) fn build_upstream_uri(
 fn upstream_path_and_query(
     original: Option<&hyper::http::uri::PathAndQuery>,
     protocol: ProtocolPlan,
+    operation: ProxyOperation,
 ) -> Option<hyper::http::uri::PathAndQuery> {
     let original = original?;
-    let endpoint_path = if protocol.is_responses_via_chat() {
+    let endpoint_path = if protocol.is_responses_via_chat() || protocol.is_messages_via_chat() {
         "/chat/completions"
     } else {
         match protocol.upstream_api_format {
             ApiFormat::ChatCompletions => "/chat/completions",
             ApiFormat::Responses => "/responses",
+            ApiFormat::AnthropicMessages => {
+                if operation == ProxyOperation::CountTokens {
+                    "/messages/count_tokens"
+                } else {
+                    "/messages"
+                }
+            }
         }
     };
     let query = original
@@ -3574,6 +4082,7 @@ fn api_format_name(api_format: ApiFormat) -> &'static str {
     match api_format {
         ApiFormat::ChatCompletions => "chat_completions",
         ApiFormat::Responses => "responses",
+        ApiFormat::AnthropicMessages => "messages",
     }
 }
 
@@ -3604,20 +4113,52 @@ pub(crate) fn build_upstream_headers(
     body_len: usize,
     upstream_secret: &str,
 ) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    copy_allowed_upstream_header(request_headers, &mut headers, CONTENT_TYPE);
-    copy_allowed_upstream_header(request_headers, &mut headers, ACCEPT);
+    let mut headers = build_common_upstream_headers(request_headers, body_len);
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-beta");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-organization");
     copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-project");
-    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "idempotency-key");
-    copy_codex_client_headers(request_headers, &mut headers);
-
-    if let Ok(value) = hyper::header::HeaderValue::from_str(&body_len.to_string()) {
-        headers.insert(CONTENT_LENGTH, value);
-    }
     if let Ok(value) = hyper::header::HeaderValue::from_str(&format!("Bearer {upstream_secret}")) {
         headers.insert(AUTHORIZATION, value);
+    }
+    headers
+}
+
+fn build_upstream_headers_for(
+    protocol: ProtocolPlan,
+    request_headers: &HeaderMap,
+    body_len: usize,
+    upstream_secret: &str,
+) -> HeaderMap {
+    let mut headers = build_common_upstream_headers(request_headers, body_len);
+    if protocol.upstream_api_format == ApiFormat::AnthropicMessages {
+        let version = request_headers
+            .get("anthropic-version")
+            .cloned()
+            .or_else(|| HeaderValue::from_str(crate::anthropic::VERSION).ok());
+        if let Some(version) = version {
+            headers.insert(HeaderName::from_static("anthropic-version"), version);
+        }
+        copy_allowed_upstream_header_by_name(request_headers, &mut headers, "anthropic-beta");
+        crate::anthropic::apply_upstream_auth(&mut headers, upstream_secret);
+    } else {
+        copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-beta");
+        copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-organization");
+        copy_allowed_upstream_header_by_name(request_headers, &mut headers, "openai-project");
+        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {upstream_secret}")) {
+            headers.insert(AUTHORIZATION, value);
+        }
+    }
+    headers
+}
+
+fn build_common_upstream_headers(request_headers: &HeaderMap, body_len: usize) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    copy_allowed_upstream_header(request_headers, &mut headers, CONTENT_TYPE);
+    copy_allowed_upstream_header(request_headers, &mut headers, ACCEPT);
+    copy_allowed_upstream_header_by_name(request_headers, &mut headers, "idempotency-key");
+    copy_codex_client_headers(request_headers, &mut headers);
+    if let Ok(value) = HeaderValue::from_str(&body_len.to_string()) {
+        headers.insert(CONTENT_LENGTH, value);
     }
     headers
 }
@@ -3668,27 +4209,64 @@ fn copy_allowed_upstream_headers_by_prefix(from: &HeaderMap, to: &mut HeaderMap,
     }
 }
 
-struct ReplayIncomingBody {
+pub(crate) struct ReplayIncomingBody {
     buffered: VecDeque<Frame<Bytes>>,
     buffered_error: Option<hyper::Error>,
     inner: Incoming,
+}
+
+enum SseConverter {
+    Responses(ChatSseToResponses),
+    Messages(ChatSseToMessages),
+}
+
+impl SseConverter {
+    fn push(&mut self, data: &[u8]) -> Vec<Bytes> {
+        match self {
+            Self::Responses(converter) => converter.push(data),
+            Self::Messages(converter) => converter.push(data),
+        }
+    }
+
+    fn finish(&mut self) -> Vec<Bytes> {
+        match self {
+            Self::Responses(converter) => converter.finish(),
+            Self::Messages(converter) => converter.finish(),
+        }
+    }
+
+    fn fail_stream(&mut self, message: &str) -> Vec<Bytes> {
+        match self {
+            Self::Responses(converter) => converter.fail_stream(message),
+            Self::Messages(converter) => converter.fail_stream(message),
+        }
+    }
 }
 
 pin_project! {
     struct ConvertedSseBody {
         #[pin]
         inner: ReplayIncomingBody,
-        converter: ChatSseToResponses,
+        converter: SseConverter,
         pending: VecDeque<Bytes>,
         finished: bool,
     }
 }
 
 impl ConvertedSseBody {
-    fn new(inner: ReplayIncomingBody, context: ConversionContext, max_bytes: usize) -> Self {
+    fn responses(inner: ReplayIncomingBody, context: ConversionContext, max_bytes: usize) -> Self {
         Self {
             inner,
-            converter: ChatSseToResponses::new(context, max_bytes),
+            converter: SseConverter::Responses(ChatSseToResponses::new(context, max_bytes)),
+            pending: VecDeque::new(),
+            finished: false,
+        }
+    }
+
+    fn messages(inner: ReplayIncomingBody, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            converter: SseConverter::Messages(ChatSseToMessages::new(max_bytes)),
             pending: VecDeque::new(),
             finished: false,
         }
@@ -3807,11 +4385,12 @@ async fn encrypted_content_rejected(
         return false;
     }
     let body = response.body_mut();
+    let mut inspected = VecDeque::new();
     let mut parser = crate::response_events::SseDecoder::default();
     let mut capture = BytesMut::new();
     let read = async {
         loop {
-            let frame = match body.inner.frame().await {
+            let frame = match body.frame().await {
                 Some(Ok(frame)) => frame,
                 Some(Err(error)) => {
                     body.buffered_error = Some(error);
@@ -3830,7 +4409,7 @@ async fn encrypted_content_rejected(
                 }
             };
             let data = frame.data_ref().cloned();
-            body.buffered.push_back(frame);
+            inspected.push_back(frame);
             if let Some(data) = data {
                 if capture.len().saturating_add(data.len())
                     > crate::response_events::MAX_EVENT_BYTES
@@ -3852,7 +4431,10 @@ async fn encrypted_content_rejected(
             }
         }
     };
-    time::timeout(timeout, read).await.unwrap_or(false)
+    let rejected = time::timeout(timeout, read).await.unwrap_or(false);
+    inspected.append(&mut body.buffered);
+    body.buffered = inspected;
+    rejected
 }
 
 /// Preserve retryable error bodies and avoid issuing another request after observed usage.
@@ -3864,9 +4446,10 @@ async fn retry_body_has_usage(
 ) -> bool {
     let mut capture = UsageCaptureBuffer::new(crate::response_events::MAX_EVENT_BYTES, 32 * 1024);
     let mut parser = SseParser::new(api_format);
+    let mut inspected = VecDeque::new();
     let read = async {
         loop {
-            match body.inner.frame().await {
+            match body.frame().await {
                 Some(Ok(frame)) => {
                     if let Some(data) = frame.data_ref() {
                         capture.push(data);
@@ -3874,13 +4457,16 @@ async fn retry_body_has_usage(
                             parser.push_bytes(data);
                         }
                     }
-                    body.buffered.push_back(frame);
+                    inspected.push_back(frame);
                     // Stop examining oversized responses, leaving the rest for the reader task.
                     if capture.is_truncated() {
                         return true;
                     }
                 }
-                Some(Err(_)) => return true,
+                Some(Err(error)) => {
+                    body.buffered_error = Some(error);
+                    return true;
+                }
                 None => {
                     if is_sse {
                         parser.finish();
@@ -3891,7 +4477,10 @@ async fn retry_body_has_usage(
             }
         }
     };
-    time::timeout(timeout, read).await.unwrap_or(true)
+    let has_usage = time::timeout(timeout, read).await.unwrap_or(true);
+    inspected.append(&mut body.buffered);
+    body.buffered = inspected;
+    has_usage
 }
 
 async fn preflight_sse(
@@ -4008,6 +4597,7 @@ struct TapConfig {
     requested_service_tier: Option<String>,
     upstream_service_tier: Option<String>,
     service_tier: Option<String>,
+    conversion_mode: Option<&'static str>,
 }
 
 struct TapFinalizeInputs<'a> {
@@ -4363,8 +4953,7 @@ fn finalize_tap(
                 "endpoint_id": cfg.endpoint_id,
                 "upstream_key_id": cfg.upstream_key_id,
                 "upstream_api_format": cfg.upstream_api_format,
-                "conversion_mode": (cfg.api_format != cfg.upstream_api_format)
-                    .then_some("responses_via_chat"),
+                "conversion_mode": cfg.conversion_mode,
                 "status": cfg.http_status,
                 "error_type": error_type.as_deref(),
                 "duration_ms": cfg.attempt_start.elapsed().as_millis() as i64,
@@ -4522,7 +5111,11 @@ fn upstream_error_is_model_scoped(body: &[u8]) -> bool {
     upstream_error_details(body).is_some_and(|(kind, _)| {
         matches!(
             kind.trim().to_ascii_lowercase().as_str(),
-            "model_not_found" | "invalid_model" | "unsupported_model" | "model_not_supported"
+            "model_not_found"
+                | "invalid_model"
+                | "unsupported_model"
+                | "model_not_supported"
+                | "not_found_error"
         )
     })
 }
@@ -4581,6 +5174,7 @@ fn parse_usage_value(api_format: &'static str, value: &Value) -> Option<Usage> {
     match api_format {
         "chat_completions" => parse_chat_usage(value),
         "responses" => parse_responses_usage(value),
+        "messages" => crate::response_events::parse_messages_usage(value),
         _ => None,
     }
 }
@@ -4740,6 +5334,8 @@ impl SseParser {
             if !self.done_first_token
                 && ((self.api_format == "chat_completions" && chat_has_output_delta(&value))
                     || (self.api_format == "responses"
+                        && self.observation.first_output_kind.is_some())
+                    || (self.api_format == "messages"
                         && self.observation.first_output_kind.is_some()))
             {
                 self.observation.first_output_kind.get_or_insert("delta");
@@ -4756,6 +5352,7 @@ fn extract_usage(api_format: &'static str, root: &Value) -> Option<Usage> {
     match api_format {
         "chat_completions" => root.get("usage").and_then(parse_chat_usage),
         "responses" => crate::response_events::event_usage(root),
+        "messages" => crate::response_events::parse_messages_usage(root),
         _ => None,
     }
 }
@@ -4859,12 +5456,13 @@ pub(crate) fn provider_timeout(
 #[cfg(test)]
 mod tests {
     use super::{
-        AttemptOutcome, FailureScope, OutcomeOrigin, ProtocolPlan, ProviderRoute, RouteDiagnostics,
-        SchedulableProvider, SseParser, UpstreamAttemptReservation, UsageCaptureBuffer,
-        build_scheduled_attempts, build_upstream_headers, chat_has_output_delta,
-        classify_failure_scope, classify_failure_scope_with_body, collect_provider_routes,
-        extract_usage_from_capture, parse_chat_usage, parse_responses_usage,
-        provider_protocol_plan, responses_websocket_upgrade_required, should_retry_response_status,
+        AttemptOutcome, FailureScope, OutcomeOrigin, ProtocolPlan, ProviderRoute, ProxyOperation,
+        RouteDiagnostics, SchedulableProvider, SseParser, UpstreamAttemptReservation,
+        UsageCaptureBuffer, build_scheduled_attempts, build_upstream_headers,
+        build_upstream_headers_for, chat_has_output_delta, classify_failure_scope,
+        classify_failure_scope_with_body, collect_provider_routes, extract_usage_from_capture,
+        parse_chat_usage, parse_responses_usage, provider_protocol_plan,
+        responses_websocket_upgrade_required, should_retry_response_status,
         upstream_path_and_query,
     };
     use crate::cache::upstream_cache::{ProviderModelState, UpstreamSnapshot};
@@ -4970,6 +5568,7 @@ mod tests {
         let upstream = upstream_path_and_query(
             Some(&original),
             ProtocolPlan::native(ApiFormat::ChatCompletions),
+            ProxyOperation::Messages,
         )
         .expect("upstream path");
 
@@ -4982,9 +5581,12 @@ mod tests {
             .parse::<hyper::http::uri::PathAndQuery>()
             .expect("path");
 
-        let upstream =
-            upstream_path_and_query(Some(&original), ProtocolPlan::native(ApiFormat::Responses))
-                .expect("upstream path");
+        let upstream = upstream_path_and_query(
+            Some(&original),
+            ProtocolPlan::native(ApiFormat::Responses),
+            ProxyOperation::Messages,
+        )
+        .expect("upstream path");
 
         assert_eq!(upstream, "/responses?trace=true");
     }
@@ -4995,10 +5597,137 @@ mod tests {
             .parse::<hyper::http::uri::PathAndQuery>()
             .expect("path");
 
-        let upstream = upstream_path_and_query(Some(&original), ProtocolPlan::responses_via_chat())
-            .expect("upstream path");
+        let upstream = upstream_path_and_query(
+            Some(&original),
+            ProtocolPlan::responses_via_chat(),
+            ProxyOperation::Messages,
+        )
+        .expect("upstream path");
 
         assert_eq!(upstream, "/chat/completions?trace=true");
+    }
+
+    #[test]
+    fn upstream_path_should_target_messages_and_count_tokens() {
+        let original = "/v1/messages?beta=true"
+            .parse::<hyper::http::uri::PathAndQuery>()
+            .expect("path");
+        let messages = upstream_path_and_query(
+            Some(&original),
+            ProtocolPlan::native(ApiFormat::AnthropicMessages),
+            ProxyOperation::Messages,
+        )
+        .expect("messages path");
+        assert_eq!(messages, "/messages?beta=true");
+        let count_tokens = upstream_path_and_query(
+            Some(&original),
+            ProtocolPlan::native(ApiFormat::AnthropicMessages),
+            ProxyOperation::CountTokens,
+        )
+        .expect("count tokens path");
+        assert_eq!(count_tokens, "/messages/count_tokens?beta=true");
+        let bridged = upstream_path_and_query(
+            Some(&original),
+            ProtocolPlan::messages_via_chat(),
+            ProxyOperation::Messages,
+        )
+        .expect("converted messages path");
+        assert_eq!(bridged, "/chat/completions?beta=true");
+    }
+
+    #[test]
+    fn anthropic_protocol_plan_keeps_messages_native_and_requires_chat_opt_in() {
+        let mut snapshot = UpstreamSnapshot::default();
+        let mut anthropic = test_provider(1, 10, 1);
+        anthropic.provider_type = "anthropic".to_string();
+        assert_eq!(
+            provider_protocol_plan(
+                &snapshot,
+                &anthropic,
+                ApiFormat::AnthropicMessages,
+                "claude-sonnet-4",
+                true
+            ),
+            Some(ProtocolPlan::native(ApiFormat::AnthropicMessages))
+        );
+        assert_eq!(
+            provider_protocol_plan(
+                &snapshot,
+                &anthropic,
+                ApiFormat::ChatCompletions,
+                "claude-sonnet-4",
+                true
+            ),
+            None
+        );
+
+        let mut compatible = test_provider(2, 10, 1);
+        compatible.provider_type = "openai_compatible".to_string();
+        assert_eq!(
+            provider_protocol_plan(
+                &snapshot,
+                &compatible,
+                ApiFormat::AnthropicMessages,
+                "deepseek-v4-flash",
+                true
+            ),
+            None
+        );
+        snapshot.provider_models_by_provider.insert(
+            compatible.id,
+            std::collections::HashMap::from([(
+                "deepseek-v4-flash".to_string(),
+                ProviderModelState {
+                    enabled: true,
+                    available: true,
+                    responses_via_chat_enabled: false,
+                    messages_via_chat_enabled: true,
+                },
+            )]),
+        );
+        assert_eq!(
+            provider_protocol_plan(
+                &snapshot,
+                &compatible,
+                ApiFormat::AnthropicMessages,
+                "deepseek-v4-flash",
+                true
+            ),
+            Some(ProtocolPlan::messages_via_chat())
+        );
+    }
+
+    #[test]
+    fn anthropic_upstream_headers_always_use_x_api_key() {
+        let mut input = HeaderMap::new();
+        input.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        input.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("interleaved-thinking-2025-05-14"),
+        );
+        let headers = build_upstream_headers_for(
+            ProtocolPlan::native(ApiFormat::AnthropicMessages),
+            &input,
+            42,
+            "sk-ant-secret",
+        );
+        assert_eq!(headers.get("x-api-key").unwrap(), "sk-ant-secret");
+        assert!(headers.get(AUTHORIZATION).is_none());
+        assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
+        assert_eq!(
+            headers.get("anthropic-beta").unwrap(),
+            "interleaved-thinking-2025-05-14"
+        );
+
+        let headers = build_upstream_headers_for(
+            ProtocolPlan::native(ApiFormat::AnthropicMessages),
+            &input,
+            42,
+            "relay-secret",
+        );
+        assert_eq!(headers.get("x-api-key").unwrap(), "relay-secret");
+        assert!(headers.get(AUTHORIZATION).is_none());
+        assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
     }
 
     #[test]
@@ -5294,6 +6023,7 @@ mod tests {
                     enabled: true,
                     available: true,
                     responses_via_chat_enabled: true,
+                    messages_via_chat_enabled: false,
                 },
             )]),
         );
@@ -5373,6 +6103,7 @@ mod tests {
                     enabled: true,
                     available: true,
                     responses_via_chat_enabled: false,
+                    messages_via_chat_enabled: false,
                 },
             )]),
         );
@@ -5384,6 +6115,7 @@ mod tests {
                     enabled: true,
                     available: true,
                     responses_via_chat_enabled: false,
+                    messages_via_chat_enabled: false,
                 },
             )]),
         );
@@ -5432,6 +6164,7 @@ mod tests {
                     enabled: true,
                     available: true,
                     responses_via_chat_enabled: false,
+                    messages_via_chat_enabled: false,
                 },
             )]),
         );
@@ -5768,6 +6501,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn sse_sniff_distinguishes_split_fields_from_json_and_other_bodies() {
+        for prefix in [b"".as_slice(), b"\r\n", b"d", b"data", b"eve", b"retry"] {
+            assert_eq!(super::sse_prefix(prefix), None, "{prefix:?}");
+        }
+        for prefix in [
+            b"data:".as_slice(),
+            b"event:",
+            b"id:",
+            b"retry:",
+            b"\r\n: ping",
+        ] {
+            assert_eq!(super::sse_prefix(prefix), Some(true), "{prefix:?}");
+        }
+        for prefix in [
+            b"{\"output\":[]}".as_slice(),
+            b" [1]",
+            b"null",
+            b"<html>",
+            b"database",
+            b" data:",
+        ] {
+            assert_eq!(super::sse_prefix(prefix), Some(false), "{prefix:?}");
+        }
     }
 
     #[test]

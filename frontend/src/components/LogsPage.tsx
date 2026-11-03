@@ -79,7 +79,7 @@ interface LogFilters {
   statusClass: string;
   apiKeyId: string;
   model: string;
-  apiFormat: "" | "chat_completions" | "responses";
+  apiFormat: "" | "chat_completions" | "responses" | "messages";
   providerId: string;
   endpointId: string;
   durationMin: string;
@@ -278,9 +278,11 @@ export function formatRoutingProtocol(
   conversionMode: string | null | undefined,
 ): string {
   const endpoint = formatRequestType(apiFormat);
-  return conversionMode === "responses_via_chat"
-    ? `${endpoint} · Responses → Chat`
-    : endpoint;
+  if (conversionMode === "responses_via_chat")
+    return `${endpoint} · Responses → Chat`;
+  if (conversionMode === "messages_via_chat")
+    return `${endpoint} · Chat → Messages`;
+  return endpoint;
 }
 function totalTokens(row: RequestLogRow) {
   return (

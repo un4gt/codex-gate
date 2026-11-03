@@ -75,6 +75,7 @@ export const SCOPE_OPTIONS: Array<{
   { value: "all", label: "全部请求" },
   { value: "chat_completions", label: "Chat Completions" },
   { value: "responses", label: "Responses" },
+  { value: "messages", label: "Messages" },
 ];
 export const OPERATION_OPTIONS: Array<{
   value: RequestOverrideOperation;

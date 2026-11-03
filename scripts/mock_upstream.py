@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 def parse_args():
     parser = argparse.ArgumentParser(description='Local mock upstream for little-gate validation.')
     parser.add_argument('--listen', default='127.0.0.1:19090')
-    parser.add_argument('--default-format', choices=['chat', 'responses'], default='chat')
+    parser.add_argument('--default-format', choices=['chat', 'responses', 'messages'], default='chat')
     parser.add_argument('--default-status', type=int, default=200)
     parser.add_argument('--default-body-text', default='mock-ok')
     parser.add_argument('--default-auth', default='')
@@ -24,6 +24,7 @@ def parse_args():
     )
     parser.add_argument('--models-chat', default='gpt-4o-mini,gpt-4.1-mini')
     parser.add_argument('--models-responses', default='gpt-4.1-mini')
+    parser.add_argument('--models-messages', default='claude-sonnet-4-5')
     return parser.parse_args()
 
 
@@ -65,6 +66,11 @@ class MockState:
                 'stream': payload.get('stream', False),
                 'prompt_cache_key': payload.get('prompt_cache_key'),
                 'session_id': headers.get('session-id'),
+                'authorization': headers.get('Authorization'),
+                'x_api_key': headers.get('x-api-key'),
+                'anthropic_version': headers.get('anthropic-version'),
+                'anthropic_beta': headers.get('anthropic-beta'),
+                'payload': payload,
             })
             self.recent_requests = self.recent_requests[-20:]
 
@@ -131,6 +137,7 @@ class MockHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', '0') or '0')
         body = self.rfile.read(content_length) if content_length > 0 else b''
         auth = self.headers.get('Authorization', '')
+        api_key = self.headers.get('x-api-key', '')
         try:
             payload = json.loads(body.decode('utf-8')) if body else {}
         except Exception:
@@ -140,7 +147,7 @@ class MockHandler(BaseHTTPRequestHandler):
         if route.delay_ms > 0:
             time.sleep(route.delay_ms / 1000.0)
 
-        if route.auth and auth != f'Bearer {route.auth}':
+        if route.auth and auth != f'Bearer {route.auth}' and api_key != route.auth:
             self.respond_json(401, {
                 'error': {
                     'message': 'invalid upstream credential',
@@ -159,7 +166,15 @@ class MockHandler(BaseHTTPRequestHandler):
             return
 
         response_format = route.response_format
-        if payload.get('stream') and response_format == 'chat' and not path.endswith('/responses'):
+        is_messages = path.endswith('/messages') or path.endswith('/messages/count_tokens')
+        if is_messages and path.endswith('/messages/count_tokens'):
+            self.respond_json(200, {'input_tokens': 42})
+        elif is_messages:
+            if payload.get('stream'):
+                self.respond_messages_sse(route.body_text, payload)
+            else:
+                self.respond_json(200, build_messages_body(route.body_text, body))
+        elif payload.get('stream') and response_format == 'chat' and not path.endswith('/responses'):
             self.respond_chat_sse(route.body_text, payload)
         elif response_format == 'responses' or path.endswith('/responses'):
             self.respond_json(200, build_responses_body(route.body_text, body))
@@ -180,7 +195,8 @@ class MockHandler(BaseHTTPRequestHandler):
         if route.delay_ms > 0:
             time.sleep(route.delay_ms / 1000.0)
         auth = self.headers.get('Authorization', '')
-        if route.auth and auth != f'Bearer {route.auth}':
+        api_key = self.headers.get('x-api-key', '')
+        if route.auth and auth != f'Bearer {route.auth}' and api_key != route.auth:
             self.respond_json(401, {
                 'error': {
                     'message': 'invalid upstream credential',
@@ -203,6 +219,24 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         query = parse_qs(query_raw)
         requested_format = (query.get('api_format') or [route.response_format])[0]
+        if self.headers.get('anthropic-version') or (api_key and not auth):
+            models = self.server.messages_models
+            data = [
+                {
+                    'type': 'model',
+                    'id': model_id,
+                    'display_name': model_id,
+                    'created_at': '1970-01-01T00:00:00Z',
+                }
+                for model_id in models
+            ]
+            self.respond_json(200, {
+                'data': data,
+                'has_more': False,
+                'first_id': models[0] if models else None,
+                'last_id': models[-1] if models else None,
+            })
+            return
         models = (
             self.server.responses_models
             if requested_format == 'responses'
@@ -234,6 +268,110 @@ class MockHandler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
+
+    def respond_messages_sse(self, body_text, payload):
+        model = payload.get('model') or 'unknown'
+        has_tool_output = any(
+            isinstance(message, dict)
+            and any(
+                isinstance(block, dict) and block.get('type') == 'tool_result'
+                for block in (message.get('content') if isinstance(message.get('content'), list) else [])
+            )
+            for message in payload.get('messages', [])
+        )
+        tools = payload.get('tools') or []
+        events = [
+            {
+                'type': 'message_start',
+                'message': {
+                    'id': 'msg_mock_stream',
+                    'type': 'message',
+                    'role': 'assistant',
+                    'model': model,
+                    'content': [],
+                    'stop_reason': None,
+                    'usage': {
+                        'input_tokens': 10,
+                        'output_tokens': 1,
+                        'cache_read_input_tokens': 90,
+                        'cache_creation_input_tokens': 3,
+                    },
+                },
+            },
+            {
+                'type': 'content_block_start',
+                'index': 0,
+                'content_block': {'type': 'text', 'text': ''},
+            },
+        ]
+        if tools and not has_tool_output:
+            name = tools[0].get('name') or 'mock_tool'
+            arguments = json.dumps({'input': 'mock'}, separators=(',', ':'))
+            mid = max(1, len(arguments) // 2)
+            events.extend([
+                {
+                    'type': 'content_block_delta',
+                    'index': 0,
+                    'delta': {'type': 'text_delta', 'text': 'calling '},
+                },
+                {'type': 'content_block_stop', 'index': 0},
+                {
+                    'type': 'content_block_start',
+                    'index': 1,
+                    'content_block': {
+                        'type': 'tool_use',
+                        'id': 'tool_mock_1',
+                        'name': name,
+                        'input': {},
+                    },
+                },
+                {
+                    'type': 'content_block_delta',
+                    'index': 1,
+                    'delta': {'type': 'input_json_delta', 'partial_json': arguments[:mid]},
+                },
+                {
+                    'type': 'content_block_delta',
+                    'index': 1,
+                    'delta': {'type': 'input_json_delta', 'partial_json': arguments[mid:]},
+                },
+                {'type': 'content_block_stop', 'index': 1},
+                {
+                    'type': 'message_delta',
+                    'delta': {'stop_reason': 'tool_use', 'stop_sequence': None},
+                    'usage': {'output_tokens': 5},
+                },
+            ])
+        else:
+            mid = max(1, len(body_text) // 2)
+            for text in (body_text[:mid], body_text[mid:]):
+                if text:
+                    events.append({
+                        'type': 'content_block_delta',
+                        'index': 0,
+                        'delta': {'type': 'text_delta', 'text': text},
+                    })
+            events.extend([
+                {'type': 'content_block_stop', 'index': 0},
+                {
+                    'type': 'message_delta',
+                    'delta': {'stop_reason': 'end_turn', 'stop_sequence': None},
+                    'usage': {'output_tokens': 5},
+                },
+            ])
+        events.append({'type': 'message_stop'})
+        raw = ''.join(
+            f'event: {event["type"]}\r\ndata: {json.dumps(event, ensure_ascii=False)}\r\n\r\n'
+            for event in events
+        ).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        for offset in range(0, len(raw), 23):
+            self.wfile.write(raw[offset:offset + 23])
+            self.wfile.flush()
 
     def respond_chat_sse(self, body_text, payload):
         model = payload.get('model') or 'unknown'
@@ -365,6 +503,31 @@ def build_chat_body(body_text, request_body):
     }
 
 
+def build_messages_body(body_text, request_body):
+    model = 'unknown'
+    try:
+        payload = json.loads(request_body.decode('utf-8')) if request_body else {}
+        model = payload.get('model') or model
+    except Exception:
+        payload = {}
+    return {
+        'id': 'msg_mock',
+        'type': 'message',
+        'role': 'assistant',
+        'model': model,
+        'content': [{'type': 'text', 'text': body_text}],
+        'stop_reason': 'end_turn',
+        'stop_sequence': None,
+        'usage': {
+            'input_tokens': 10,
+            'output_tokens': 5,
+            'cache_read_input_tokens': 90,
+            'cache_creation_input_tokens': 3,
+            'output_tokens_details': {'thinking_tokens': 2},
+        },
+    }
+
+
 def build_responses_body(body_text, request_body):
     model = 'unknown'
     try:
@@ -427,6 +590,7 @@ def main():
     server.default_model_format = args.default_format
     server.chat_models = parse_models(args.models_chat)
     server.responses_models = parse_models(args.models_responses)
+    server.messages_models = parse_models(args.models_messages)
     print(f'mock upstream listening on http://{args.listen}', flush=True)
     try:
         server.serve_forever()

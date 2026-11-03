@@ -25,11 +25,12 @@ use crate::upstream_url;
 use crate::util;
 use tokio::time as tokio_time;
 
-const ALLOWED_PROVIDER_TYPES: [&str; 4] = [
+const ALLOWED_PROVIDER_TYPES: [&str; 5] = [
     "openai",
     "openai_compatible",
     "openai_codex_oauth",
     "openai_compatible_responses",
+    "anthropic",
 ];
 const BETA_FEATURE_RESPONSES_HTTP_TO_WS: &str = "responses-http-to-ws";
 
@@ -627,6 +628,7 @@ async fn list_all_provider_models(_req: Request<Incoming>, state: SharedState) -
                 "openai_compatible" => &["chat_completions"],
                 "openai_codex_oauth" => &["responses"],
                 "openai_compatible_responses" => &["responses"],
+                "anthropic" => &["messages"],
                 _ => &[],
             };
             Some(serde_json::json!({
@@ -640,6 +642,7 @@ async fn list_all_provider_models(_req: Request<Incoming>, state: SharedState) -
                 "enabled": model.enabled,
                 "available": model.available,
                 "responses_via_chat_enabled": model.responses_via_chat_enabled,
+                "messages_via_chat_enabled": model.messages_via_chat_enabled,
                 "native_api_formats": native_api_formats,
                 "created_at_ms": model.created_at_ms,
                 "updated_at_ms": model.updated_at_ms,
@@ -657,12 +660,19 @@ async fn fetch_upstream_model_ids(
 ) -> Result<Vec<String>, HttpResponse> {
     let uri = upstream_url::build_upstream_uri(base_url, "/models")
         .map_err(|error| http::json_error(StatusCode::BAD_REQUEST, error))?;
-    let mut upstream_req = Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("Authorization", format!("Bearer {key_secret}"))
+    let is_anthropic = provider.provider_type == "anthropic";
+    let mut builder = Request::builder().method(Method::GET).uri(uri);
+    if is_anthropic {
+        builder = builder.header("anthropic-version", crate::anthropic::VERSION);
+    } else {
+        builder = builder.header("Authorization", format!("Bearer {key_secret}"));
+    }
+    let mut upstream_req = builder
         .body(Full::new(Bytes::new()))
         .map_err(|error| http::json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if is_anthropic {
+        crate::anthropic::apply_upstream_auth(upstream_req.headers_mut(), key_secret);
+    }
     provider
         .request_overrides
         .apply_headers_for_target(
@@ -882,6 +892,7 @@ struct PatchProviderModelReq {
     alias: Option<Option<String>>,
     enabled: Option<bool>,
     responses_via_chat_enabled: Option<bool>,
+    messages_via_chat_enabled: Option<bool>,
 }
 
 async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -898,7 +909,9 @@ async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> Htt
             Err(resp) => return resp,
         };
 
-    if patch.responses_via_chat_enabled == Some(true) {
+    if patch.responses_via_chat_enabled == Some(true)
+        || patch.messages_via_chat_enabled == Some(true)
+    {
         let (models, providers) = match tokio::try_join!(
             state.db.list_all_provider_models(),
             state.db.list_upstream_providers(),
@@ -917,7 +930,7 @@ async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> Htt
         if !compatible {
             return http::json_error(
                 StatusCode::BAD_REQUEST,
-                "responses_via_chat_enabled is only valid for openai_compatible models",
+                "chat conversion flags are only valid for openai_compatible models",
             );
         }
     }
@@ -929,6 +942,7 @@ async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> Htt
             patch.alias,
             patch.enabled,
             patch.responses_via_chat_enabled,
+            patch.messages_via_chat_enabled,
             util::now_ms(),
         )
         .await
@@ -4179,7 +4193,7 @@ async fn list_logs(req: Request<Incoming>, state: SharedState) -> HttpResponse {
         query_i64(req.uri().query(), "cache_creation_input_tokens_max");
 
     if let Some(format) = api_format.as_deref()
-        && !matches!(format, "chat_completions" | "responses")
+        && !matches!(format, "chat_completions" | "responses" | "messages")
     {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid api_format");
     }
@@ -4361,6 +4375,8 @@ fn provider_to_json(
         "affinity_sessions": affinity_sessions
         ,"default_base_url": if p.provider_type == crate::codex_oauth::PROVIDER_TYPE {
             Some(crate::codex_oauth::DEFAULT_BASE_URL)
+        } else if p.provider_type == "anthropic" {
+            Some("https://api.anthropic.com")
         } else {
             None
         }

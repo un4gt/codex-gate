@@ -6,9 +6,11 @@ describe('request type formatting', () => {
     expect(REQUEST_TYPE_OPTIONS).toEqual([
       { value: 'chat_completions', endpoint: 'v1/chat/completions' },
       { value: 'responses', endpoint: 'v1/responses' },
+      { value: 'messages', endpoint: 'v1/messages' },
     ]);
     expect(formatRequestType('chat_completions')).toBe('v1/chat/completions');
     expect(formatRequestType('responses')).toBe('v1/responses');
+    expect(formatRequestType('messages')).toBe('v1/messages');
   });
 
   it('uses a placeholder for missing or unknown API formats', () => {
@@ -21,5 +23,7 @@ describe('request type formatting', () => {
     expect(formatRequestPath('responses', 'chat_completions'))
       .toBe('v1/chat/completions → v1/responses');
     expect(formatRequestPath('responses', 'responses')).toBe('v1/responses');
+    expect(formatRequestPath('chat_completions', 'messages'))
+      .toBe('v1/messages → v1/chat/completions');
   });
 });

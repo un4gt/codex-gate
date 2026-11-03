@@ -97,6 +97,7 @@ pub struct Metrics {
     provider_breaker_reset_total: AtomicU64,
     chat: ApiCounters,
     responses: ApiCounters,
+    messages: ApiCounters,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +131,7 @@ impl Metrics {
             provider_breaker_reset_total: AtomicU64::new(0),
             chat: ApiCounters::default(),
             responses: ApiCounters::default(),
+            messages: ApiCounters::default(),
         }
     }
 
@@ -198,6 +200,7 @@ impl Metrics {
     pub fn live_snapshot(&self) -> MetricsLiveSnapshot {
         let chat = self.chat.snapshot();
         let responses = self.responses.snapshot();
+        let messages = self.messages.snapshot();
         MetricsLiveSnapshot {
             started_at_ms: self.started_at_ms,
             inflight_requests: self.inflight_requests.load(Ordering::Relaxed),
@@ -208,6 +211,7 @@ impl Metrics {
             failover_generic_total: self.failover_generic_total.load(Ordering::Relaxed),
             chat: ApiCountersPublicSnapshot::from(chat),
             responses: ApiCountersPublicSnapshot::from(responses),
+            messages: ApiCountersPublicSnapshot::from(messages),
         }
     }
 
@@ -229,6 +233,7 @@ impl Metrics {
         let target = match api_format {
             ApiFormat::ChatCompletions => &self.chat,
             ApiFormat::Responses => &self.responses,
+            ApiFormat::AnthropicMessages => &self.messages,
         };
         Self::record_request_inner(target, metric);
     }
@@ -236,6 +241,8 @@ impl Metrics {
     pub fn record_request_str(&self, api_format: &str, metric: RequestMetric<'_>) {
         let target = if api_format == "responses" {
             &self.responses
+        } else if api_format == "messages" {
+            &self.messages
         } else {
             &self.chat
         };
@@ -358,6 +365,7 @@ pub struct MetricsLiveSnapshot {
     pub failover_generic_total: u64,
     pub chat: ApiCountersPublicSnapshot,
     pub responses: ApiCountersPublicSnapshot,
+    pub messages: ApiCountersPublicSnapshot,
 }
 
 pub struct InflightGuard {
@@ -384,6 +392,7 @@ struct EntityStateCounts {
 pub async fn render_prometheus(state: &SharedState) -> String {
     let chat = state.metrics.chat.snapshot();
     let responses = state.metrics.responses.snapshot();
+    let messages = state.metrics.messages.snapshot();
     let db_ready = state.db.ping().await.is_ok();
     let now_ms = util::now_ms();
     let memory = state.system_status.memory_snapshot();
@@ -628,6 +637,7 @@ pub async fn render_prometheus(state: &SharedState) -> String {
 
     write_api_metrics(&mut out, "chat_completions", chat);
     write_api_metrics(&mut out, "responses", responses);
+    write_api_metrics(&mut out, "messages", messages);
 
     write_state_metrics(
         &mut out,

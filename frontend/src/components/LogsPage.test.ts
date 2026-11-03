@@ -50,6 +50,8 @@ describe('log endpoint formatting', () => {
   it('shows the concrete upstream endpoint and conversion mode in routing diagnostics', () => {
     expect(formatRoutingProtocol('chat_completions', 'responses_via_chat'))
       .toBe('v1/chat/completions · Responses → Chat');
+    expect(formatRoutingProtocol('chat_completions', 'messages_via_chat'))
+      .toBe('v1/chat/completions · Chat → Messages');
   });
 });
 

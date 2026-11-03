@@ -78,6 +78,7 @@ const providerTypes = [
   ["openai_compatible", "OpenAI Compatible"],
   ["openai_compatible_responses", "OpenAI Compatible (Responses)"],
   ["openai_codex_oauth", "OpenAI Codex OAuth"],
+  ["anthropic", "Anthropic Messages"],
 ];
 const row = {
   display: "flex",
@@ -411,6 +412,8 @@ function CreateUpstream(
               setType(e.target.value);
               if (e.target.value === "openai_codex_oauth")
                 setUrls("https://chatgpt.com/backend-api/codex");
+              else if (e.target.value === "anthropic")
+                setUrls("https://api.anthropic.com");
             }}
           >
             {providerTypes.map(([v, l]) => (
@@ -425,7 +428,9 @@ function CreateUpstream(
                 ? "创建后登录 ChatGPT Codex 账号，仅支持 Responses 协议。"
                 : type === "openai_compatible_responses"
                   ? "仅支持 Responses 协议。"
-                  : "支持 OpenAI 兼容协议。",
+                  : type === "anthropic"
+                    ? "支持 Anthropic Messages 原生协议。官方地址自动使用 x-api-key，兼容中转自动使用 Bearer。"
+                    : "支持 OpenAI 兼容协议。",
             )}
           </Typography>
           <TextField

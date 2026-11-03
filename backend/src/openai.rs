@@ -107,6 +107,24 @@ fn find_root_object_end(input: &[u8]) -> Option<usize> {
     Some(i - 1)
 }
 
+/// Rewrite a top-level string field without reserializing the rest of the
+/// request. This keeps prompt-cache-sensitive bytes (tool input key order,
+/// whitespace, and field order) identical to what the client sent.
+pub fn rewrite_root_string_field(body: Bytes, key: &[u8], value: &str) -> Option<Bytes> {
+    let (start, end) = find_root_key_value_span(&body, key)?;
+    if body.get(start).copied() != Some(b'"')
+        || body.get(end.saturating_sub(1)).copied() != Some(b'"')
+    {
+        return None;
+    }
+    let encoded = serde_json::to_vec(value).ok()?;
+    let mut out = Vec::with_capacity(body.len() - (end - start) + encoded.len());
+    out.extend_from_slice(&body[..start]);
+    out.extend_from_slice(&encoded);
+    out.extend_from_slice(&body[end..]);
+    Some(Bytes::from(out))
+}
+
 fn find_root_key_value_span(input: &[u8], key: &[u8]) -> Option<(usize, usize)> {
     let mut i = 0usize;
     // Skip whitespace
@@ -437,4 +455,37 @@ fn inject_include_usage_into_object(obj: &[u8]) -> Result<Vec<u8>, String> {
     }
     out.extend_from_slice(&obj[i + 1..]);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_string_rewrite_preserves_every_other_byte() {
+        let input = Bytes::from_static(
+            br#"{"model":"client-alias","messages":[{"role":"user","content":"x"}],"metadata":{"model":"nested"}}"#,
+        );
+        let rewritten = rewrite_root_string_field(input, b"model", "claude-sonnet-4").unwrap();
+        assert_eq!(
+            rewritten.as_ref(),
+            br#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"x"}],"metadata":{"model":"nested"}}"#
+        );
+    }
+
+    #[test]
+    fn root_string_rewrite_rejects_missing_or_nested_fields() {
+        assert!(
+            rewrite_root_string_field(
+                Bytes::from_static(br#"{"metadata":{"model":"x"}}"#),
+                b"model",
+                "y"
+            )
+            .is_none()
+        );
+        assert!(
+            rewrite_root_string_field(Bytes::from_static(br#"{"model":42}"#), b"model", "y")
+                .is_none()
+        );
+    }
 }

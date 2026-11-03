@@ -4,7 +4,7 @@ import type { ModelPrice, ProviderModelInventory } from './types';
 
 const inventory = (id: number, name = 'model-a', alias: string | null = null): ProviderModelInventory => ({
   id, provider_id: id, provider_name: `Provider ${id}`, provider_type: 'openai_compatible', upstream_model: name, alias,
-  enabled: true, available: true, responses_via_chat_enabled: false, native_api_formats: ['chat_completions'], created_at_ms: 1, updated_at_ms: 1,
+  enabled: true, available: true, responses_via_chat_enabled: false, messages_via_chat_enabled: false, native_api_formats: ['chat_completions'], created_at_ms: 1, updated_at_ms: 1,
 });
 const price = (provider: number | null, input: string | null): ModelPrice => ({
   id: provider ?? 0, provider_id: provider, model_name: 'model-a', created_at_ms: 1, updated_at_ms: 1,

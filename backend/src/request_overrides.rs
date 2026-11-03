@@ -111,6 +111,7 @@ pub enum RequestOverrideScope {
     All,
     ChatCompletions,
     Responses,
+    Messages,
 }
 
 impl RequestOverrideScope {
@@ -119,6 +120,7 @@ impl RequestOverrideScope {
             Self::All => true,
             Self::ChatCompletions => target == RequestOverrideTarget::ChatCompletions,
             Self::Responses => target == RequestOverrideTarget::Responses,
+            Self::Messages => target == RequestOverrideTarget::Messages,
         }
     }
 }
@@ -136,6 +138,7 @@ pub enum RequestOverrideTarget {
     Models,
     ChatCompletions,
     Responses,
+    Messages,
 }
 
 impl From<ApiFormat> for RequestOverrideTarget {
@@ -143,6 +146,7 @@ impl From<ApiFormat> for RequestOverrideTarget {
         match value {
             ApiFormat::ChatCompletions => Self::ChatCompletions,
             ApiFormat::Responses => Self::Responses,
+            ApiFormat::AnthropicMessages => Self::Messages,
         }
     }
 }
@@ -152,6 +156,7 @@ fn target_specific_scope(target: RequestOverrideTarget) -> Option<RequestOverrid
         RequestOverrideTarget::Models => None,
         RequestOverrideTarget::ChatCompletions => Some(RequestOverrideScope::ChatCompletions),
         RequestOverrideTarget::Responses => Some(RequestOverrideScope::Responses),
+        RequestOverrideTarget::Messages => Some(RequestOverrideScope::Messages),
     }
 }
 

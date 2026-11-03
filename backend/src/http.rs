@@ -63,6 +63,39 @@ pub fn bearer_token(req: &Request<Incoming>) -> Option<&str> {
     Some(rest)
 }
 
+/// Client credential extraction for proxy endpoints. Anthropic SDKs send
+/// x-api-key, while OpenAI-compatible clients use Authorization: Bearer.
+pub fn api_key_token(req: &Request<Incoming>) -> Option<&str> {
+    if let Some(raw) = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+    {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            return Some(raw);
+        }
+    }
+    bearer_token(req)
+}
+
+pub fn anthropic_error(
+    status: StatusCode,
+    error_type: &str,
+    message: impl Into<String>,
+) -> HttpResponse {
+    json(
+        status,
+        &serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": message.into(),
+            }
+        }),
+    )
+}
+
 pub async fn read_body_limited(
     req: Request<Incoming>,
     max_bytes: usize,

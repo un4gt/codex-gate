@@ -769,7 +769,12 @@ export async function syncProviderModels(settings: ConnectionSettings, providerI
 export async function updateProviderModel(
   settings: ConnectionSettings,
   modelId: number,
-  payload: { alias?: string | null; enabled?: boolean; responses_via_chat_enabled?: boolean },
+  payload: {
+    alias?: string | null;
+    enabled?: boolean;
+    responses_via_chat_enabled?: boolean;
+    messages_via_chat_enabled?: boolean;
+  },
 ) {
   const { apiBase, adminToken } = requireConnection(settings);
   return patchJson<{ ok: boolean }>(apiBase, `/api/v1/provider-models/${modelId}`, adminToken, payload);

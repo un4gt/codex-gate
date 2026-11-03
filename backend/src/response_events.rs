@@ -49,6 +49,16 @@ fn output_item(value: &Value) -> bool {
 /// Lifecycle/usage-only/error events and opaque encrypted reasoning are not output.
 pub(crate) fn output_event_kind(value: &Value) -> Option<&'static str> {
     let kind = value.get("type").and_then(Value::as_str)?;
+    if kind == "content_block_delta" {
+        let delta = value.get("delta")?;
+        let has_output = match delta.get("type").and_then(Value::as_str) {
+            Some("text_delta") => nonempty_string(delta, "text"),
+            Some("thinking_delta") => nonempty_string(delta, "thinking"),
+            Some("input_json_delta") => nonempty_string(delta, "partial_json"),
+            _ => false,
+        };
+        return has_output.then_some("delta");
+    }
     if kind.starts_with("response.") && kind.ends_with(".delta") && nonempty_string(value, "delta")
     {
         return Some("delta");
@@ -211,6 +221,7 @@ pub(crate) fn is_terminal_response_event(value: &Value) -> bool {
                 | "response.cancelled"
                 | "response.canceled"
                 | "error"
+                | "message_stop"
         )
     )
 }
@@ -220,6 +231,8 @@ pub(crate) fn service_tier(value: &Value) -> Option<String> {
         .get("response")
         .and_then(|r| r.get("service_tier"))
         .or_else(|| value.get("service_tier"))
+        .or_else(|| value.pointer("/message/service_tier"))
+        .or_else(|| value.pointer("/usage/service_tier"))
         .and_then(Value::as_str)
         .map(str::to_owned)
 }
@@ -274,6 +287,104 @@ pub(crate) fn event_usage(value: &Value) -> Option<Usage> {
         .or_else(|| value.get("usage").and_then(parse_usage))
 }
 
+fn messages_usage(value: &Value) -> Option<&Value> {
+    value
+        .get("message")
+        .and_then(|message| message.get("usage"))
+        .filter(|usage| usage.is_object())
+        .or_else(|| value.get("usage").filter(|usage| usage.is_object()))
+        .or_else(|| value.get("input_tokens").map(|_| value))
+}
+
+/// Anthropic reports uncached, cache-read, and cache-creation input tokens as
+/// separate counters. Unlike the OpenAI aliases, input_tokens must not be
+/// reduced by the cache counters.
+pub(crate) fn parse_messages_usage(value: &Value) -> Option<Usage> {
+    let usage = messages_usage(value)?;
+    let input = usage.get("input_tokens").and_then(Value::as_i64)?;
+    let output = usage.get("output_tokens").and_then(Value::as_i64)?;
+    if input < 0 || output < 0 {
+        return None;
+    }
+    Some(Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_input_tokens: usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+            .unwrap_or(0),
+        cache_creation_input_tokens: messages_cache_creation_tokens(usage),
+        reasoning_output_tokens: usage
+            .pointer("/output_tokens_details/thinking_tokens")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+            .unwrap_or(0),
+    })
+}
+
+fn messages_cache_creation_tokens(usage: &Value) -> i64 {
+    usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .unwrap_or_else(|| {
+            ["ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"]
+                .iter()
+                .filter_map(|field| {
+                    usage
+                        .pointer(&format!("/cache_creation/{field}"))
+                        .and_then(Value::as_i64)
+                        .filter(|value| *value >= 0)
+                })
+                .sum()
+        })
+}
+
+fn merge_messages_usage(current: &mut Usage, value: &Value) {
+    let Some(usage) = messages_usage(value) else {
+        return;
+    };
+    for (field, target) in [
+        ("input_tokens", &mut current.input_tokens),
+        ("output_tokens", &mut current.output_tokens),
+        (
+            "cache_read_input_tokens",
+            &mut current.cache_read_input_tokens,
+        ),
+        (
+            "output_tokens_details/thinking_tokens",
+            &mut current.reasoning_output_tokens,
+        ),
+    ] {
+        if let Some(next) = usage
+            .pointer(&format!("/{field}"))
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+        {
+            *target = next;
+        }
+    }
+    if usage.get("cache_creation_input_tokens").is_some() || usage.get("cache_creation").is_some() {
+        current.cache_creation_input_tokens = messages_cache_creation_tokens(usage);
+    }
+}
+
+fn is_messages_stream_event(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some(
+            "message_start"
+                | "message_delta"
+                | "message_stop"
+                | "content_block_start"
+                | "content_block_delta"
+                | "content_block_stop"
+                | "ping"
+        )
+    )
+}
+
 #[derive(Default)]
 pub(crate) struct Observation {
     pub first_output_kind: Option<&'static str>,
@@ -288,7 +399,14 @@ impl Observation {
             self.first_output_kind = output_event_kind(value);
         }
         let terminal = is_terminal_response_event(value);
-        if let Some(usage) = event_usage(value)
+        if is_messages_stream_event(value) {
+            let mut usage = self.usage.unwrap_or_default();
+            let has_usage = messages_usage(value).is_some();
+            merge_messages_usage(&mut usage, value);
+            if has_usage {
+                self.usage = Some(usage);
+            }
+        } else if let Some(usage) = event_usage(value)
             && (terminal || !self.terminal_usage)
         {
             self.usage = Some(usage);
@@ -313,6 +431,15 @@ pub(crate) fn terminal_status(value: &Value) -> (StatusCode, Option<String>, Opt
             "encrypted content could not be verified",
         );
         return (StatusCode::BAD_REQUEST, Some(code), Some(message));
+    }
+    if value.get("type").and_then(Value::as_str) == Some("message_stop") {
+        return (StatusCode::OK, None, None);
+    }
+    if value.get("type").and_then(Value::as_str) == Some("error")
+        && let Some(status) = anthropic_error_status(value)
+    {
+        let (code, message) = error_fields(value.get("error"), "api_error", "upstream error");
+        return (status, Some(code), Some(message));
     }
     let status = value
         .get("response")
@@ -422,6 +549,25 @@ fn response_cancelled_status(value: &Value) -> (StatusCode, Option<String>, Opti
         Some("response_cancelled".to_string()),
         Some("response cancelled".to_string()),
     )
+}
+
+fn anthropic_error_status(value: &Value) -> Option<StatusCode> {
+    let kind = value
+        .get("error")
+        .and_then(|error| error.get("type"))
+        .and_then(Value::as_str)?;
+    Some(match kind {
+        "invalid_request_error" => StatusCode::BAD_REQUEST,
+        "authentication_error" => StatusCode::UNAUTHORIZED,
+        "permission_error" => StatusCode::FORBIDDEN,
+        "not_found_error" => StatusCode::NOT_FOUND,
+        "request_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        "rate_limit_error" => StatusCode::TOO_MANY_REQUESTS,
+        "timeout_error" => StatusCode::GATEWAY_TIMEOUT,
+        "overloaded_error" => StatusCode::SERVICE_UNAVAILABLE,
+        "api_error" => StatusCode::BAD_GATEWAY,
+        _ => return None,
+    })
 }
 
 fn status_from_value(value: Option<&Value>) -> Option<StatusCode> {
@@ -629,5 +775,95 @@ mod tests {
             assert!(terminal_status(&value).1.is_some());
             assert!(event_usage(&value).is_some());
         }
+    }
+
+    #[test]
+    fn messages_usage_keeps_uncached_input_separate_from_cache_counters() {
+        let usage = parse_messages_usage(&json!({
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 90,
+            "cache_creation_input_tokens": 3,
+            "output_tokens_details": {"thinking_tokens": 2}
+        }))
+        .unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_input_tokens, 90);
+        assert_eq!(usage.cache_creation_input_tokens, 3);
+        assert_eq!(usage.reasoning_output_tokens, 2);
+    }
+
+    #[test]
+    fn messages_usage_falls_back_to_cache_creation_ttl_breakdown() {
+        let usage = parse_messages_usage(&json!({
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 4,
+                "ephemeral_5m_input_tokens": 6
+            }
+        }))
+        .unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, 10);
+    }
+
+    #[test]
+    fn messages_stream_observation_merges_start_and_delta_usage() {
+        let mut observation = Observation::default();
+        observation.observe(&json!({
+            "type": "message_start",
+            "message": {"usage": {
+                "input_tokens": 10,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 90
+            }}
+        }));
+        observation.observe(&json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hi"}
+        }));
+        observation.observe(&json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 7}
+        }));
+        observation.observe(&json!({"type": "message_stop"}));
+        let usage = observation.usage.unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_input_tokens, 90);
+        assert_eq!(observation.first_output_kind, Some("delta"));
+        assert!(observation.terminal);
+        assert_eq!(
+            terminal_status(&json!({"type": "message_stop"})).0,
+            StatusCode::OK
+        );
+    }
+
+    #[test]
+    fn messages_errors_map_to_retryable_http_statuses() {
+        assert_eq!(
+            terminal_status(
+                &json!({"type":"error","error":{"type":"overloaded_error","message":"busy"}})
+            )
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            terminal_status(
+                &json!({"type":"error","error":{"type":"rate_limit_error","message":"slow"}})
+            )
+            .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            terminal_status(
+                &json!({"type":"error","error":{"type":"authentication_error","message":"bad"}})
+            )
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }
