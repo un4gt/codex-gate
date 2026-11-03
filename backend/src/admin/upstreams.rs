@@ -46,6 +46,11 @@ pub(super) async fn read(state: SharedState, id: Option<i64>, runtime_only: bool
     };
     let now = util::now_ms();
     let counts = state.affinity.binding_counts_by_provider(now);
+    let usage_by_provider = if runtime_only {
+        HashMap::new()
+    } else {
+        provider_usage_totals(&state).await
+    };
     let mut out = Vec::new();
     for p in snap
         .providers
@@ -92,6 +97,7 @@ pub(super) async fn read(state: SharedState, id: Option<i64>, runtime_only: bool
                 .map_or(0, HashMap::len)
         );
         provider["model_sync"] = sync.get(&p.id).cloned().unwrap_or(Value::Null);
+        provider["usage"] = provider_usage_value(&usage_by_provider, p.id);
         let mut value = serde_json::json!({"provider":provider,"endpoints":[],"keys":[]});
         if id.is_some() {
             let accounts = match state

@@ -1,5 +1,11 @@
 import Decimal from 'decimal.js-light';
-import type { PriceCardV2, PriceRates, RequestPricing, StatsOverviewResponse } from '@/lib/types';
+import type {
+  PriceCardV2,
+  PriceRates,
+  RequestPricing,
+  StatsOverviewResponse,
+  StatsUsageBreakdownGroup,
+} from '@/lib/types';
 
 const TOKENS_PER_MILLION = new Decimal(1_000_000);
 
@@ -39,6 +45,71 @@ export interface OverviewPricingResult {
   unpricedTokens: number;
   observedTokens: number;
   tokenCoveragePercent: Decimal;
+}
+
+export interface UsageBreakdownRow {
+  key: string;
+  label: string;
+  requestCount: number;
+  usage: PricingUsage;
+  costUsd: Decimal;
+  unpricedRequests: number;
+}
+
+/**
+ * Aggregate the API's price-version groups into model/provider rows. The API
+ * returns groups split by price version and tier so cost remains exact; the
+ * display only combines groups with the same model or provider.
+ */
+export function aggregateUsageBreakdown(
+  groups: StatsUsageBreakdownGroup[] | undefined,
+  versions: Array<{ id: number; card: PriceCardV2 }>,
+  dimension: 'model' | 'provider',
+): UsageBreakdownRow[] {
+  const cards = new Map(versions.map((version) => [version.id, version.card]));
+  const rows = new Map<string, UsageBreakdownRow>();
+  for (const group of groups ?? []) {
+    const key = dimension === 'model'
+      ? group.model?.trim() || 'unknown'
+      : String(group.provider_id ?? 'unknown');
+    const existing = rows.get(key) ?? {
+      key,
+      label: dimension === 'model'
+        ? group.model?.trim() || '—'
+        : group.provider_name?.trim() || `#${group.provider_id ?? '?'}`,
+      requestCount: 0,
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      costUsd: new Decimal(0),
+      unpricedRequests: 0,
+    };
+    existing.requestCount += Math.max(group.request_count, 0);
+    existing.usage.input_tokens += Math.max(group.input_tokens, 0);
+    existing.usage.output_tokens += Math.max(group.output_tokens, 0);
+    existing.usage.cache_read_input_tokens += Math.max(group.cache_read_input_tokens, 0);
+    existing.usage.cache_creation_input_tokens += Math.max(group.cache_creation_input_tokens, 0);
+    const card = group.price_version_id === null ? null : cards.get(group.price_version_id) ?? null;
+    if (card === null || group.tier_index === null) {
+      existing.unpricedRequests += Math.max(group.request_count, 0);
+    } else {
+      const result = calculateUsageCost(group, card, group.tier_index);
+      if (result.status === 'priced') {
+        existing.costUsd = existing.costUsd.plus(result.totalUsd);
+      } else {
+        existing.unpricedRequests += Math.max(group.request_count, 0);
+      }
+    }
+    rows.set(key, existing);
+  }
+  return [...rows.values()].sort(
+    (left, right) =>
+      totalUsageTokens(right.usage) - totalUsageTokens(left.usage) ||
+      left.label.localeCompare(right.label),
+  );
 }
 
 export function totalInputTokens(usage: PricingUsage): number {

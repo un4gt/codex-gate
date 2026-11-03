@@ -2148,6 +2148,59 @@ fn validate_provider_group_assignments(
     Ok(())
 }
 
+pub(super) fn provider_usage_value(
+    usage_by_provider: &HashMap<i64, Value>,
+    provider_id: i64,
+) -> Value {
+    usage_by_provider
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "request_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "total_tokens": 0,
+            })
+        })
+}
+
+pub(super) async fn provider_usage_totals(state: &SharedState) -> HashMap<i64, Value> {
+    match tokio_time::timeout(
+        std::time::Duration::from_secs(2),
+        state.db.aggregate_stats_provider_usage_totals(),
+    )
+    .await
+    {
+        Ok(Ok(rows)) => rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.provider_id,
+                    serde_json::json!({
+                        "request_count": row.request_count,
+                        "input_tokens": row.input_tokens,
+                        "output_tokens": row.output_tokens,
+                        "cache_read_input_tokens": row.cache_read_input_tokens,
+                        "cache_creation_input_tokens": row.cache_creation_input_tokens,
+                        "total_tokens": row.total_tokens,
+                    }),
+                )
+            })
+            .collect::<HashMap<_, _>>(),
+        Ok(Err(error)) => {
+            log::warn!("Failed to aggregate provider lifetime usage: {error}");
+            HashMap::new()
+        }
+        Err(_) => {
+            log::warn!("Provider lifetime usage aggregation timed out");
+            HashMap::new()
+        }
+    }
+}
+
 async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let snap = match state
         .caches
@@ -2161,6 +2214,7 @@ async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResp
 
     let now_ms = util::now_ms();
     let affinity_counts = state.affinity.binding_counts_by_provider(now_ms);
+    let usage_by_provider = provider_usage_totals(&state).await;
     let out = snap
         .providers
         .iter()
@@ -2199,6 +2253,7 @@ async fn list_providers(_req: Request<Incoming>, state: SharedState) -> HttpResp
             value["routing_availability"] = serde_json::json!(
                 crate::routing_availability::provider(&state, &snap, provider)
             );
+            value["usage"] = provider_usage_value(&usage_by_provider, provider.id);
             value
         })
         .collect::<Vec<_>>();
@@ -3969,9 +4024,48 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         }
     };
     let (agg, points) = stats_series_points(from_ms, to_ms, interval_ms, buckets);
+    let breakdown_timeout = std::time::Duration::from_secs(2);
+    let (by_model, by_provider) = tokio::join!(
+        tokio_time::timeout(
+            breakdown_timeout,
+            state.db.aggregate_stats_usage_by_model(from_ms, to_ms)
+        ),
+        tokio_time::timeout(
+            breakdown_timeout,
+            state.db.aggregate_stats_usage_by_provider(from_ms, to_ms)
+        )
+    );
+    let by_model = match by_model {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => {
+            log::warn!("Failed to aggregate model usage breakdown: {error}");
+            Vec::new()
+        }
+        Err(_) => {
+            log::warn!("Model usage breakdown aggregation timed out");
+            Vec::new()
+        }
+    };
+    let by_provider = match by_provider {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => {
+            log::warn!("Failed to aggregate provider usage breakdown: {error}");
+            Vec::new()
+        }
+        Err(_) => {
+            log::warn!("Provider usage breakdown aggregation timed out");
+            Vec::new()
+        }
+    };
     let mut price_version_ids = pricing_groups
         .iter()
         .filter_map(|group| group.price_version_id)
+        .chain(by_model.iter().filter_map(|group| group.price_version_id))
+        .chain(
+            by_provider
+                .iter()
+                .filter_map(|group| group.price_version_id),
+        )
         .collect::<Vec<_>>();
     price_version_ids.sort_unstable();
     price_version_ids.dedup();
@@ -4131,6 +4225,10 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
         "pricing": {
             "versions": pricing_versions_json,
             "usage_groups": pricing_groups_json
+        },
+        "breakdown": {
+            "by_model": by_model,
+            "by_provider": by_provider
         }
     });
 

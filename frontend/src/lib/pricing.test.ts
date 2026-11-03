@@ -1,9 +1,10 @@
 import { describe, expect, it } from '@rstest/core';
-import type { PriceCardV2, StatsOverviewResponse } from '@/lib/types';
+import type { PriceCardV2, StatsOverviewResponse, StatsUsageBreakdownGroup } from '@/lib/types';
 import {
   calculateOverviewPricing,
   calculateRequestPricing,
   calculateUsageCost,
+  aggregateUsageBreakdown,
   selectTierIndex,
 } from '@/lib/pricing';
 
@@ -119,4 +120,37 @@ describe('context-tier pricing', () => {
     expect(result.usageMissingRequests).toBe(1);
     expect(result.tokenCoveragePercent.toString()).toBe('50');
   });
+  it('aggregates model and provider breakdowns while preserving priced and unpriced groups', () => {
+    const groups: StatsUsageBreakdownGroup[] = [
+      {
+        model: 'model-a', provider_id: 1, provider_name: 'Provider A',
+        price_version_id: 7, tier_index: 0, request_count: 2,
+        input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 10,
+        cache_creation_input_tokens: 5,
+      },
+      {
+        model: 'model-a', provider_id: 1, provider_name: 'Provider A',
+        price_version_id: null, tier_index: null, request_count: 1,
+        input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      {
+        model: 'model-b', provider_id: 2, provider_name: 'Provider B',
+        price_version_id: 7, tier_index: 0, request_count: 1,
+        input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    ];
+    const byModel = aggregateUsageBreakdown(groups, [{ id: 7, card }], 'model');
+    expect(byModel.map((row) => row.key)).toEqual(['model-a', 'model-b']);
+    expect(byModel[0].requestCount).toBe(3);
+    expect(byModel[0].usage.input_tokens).toBe(101);
+    expect(byModel[0].unpricedRequests).toBe(1);
+    expect(byModel[0].costUsd.toString()).toBe('0.000568125');
+    const byProvider = aggregateUsageBreakdown(groups, [{ id: 7, card }], 'provider');
+    expect(byProvider.map((row) => row.label)).toEqual(['Provider A', 'Provider B']);
+    expect(byProvider[0].requestCount).toBe(3);
+    expect(byProvider[1].usage.input_tokens).toBe(10);
+  });
+
 });

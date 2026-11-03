@@ -303,6 +303,32 @@ pub struct PricingUsageGroupRow {
     pub cache_creation_input_tokens: i64,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct StatsUsageBreakdownRow {
+    pub model: Option<String>,
+    pub provider_id: Option<i64>,
+    pub provider_name: Option<String>,
+    pub price_version_id: Option<i64>,
+    #[serde(rename = "tier_index")]
+    pub price_tier_index: Option<i32>,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_creation_input_tokens: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct StatsProviderUsageTotalsRow {
+    pub provider_id: i64,
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_creation_input_tokens: i64,
+    pub total_tokens: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PricingReconciliationKeyRow {
     pub provider_id: Option<i64>,

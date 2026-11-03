@@ -493,6 +493,14 @@ export interface ProviderSummary {
     last_success_ms: number | null;
     error: string | null;
   } | null;
+  usage?: {
+    request_count: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    total_tokens: number;
+  };
   routing_availability?: RoutingAvailability;
   id: number;
   name: string;
@@ -944,6 +952,19 @@ export interface StatsSeriesPoint {
   cache_creation_input_tokens: number;
   usage_observed_requests: number;
 }
+export interface StatsUsageBreakdownGroup {
+  model?: string | null;
+  provider_id?: number | null;
+  provider_name?: string | null;
+  price_version_id: number | null;
+  tier_index: number | null;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
 export interface StatsOverviewResponse {
   series?: { interval_ms: number; points: StatsSeriesPoint[] };
   period: StatsPeriod;
@@ -1004,6 +1025,10 @@ export interface StatsOverviewResponse {
       cache_read_input_tokens: number;
       cache_creation_input_tokens: number;
     }>;
+  };
+  breakdown?: {
+    by_model: StatsUsageBreakdownGroup[];
+    by_provider: StatsUsageBreakdownGroup[];
   };
 }
 

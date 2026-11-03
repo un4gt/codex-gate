@@ -2,7 +2,12 @@ import type { AppDataContext } from "@/App";
 import { loadStatsOverview } from "@/lib/api";
 import { formatBytes, formatCompactInteger, formatMs } from "@/lib/format";
 import { getIntlLocale, t, useI18n } from "@/lib/i18n";
-import { calculateOverviewPricing, formatUsd } from "@/lib/pricing";
+import {
+  aggregateUsageBreakdown,
+  calculateOverviewPricing,
+  formatUsd,
+  totalUsageTokens,
+} from "@/lib/pricing";
 import type {
   ConnectionSettings,
   StatItem,
@@ -32,6 +37,12 @@ import { type CssVarsTheme, useColorScheme, useTheme } from "@mui/material/style
 import Typography from "@mui/material/Typography";
 import ToggleButton from "@mui/material/ToggleButton";
 import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
 import { BarChart, BarPlot } from "@mui/x-charts/BarChart";
 import { ChartsAxisHighlight } from "@mui/x-charts/ChartsAxisHighlight";
 import { ChartsContainer } from "@mui/x-charts/ChartsContainer";
@@ -42,8 +53,9 @@ import { ChartsYAxis } from "@mui/x-charts/ChartsYAxis";
 import { LineHighlightPlot, LinePlot } from "@mui/x-charts/LineChart";
 import { SparkLineChart } from "@mui/x-charts/SparkLineChart";
 import { PieChart } from "@mui/x-charts/PieChart";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
+import { TableSkeleton } from "./console/TableSkeleton";
 const OVERVIEW_PERIODS: {
   value: StatsPeriod;
   label: string;
@@ -126,6 +138,7 @@ export default function OverviewPage(props: { data: AppDataContext }) {
   const [period, setPeriod] = useState<StatsPeriod>("today");
   const [copied, setCopied] = useState(false);
   const [trendView, setTrendView] = useState<"all" | "requests" | "tokens">("all");
+  const [breakdownView, setBreakdownView] = useState<"model" | "provider">("model");
   const loadOverview = useCallback(
     async (settings: ConnectionSettings) => ({
       period,
@@ -162,6 +175,17 @@ export default function OverviewPage(props: { data: AppDataContext }) {
     return (cacheTokens() / total) * 100;
   };
   const overviewPricing = overview ? calculateOverviewPricing(overview) : null;
+  const breakdownRows = useMemo(
+    () =>
+      aggregateUsageBreakdown(
+        breakdownView === "model"
+          ? overview?.breakdown?.by_model
+          : overview?.breakdown?.by_provider,
+        overview?.pricing.versions ?? [],
+        breakdownView,
+      ),
+    [breakdownView, overview],
+  );
   const metrics = (): StatItem[] => {
     const current = overview;
     if (current) {
@@ -730,6 +754,103 @@ export default function OverviewPage(props: { data: AppDataContext }) {
           </Card>
         </Grid>
       </Grid>
+      <Card>
+        <CardContent sx={{ p: 2, "&:last-child": { pb: 1.5 } }}>
+          <Stack
+            direction="row"
+            sx={{ alignItems: "center", gap: 1.5, flexWrap: "wrap" }}
+          >
+            <Typography component="h2" variant="h2">
+              {t("模型与渠道用量")}
+            </Typography>
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={breakdownView}
+              onChange={(_, value) => value && setBreakdownView(value)}
+              aria-label={t("模型与渠道用量")}
+              sx={{
+                ml: "auto",
+                "& .MuiToggleButton-root": {
+                  py: 0.25,
+                  px: 1,
+                  fontSize: 12,
+                  textTransform: "none",
+                  lineHeight: 1.6,
+                },
+              }}
+            >
+              <ToggleButton value="model">{t("按模型")}</ToggleButton>
+              <ToggleButton value="provider">{t("按渠道")}</ToggleButton>
+            </ToggleButtonGroup>
+          </Stack>
+          {loading && !overview ? (
+            <TableSkeleton
+              ariaLabel={t("模型与渠道用量")}
+              rows={6}
+              minWidth={560}
+              containerSx={{ maxHeight: 320, mt: 1 }}
+              columns={[
+                { label: t(breakdownView === "model" ? "模型" : "渠道") },
+                { label: t("请求"), align: "right", skeletonWidth: 36 },
+                { label: t("Token 用量"), align: "right", skeletonWidth: 64 },
+                { label: t("花费"), align: "right", skeletonWidth: 52 },
+              ]}
+            />
+          ) : breakdownRows.length > 0 ? (
+            <TableContainer sx={{ maxHeight: 320, mt: 1 }}>
+              <Table size="small" stickyHeader aria-label={t("模型与渠道用量")}>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>{t(breakdownView === "model" ? "模型" : "渠道")}</TableCell>
+                    <TableCell align="right">{t("请求")}</TableCell>
+                    <TableCell align="right">{t("Token 用量")}</TableCell>
+                    <TableCell align="right">{t("花费")}</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {breakdownRows.map((row) => {
+                    const tokens = totalUsageTokens(row.usage);
+                    return (
+                      <TableRow key={row.key} hover>
+                        <TableCell sx={{ maxWidth: 360, overflowWrap: "anywhere" }}>
+                          {row.label}
+                        </TableCell>
+                        <TableCell align="right">
+                          {formatCompactInteger(row.requestCount)}
+                        </TableCell>
+                        <TableCell
+                          align="right"
+                          title={`${t("输入")}: ${formatCompactInteger(row.usage.input_tokens)} · ${t("输出")}: ${formatCompactInteger(row.usage.output_tokens)} · ${t("缓存读")}: ${formatCompactInteger(row.usage.cache_read_input_tokens)} · ${t("缓存写")}: ${formatCompactInteger(row.usage.cache_creation_input_tokens)}`}
+                        >
+                          {formatCompactInteger(tokens)}
+                        </TableCell>
+                        <TableCell
+                          align="right"
+                          title={
+                            row.unpricedRequests > 0
+                              ? `${row.unpricedRequests} × ${t("未定价")}`
+                              : undefined
+                          }
+                        >
+                          {row.costUsd.isZero() && row.unpricedRequests > 0
+                            ? t("未定价")
+                            : formatUsd(row.costUsd)}
+                          {!row.costUsd.isZero() && row.unpricedRequests > 0 ? " *" : ""}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          ) : (
+            <Typography color="text.secondary" sx={{ mt: 1.5, fontSize: 13 }}>
+              {t("暂无用量明细")}
+            </Typography>
+          )}
+        </CardContent>
+      </Card>
       <Card>
         <Box
           sx={{

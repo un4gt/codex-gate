@@ -53,7 +53,7 @@ import MoreHorizontal from "@mui/icons-material/MoreHorizOutlined";
 import RefreshCw from "@mui/icons-material/RefreshOutlined";
 
 import * as api from "@/lib/api";
-import { formatDateTime,formatMs } from "@/lib/format";
+import { formatCompactInteger, formatDateTime, formatMs } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import {
 createRequestOverridesDraft,
@@ -156,6 +156,7 @@ export function ProvidersPage(props: Props) {
                 "地址数",
                 "凭据数",
                 "模型数",
+                "总用量",
                 "状态",
                 "管理",
               ].map((label) => (
@@ -166,7 +167,7 @@ export function ProvidersPage(props: Props) {
           <TableBody>
             {!props.items.length ? (
               <TableRow>
-                <TableCell colSpan={7} align="center" sx={{ py: 6 }}>
+                <TableCell colSpan={8} align="center" sx={{ py: 6 }}>
                   {props.loading ? (
                     <CircularProgress size={24} aria-label={t("加载中")} />
                   ) : (
@@ -210,6 +211,16 @@ export function ProvidersPage(props: Props) {
                 <TableCell align="right">{p.endpoint_count ?? 0}</TableCell>
                 <TableCell align="right">{p.key_count ?? 0}</TableCell>
                 <TableCell align="right">{p.model_count ?? 0}</TableCell>
+                <TableCell
+                  align="right"
+                  title={
+                    p.usage
+                      ? `${t("请求")}: ${p.usage.request_count} · ${t("输入")}: ${p.usage.input_tokens} · ${t("输出")}: ${p.usage.output_tokens} · ${t("缓存读")}: ${p.usage.cache_read_input_tokens}`
+                      : undefined
+                  }
+                >
+                  {p.usage ? formatCompactInteger(p.usage.total_tokens) : "—"}
+                </TableCell>
                 <TableCell>
                   <Chip
                     sx={{ height: 20, fontSize: 11, fontWeight: 500 }}

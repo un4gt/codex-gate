@@ -5,6 +5,7 @@ import Grid from "@mui/material/Grid";
 import Skeleton from "@mui/material/Skeleton";
 import Typography from "@mui/material/Typography";
 import { useI18n } from "@/lib/i18n";
+import { TableSkeleton } from "./TableSkeleton";
 
 export function OverviewSkeleton() {
   const { t } = useI18n();
@@ -93,6 +94,25 @@ export function OverviewSkeleton() {
           </Card>
         </Grid>
       </Grid>
+      <Card>
+        <CardContent sx={{ p: 2, "&:last-child": { pb: 1.5 } }}>
+          <Typography component="h2" variant="h2">
+            {t("模型与渠道用量")}
+          </Typography>
+          <TableSkeleton
+            ariaLabel={t("模型与渠道用量")}
+            rows={6}
+            minWidth={560}
+            containerSx={{ maxHeight: 320, mt: 1 }}
+            columns={[
+              { label: t("模型") },
+              { label: t("请求"), align: "right", skeletonWidth: 36 },
+              { label: t("Token 用量"), align: "right", skeletonWidth: 64 },
+              { label: t("花费"), align: "right", skeletonWidth: 52 },
+            ]}
+          />
+        </CardContent>
+      </Card>
     </Box>
   );
 }
