@@ -89,7 +89,7 @@ pub fn messages_request_to_chat(
             "auto" => {
                 chat.insert("service_tier".to_string(), Value::String("auto".into()));
             }
-            "standard_only" => {
+            "standard_only" | "default" | "flex" => {
                 chat.insert("service_tier".to_string(), Value::String("default".into()));
             }
             _ => context.warn("dropped_service_tier"),
@@ -172,41 +172,11 @@ fn reasoning_effort(
     object: &Map<String, Value>,
     context: &mut ConversionContext,
 ) -> Option<String> {
-    if let Some(effort) = object
-        .get("output_config")
-        .and_then(|config| config.get("effort"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(effort.to_ascii_lowercase());
+    let effort = crate::response_events::anthropic_reasoning_effort(object);
+    if effort.is_some() && object.get("thinking").is_some() {
+        context.warn("mapped_thinking_to_reasoning_effort");
     }
-    let thinking = object.get("thinking")?;
-    match thinking.get("type").and_then(Value::as_str)? {
-        "enabled" => {
-            let budget = thinking
-                .get("budget_tokens")
-                .and_then(Value::as_i64)
-                .unwrap_or(4096);
-            context.warn("mapped_thinking_to_reasoning_effort");
-            Some(
-                if budget <= 2048 {
-                    "low"
-                } else if budget <= 8192 {
-                    "medium"
-                } else {
-                    "high"
-                }
-                .to_string(),
-            )
-        }
-        "adaptive" | "auto" => {
-            context.warn("mapped_thinking_to_reasoning_effort");
-            Some("high".to_string())
-        }
-        "disabled" => None,
-        _ => None,
-    }
+    effort
 }
 
 fn system_content(value: &Value, context: &mut ConversionContext) -> Option<Value> {
@@ -731,6 +701,14 @@ fn usage_value(usage: Usage, observed: bool) -> Value {
     out
 }
 
+fn usage_value_with_tier(usage: Usage, observed: bool, tier: Option<&str>) -> Value {
+    let mut value = usage_value(usage, observed);
+    if let Some(tier) = tier {
+        value["service_tier"] = Value::String(tier.to_string());
+    }
+    value
+}
+
 fn map_stop_reason(reason: Option<&str>) -> &'static str {
     match reason {
         Some("max_tokens" | "length") => "max_tokens",
@@ -752,6 +730,91 @@ fn thinking_block(text: &str) -> Value {
         "thinking": text,
         "signature": format!("lg_{}", short_hash(text.as_bytes())),
     })
+}
+
+/// Rough local token count for Chat->Messages models. Claude Code asks
+/// `/v1/messages/count_tokens` while estimating context; a chat-only upstream
+/// has no Anthropic token-count endpoint, so return a deterministic estimate
+/// instead of failing the request.
+pub fn estimate_messages_input_tokens(body: &[u8]) -> Option<i64> {
+    let root = serde_json::from_slice::<Value>(body).ok()?;
+    let mut weight = 0usize;
+    let mut message_count = 0usize;
+    let mut tool_count = 0usize;
+    if let Some(system) = root.get("system") {
+        weight = weight.saturating_add(content_weight(system));
+    }
+    if let Some(messages) = root.get("messages").and_then(Value::as_array) {
+        message_count = messages.len();
+        for message in messages {
+            if let Some(content) = message.get("content") {
+                weight = weight.saturating_add(content_weight(content));
+            }
+        }
+    }
+    if let Some(tools) = root.get("tools").and_then(Value::as_array) {
+        tool_count = tools.len();
+        for tool in tools {
+            weight = weight.saturating_add(tool_weight(tool));
+        }
+    }
+    if weight == 0 {
+        weight = body.len();
+    }
+    let tokens = weight / 4 + message_count.saturating_mul(4) + tool_count.saturating_mul(8);
+    Some(i64::try_from(tokens.max(1)).unwrap_or(i64::MAX))
+}
+
+fn text_weight(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch.is_ascii() { 1 } else { 6 })
+        .sum()
+}
+
+fn json_weight(value: &Value) -> usize {
+    serde_json::to_string(value)
+        .map(|text| text_weight(&text))
+        .unwrap_or_default()
+}
+
+fn content_weight(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text_weight(text),
+        Value::Array(parts) => parts.iter().map(block_weight).sum(),
+        Value::Null => 0,
+        other => json_weight(other),
+    }
+}
+
+fn block_weight(block: &Value) -> usize {
+    match block.get("type").and_then(Value::as_str).unwrap_or("text") {
+        "text" => text_weight(block.get("text").and_then(Value::as_str).unwrap_or("")),
+        "thinking" => text_weight(block.get("thinking").and_then(Value::as_str).unwrap_or("")),
+        "image" | "document" | "file" => 6_400,
+        "tool_use" => {
+            let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+            text_weight(name)
+                .saturating_add(json_weight(block.get("input").unwrap_or(&Value::Null)))
+        }
+        "tool_result" => block
+            .get("content")
+            .map(content_weight)
+            .unwrap_or_default()
+            .saturating_add(8),
+        _ => json_weight(block),
+    }
+}
+
+fn tool_weight(tool: &Value) -> usize {
+    let mut weight = text_weight(tool.get("name").and_then(Value::as_str).unwrap_or(""));
+    weight = weight.saturating_add(text_weight(
+        tool.get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    ));
+    weight.saturating_add(json_weight(
+        tool.get("input_schema").unwrap_or(&Value::Null),
+    ))
 }
 
 pub fn chat_response_to_messages(body: &[u8], requested_model: &str) -> Result<Bytes, String> {
@@ -797,10 +860,13 @@ pub fn chat_response_to_messages(body: &[u8], requested_model: &str) -> Result<B
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or(requested_model);
-    let usage = root
+    let mut usage = root
         .get("usage")
         .map(usage_to_anthropic)
         .unwrap_or_else(|| usage_value(Usage::default(), false));
+    if let Some(tier) = crate::response_events::service_tier(&root) {
+        usage["service_tier"] = Value::String(tier);
+    }
     let stop_reason = map_stop_reason(
         choice
             .get("finish_reason")
@@ -895,6 +961,7 @@ pub struct ChatSseToMessages {
     tool_order: Vec<usize>,
     usage: Usage,
     usage_observed: bool,
+    service_tier: Option<String>,
     finish_reason: Option<String>,
 }
 
@@ -915,6 +982,7 @@ impl ChatSseToMessages {
             tool_order: Vec::new(),
             usage: Usage::default(),
             usage_observed: false,
+            service_tier: None,
             finish_reason: None,
         }
     }
@@ -981,6 +1049,9 @@ impl ChatSseToMessages {
             self.usage = usage;
             self.usage_observed = true;
         }
+        if let Some(tier) = crate::response_events::service_tier(value) {
+            self.service_tier = Some(tier);
+        }
         let Some(choice) = value
             .get("choices")
             .and_then(Value::as_array)
@@ -1033,7 +1104,7 @@ impl ChatSseToMessages {
                     "content": [],
                     "stop_reason": Value::Null,
                     "stop_sequence": Value::Null,
-                    "usage": usage_value(self.usage, self.usage_observed),
+                    "usage": usage_value_with_tier(self.usage, self.usage_observed, self.service_tier.as_deref()),
                 }
             }),
         )]
@@ -1263,7 +1334,7 @@ impl ChatSseToMessages {
             json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
-                "usage": usage_value(self.usage, self.usage_observed),
+                "usage": usage_value_with_tier(self.usage, self.usage_observed, self.service_tier.as_deref()),
             }),
         ));
         out.push(event("message_stop", json!({ "type": "message_stop" })));
@@ -1391,6 +1462,32 @@ mod tests {
     }
 
     #[test]
+    fn estimate_messages_input_tokens_is_deterministic_and_counts_tools() {
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "system": "You are a coding agent.",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "hello 世界"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "a"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "file body"}
+                ]}
+            ],
+            "tools": [{"name": "Read", "description": "read", "input_schema": {"type": "object"}}]
+        });
+        let encoded = serde_json::to_vec(&request).unwrap();
+        let first = estimate_messages_input_tokens(&encoded).unwrap();
+        let second = estimate_messages_input_tokens(&encoded).unwrap();
+        assert_eq!(first, second);
+        assert!(first >= 1600, "{first}");
+    }
+
+    #[test]
     fn response_converts_text_tools_and_cache_usage() {
         let response = json!({
             "id": "chatcmpl-1",
@@ -1414,7 +1511,8 @@ mod tests {
                 "completion_tokens": 5,
                 "prompt_tokens_details": {"cached_tokens": 90, "cache_creation_tokens": 3},
                 "completion_tokens_details": {"reasoning_tokens": 2}
-            }
+            },
+            "service_tier": "default"
         });
         let converted = chat_response_to_messages(&body(response), "deepseek-v4-flash").unwrap();
         let value: Value = serde_json::from_slice(&converted).unwrap();
@@ -1462,7 +1560,7 @@ mod tests {
             json!({"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}),
             json!({"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
             json!({"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a\"}"}}]},"finish_reason":"tool_calls"}]}),
-            json!({"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":90}}}),
+            json!({"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":90},"service_tier":"default"}}),
         ];
         let mut out = Vec::new();
         for chunk in chunks {

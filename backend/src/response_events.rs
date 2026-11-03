@@ -15,6 +15,46 @@ pub(crate) fn reasoning_effort(value: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty() && value.len() <= 64)
         .map(str::to_owned)
+        .or_else(|| value.as_object().and_then(anthropic_reasoning_effort))
+}
+
+/// Anthropic Messages has no `reasoning_effort`; Claude Code sends
+/// `output_config.effort` or a thinking budget instead. Map those to the same
+/// effective level used when the request is converted to Chat Completions.
+pub(crate) fn anthropic_reasoning_effort(
+    object: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    if let Some(effort) = object
+        .get("output_config")
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+    {
+        return Some(effort.to_ascii_lowercase());
+    }
+    let thinking = object.get("thinking")?;
+    match thinking.get("type").and_then(Value::as_str)? {
+        "enabled" => {
+            let budget = thinking
+                .get("budget_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(4096);
+            Some(
+                if budget <= 2048 {
+                    "low"
+                } else if budget <= 8192 {
+                    "medium"
+                } else {
+                    "high"
+                }
+                .to_string(),
+            )
+        }
+        "adaptive" | "auto" => Some("high".to_string()),
+        "disabled" => None,
+        _ => None,
+    }
 }
 
 fn nonempty_string(value: &Value, field: &str) -> bool {
@@ -232,6 +272,7 @@ pub(crate) fn service_tier(value: &Value) -> Option<String> {
         .and_then(|r| r.get("service_tier"))
         .or_else(|| value.get("service_tier"))
         .or_else(|| value.pointer("/message/service_tier"))
+        .or_else(|| value.pointer("/message/usage/service_tier"))
         .or_else(|| value.pointer("/usage/service_tier"))
         .and_then(Value::as_str)
         .map(str::to_owned)
@@ -643,6 +684,40 @@ mod tests {
         observation.observe(&delta);
         observation.observe(&completed);
         assert_eq!(observation.first_output_kind, Some("delta"));
+    }
+
+    #[test]
+    fn reasoning_effort_reads_anthropic_effort_and_thinking_budget() {
+        assert_eq!(
+            reasoning_effort(&json!({"output_config":{"effort":"max"}})).as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            reasoning_effort(&json!({"thinking":{"type":"enabled","budget_tokens":32000}}))
+                .as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            reasoning_effort(&json!({"thinking":{"type":"adaptive"}})).as_deref(),
+            Some("high")
+        );
+        assert!(reasoning_effort(&json!({"thinking":{"type":"disabled"}})).is_none());
+    }
+
+    #[test]
+    fn service_tier_reads_anthropic_message_usage() {
+        assert_eq!(
+            service_tier(
+                &json!({"type":"message_start","message":{"usage":{"service_tier":"priority"}}})
+            )
+            .as_deref(),
+            Some("priority")
+        );
+        assert_eq!(
+            service_tier(&json!({"type":"message_delta","usage":{"service_tier":"standard"}}))
+                .as_deref(),
+            Some("standard")
+        );
     }
 
     #[test]

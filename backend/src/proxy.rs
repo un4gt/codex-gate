@@ -620,49 +620,22 @@ async fn proxy_openai(
         }
     }
     if operation == ProxyOperation::CountTokens {
-        let mut rejected_conversion_candidates = HashSet::new();
-        plan.attempts.retain(|attempt| {
-            if !attempt.protocol.is_messages_via_chat() {
-                return true;
-            }
-            rejected_conversion_candidates
-                .insert((attempt.provider.id, attempt.upstream_model.clone()));
-            false
-        });
-        for (provider_id, upstream_model) in rejected_conversion_candidates {
-            plan.diagnostics.reject(
-                Some(provider_id),
-                &upstream_model,
-                "protocol",
-                "count_tokens_requires_native_messages",
-                "count_tokens requires a native Anthropic Messages upstream",
+        let has_native_messages = plan
+            .attempts
+            .iter()
+            .any(|attempt| !attempt.protocol.is_messages_via_chat());
+        if !has_native_messages {
+            let input_tokens =
+                crate::messages_via_chat::estimate_messages_input_tokens(&body_bytes)
+                    .unwrap_or_else(|| (body_bytes.len() / 4).max(1) as i64);
+            record_request_metric(Some(StatusCode::OK.as_u16() as i32), None);
+            return http::json(
+                StatusCode::OK,
+                &serde_json::json!({ "input_tokens": input_tokens }),
             );
         }
-        apply_route_diagnostics(&routing_trace, &plan.diagnostics);
-        if plan.attempts.is_empty() {
-            let error = RouteResolutionError::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                "count_tokens_requires_native_messages",
-                "count_tokens requires a native Anthropic Messages upstream",
-                plan.diagnostics.clone(),
-            );
-            submit_err(
-                &mut telemetry_permit,
-                error.status,
-                error.code,
-                error.message.clone(),
-                None,
-                None,
-                None,
-                Some(model_name.clone()),
-            );
-            record_request_metric(
-                Some(StatusCode::BAD_REQUEST.as_u16() as i32),
-                Some("count_tokens_requires_native_messages"),
-            );
-            return route_resolution_error_response(&error, &model_name, api_format);
-        }
+        plan.attempts
+            .retain(|attempt| !attempt.protocol.is_messages_via_chat());
     }
     routing_trace.lock().model_route = plan.route_policy.clone();
     let affinity_identity = if plan.sticky { affinity_identity } else { None };

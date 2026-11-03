@@ -285,7 +285,7 @@ bash scripts/run-prek-checks.sh pre-push
 
 Anthropic 上游只有一个 Provider 类型 `anthropic`，且上游鉴权固定使用 `x-api-key`。网关客户端入站仍接受 `x-api-key` 或 `Authorization: Bearer`（Claude Code 的 `ANTHROPIC_AUTH_TOKEN` 走后者），两者是不同层次。网关支持原生 `/v1/messages`、原生 `/v1/messages/count_tokens` 透传，以及 `openai_compatible` 模型的 Chat → Messages 转换。`anthropic-version` / `anthropic-beta` 会透传，缺失版本时补 `2023-06-01`。
 
-`Chat → Messages` 的含义与 `Chat → Responses` 一致：上游是 Chat Completions，本地客户端用 `/v1/messages`。在模型详情中勾选 `Chat → Messages` 后，Claude / Anthropic SDK 才能通过该 `openai_compatible` 模型使用 `/v1/messages`。
+`Chat → Messages` 的含义与 `Chat → Responses` 一致：上游是 Chat Completions，本地客户端用 `/v1/messages`。在模型详情中勾选 `Chat → Messages` 后，Claude / Anthropic SDK 才能通过该 `openai_compatible` 模型使用 `/v1/messages`。该模型的 `/v1/messages/count_tokens` 由网关本地估算，不请求 Chat 上游。
 
 Prompt cache 的关键规则：
 

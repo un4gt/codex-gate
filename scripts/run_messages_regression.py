@@ -301,12 +301,19 @@ def verify_native_messages(client_key):
     )
     assert streamed == 'mock-ok', streamed
 
+    before_chat_counts = len([
+        item for item in mock_requests() if item['path'].endswith('/chat/completions')
+    ])
     status, _, body = request_http('POST', f'{BASE_URL}/v1/messages/count_tokens', {
         'Authorization': f'Bearer {client_key}',
         'anthropic-version': '2023-06-01',
     }, {'model': CHAT_MODEL, 'messages': [{'role': 'user', 'content': 'count'}]})
-    assert status == 400, (status, body)
-    assert 'count_tokens' in body, body
+    assert status == 200, (status, body)
+    assert json.loads(body)['input_tokens'] > 0, body
+    after_chat_counts = len([
+        item for item in mock_requests() if item['path'].endswith('/chat/completions')
+    ])
+    assert after_chat_counts == before_chat_counts, 'count_tokens must not call the chat upstream'
 
 
 def verify_messages_via_chat(client_key):
@@ -527,6 +534,7 @@ def main():
             'native_messages': 'passed',
             'messages_via_chat': 'passed',
             'upstream_x_api_key': 'passed',
+            'count_tokens_estimate': 'passed',
             'cache_prefix': 'stable',
             'usage': 'verified',
         }, ensure_ascii=False))
