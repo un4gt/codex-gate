@@ -784,16 +784,14 @@ async fn proxy_openai(
                 }
             }
         } else if resolved.upstream_model == model_name {
-            (body_bytes.clone(), None)
+            (body_bytes.slice(..), None)
         } else {
             let rewritten = if api_format == ApiFormat::AnthropicMessages {
-                rewrite_root_string_field(body_bytes.clone(), b"model", &resolved.upstream_model)
+                rewrite_root_string_field(&body_bytes, b"model", &resolved.upstream_model)
                     .map(Ok)
-                    .unwrap_or_else(|| {
-                        rewrite_model_name(body_bytes.clone(), &resolved.upstream_model)
-                    })
+                    .unwrap_or_else(|| rewrite_model_name(&body_bytes, &resolved.upstream_model))
             } else {
-                rewrite_model_name(body_bytes.clone(), &resolved.upstream_model)
+                rewrite_model_name(&body_bytes, &resolved.upstream_model)
             };
             match rewritten {
                 Ok(v) => (v, None),
@@ -852,7 +850,7 @@ async fn proxy_openai(
             &info,
             resolved.provider.supports_include_usage,
             plan.runtime.inject_include_usage,
-        ) && let Ok(body) = ensure_include_usage(out_body.clone())
+        ) && let Some(body) = ensure_include_usage(&out_body)
         {
             out_body = body;
         }
@@ -1089,7 +1087,7 @@ async fn proxy_openai(
             &request_method,
             request_version,
             &headers,
-            out_body.clone(),
+            &out_body,
             upstream_uri.clone(),
             budget
                 .remaining()
@@ -1186,7 +1184,7 @@ async fn proxy_openai(
                 &request_method,
                 request_version,
                 &retry_headers,
-                out_body.clone(),
+                &out_body,
                 upstream_uri.clone(),
                 budget
                     .remaining()
@@ -1243,7 +1241,7 @@ async fn proxy_openai(
                         &request_method,
                         request_version,
                         &headers,
-                        cleaned,
+                        &cleaned,
                         upstream_uri,
                         budget
                             .remaining()
@@ -2042,9 +2040,9 @@ fn should_inject_include_usage(
     }
 }
 
-fn rewrite_model_name(body: Bytes, new_model: &str) -> Result<Bytes, String> {
+fn rewrite_model_name(body: &[u8], new_model: &str) -> Result<Bytes, String> {
     let mut value: Value =
-        serde_json::from_slice(&body).map_err(|e| format!("invalid json: {e}"))?;
+        serde_json::from_slice(body).map_err(|e| format!("invalid json: {e}"))?;
     let Some(root) = value.as_object_mut() else {
         return Err("invalid json object".to_string());
     };
@@ -2077,7 +2075,7 @@ pub(crate) async fn dispatch_upstream_request_with_timeout(
     request_method: &Method,
     request_version: hyper::Version,
     request_headers: &hyper::HeaderMap,
-    body: Bytes,
+    body: &Bytes,
     uri: Uri,
     timeout: std::time::Duration,
 ) -> Result<Response<ReplayIncomingBody>, UpstreamDispatchError> {
@@ -2086,10 +2084,11 @@ pub(crate) async fn dispatch_upstream_request_with_timeout(
     // This boundary covers HTTP, the WS-to-HTTP bridge, and auth/recovery retries.
     // Use final headers so provider overrides cannot reintroduce the Lite conflict.
     let body = if request_method == Method::POST && uri.path().ends_with("/responses") {
-        crate::responses_lite::normalize_http_body(&mut headers, body)
+        let body = crate::responses_ids::normalize_http_body(&mut headers, body);
+        crate::responses_lite::normalize_http_body(&mut headers, &body)
             .map_err(UpstreamDispatchError::Request)?
     } else {
-        body
+        body.slice(..)
     };
     #[derive(serde::Deserialize)]
     struct StreamRequest {

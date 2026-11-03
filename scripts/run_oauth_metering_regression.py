@@ -126,8 +126,14 @@ class Mock(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def payload_error(self, payload):
+        return None
+
     def events(self, payload):
         Mock.seen.append({**payload, '_request_headers': {name.lower(): value for name, value in self.headers.items()}})
+        if error := self.payload_error(payload):
+            yield {'type': 'error', 'error': error}
+            return
         if error := self.responses_lite_error(payload):
             yield {'type': 'error', 'error': error}
             return
@@ -188,6 +194,9 @@ class Mock(BaseHTTPRequestHandler):
 
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if error := self.payload_error(payload):
+            self.json({'error': error}, 400)
+            return
         if error := self.responses_lite_error(payload):
             self.json({'error': error}, 400)
             return

@@ -689,6 +689,7 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                     {
                         crate::responses_lite::normalize_object(root);
                     }
+                    crate::responses_ids::normalize_request_value(&mut routed_value);
                     let payload = match serde_json::to_string(&routed_value) {
                         Ok(payload) => payload,
                         Err(err) => {
@@ -2196,7 +2197,7 @@ where
         &Method::POST,
         hyper::Version::HTTP_11,
         &headers,
-        body.clone(),
+        &body,
         upstream_uri.clone(),
         remaining,
     )
@@ -2280,7 +2281,7 @@ where
             &Method::POST,
             hyper::Version::HTTP_11,
             &retry_headers,
-            body,
+            &body,
             upstream_uri,
             remaining,
         )

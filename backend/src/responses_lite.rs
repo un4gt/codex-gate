@@ -20,11 +20,11 @@ pub fn normalize_object(root: &mut Map<String, Value>) {
     root.insert("parallel_tool_calls".into(), Value::Bool(false));
 }
 
-pub fn normalize_http_body(headers: &mut HeaderMap, body: Bytes) -> Result<Bytes, String> {
+pub fn normalize_http_body(headers: &mut HeaderMap, body: &Bytes) -> Result<Bytes, String> {
     if !enabled(headers) {
-        return Ok(body);
+        return Ok(body.slice(..));
     }
-    let mut root: Map<String, Value> = serde_json::from_slice(&body)
+    let mut root: Map<String, Value> = serde_json::from_slice(body)
         .map_err(|error| format!("invalid Responses Lite request: {error}"))?;
     normalize_object(&mut root);
     let body = serde_json::to_vec(&root).map_err(|error| error.to_string())?;
@@ -65,7 +65,7 @@ mod tests {
                 headers.insert(CONTENT_LENGTH, HeaderValue::from_static("999"));
                 let body = normalize_http_body(
                     &mut headers,
-                    Bytes::from(serde_json::to_vec(&original).unwrap()),
+                    &Bytes::from(serde_json::to_vec(&original).unwrap()),
                 )
                 .unwrap();
                 original["parallel_tool_calls"] = json!(false);
@@ -85,10 +85,7 @@ mod tests {
             }
             let before = headers.clone();
             let body = Bytes::from_static(br#"{ "parallel_tool_calls": true }"#);
-            assert_eq!(
-                normalize_http_body(&mut headers, body.clone()).unwrap(),
-                body
-            );
+            assert_eq!(normalize_http_body(&mut headers, &body).unwrap(), body);
             assert_eq!(headers, before);
         }
     }
@@ -100,7 +97,7 @@ mod tests {
         headers.append(HEADER, HeaderValue::from_static(" TRUE "));
         assert!(enabled(&headers));
         for body in ["[]", "null", "invalid"] {
-            assert!(normalize_http_body(&mut headers, Bytes::from(body)).is_err());
+            assert!(normalize_http_body(&mut headers, &Bytes::from(body)).is_err());
         }
     }
 }

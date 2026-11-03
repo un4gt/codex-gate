@@ -35,35 +35,32 @@ pub fn parse_request_info(body: &[u8]) -> OpenAiRequestInfo {
     }
 }
 
-pub fn ensure_include_usage(body: Bytes) -> Result<Bytes, String> {
-    let info = parse_request_info(&body);
-    if !info.stream {
-        return Ok(body);
-    }
-    if info.include_usage == Some(true) {
-        return Ok(body);
+pub fn ensure_include_usage(body: &[u8]) -> Option<Bytes> {
+    let info = parse_request_info(body);
+    if !info.stream || info.include_usage == Some(true) {
+        return None;
     }
 
     // Try to modify JSON with minimal copying.
     let mut out = Vec::with_capacity(body.len() + 48);
 
-    let Some(root_end) = find_root_object_end(&body) else {
+    let Some(root_end) = find_root_object_end(body) else {
         // Can't confidently rewrite; keep passthrough.
-        return Ok(body);
+        return None;
     };
 
-    if let Some((so_val_start, so_val_end)) = find_root_key_value_span(&body, b"stream_options") {
+    if let Some((so_val_start, so_val_end)) = find_root_key_value_span(body, b"stream_options") {
         // stream_options exists; set include_usage inside it.
         let so_bytes = &body[so_val_start..so_val_end];
         let Some((iu_val_start_rel, iu_val_end_rel)) =
             find_object_key_value_span(so_bytes, b"include_usage")
         else {
             // No include_usage: inject into stream_options object.
-            let injected = inject_include_usage_into_object(so_bytes)?;
+            let injected = inject_include_usage_into_object(so_bytes).ok()?;
             out.extend_from_slice(&body[..so_val_start]);
             out.extend_from_slice(&injected);
             out.extend_from_slice(&body[so_val_end..]);
-            return Ok(Bytes::from(out));
+            return Some(Bytes::from(out));
         };
 
         // Replace include_usage value with true.
@@ -73,7 +70,7 @@ pub fn ensure_include_usage(body: Bytes) -> Result<Bytes, String> {
         out.extend_from_slice(&body[..iu_val_start]);
         out.extend_from_slice(b"true");
         out.extend_from_slice(&body[iu_val_end..]);
-        return Ok(Bytes::from(out));
+        return Some(Bytes::from(out));
     }
 
     // stream_options missing: insert at root before final `}`.
@@ -92,7 +89,7 @@ pub fn ensure_include_usage(body: Bytes) -> Result<Bytes, String> {
     }
     out.extend_from_slice(br#""stream_options":{"include_usage":true}"#);
     out.extend_from_slice(&body[insert_at..]);
-    Ok(Bytes::from(out))
+    Some(Bytes::from(out))
 }
 
 fn find_root_object_end(input: &[u8]) -> Option<usize> {
@@ -110,8 +107,8 @@ fn find_root_object_end(input: &[u8]) -> Option<usize> {
 /// Rewrite a top-level string field without reserializing the rest of the
 /// request. This keeps prompt-cache-sensitive bytes (tool input key order,
 /// whitespace, and field order) identical to what the client sent.
-pub fn rewrite_root_string_field(body: Bytes, key: &[u8], value: &str) -> Option<Bytes> {
-    let (start, end) = find_root_key_value_span(&body, key)?;
+pub fn rewrite_root_string_field(body: &[u8], key: &[u8], value: &str) -> Option<Bytes> {
+    let (start, end) = find_root_key_value_span(body, key)?;
     if body.get(start).copied() != Some(b'"')
         || body.get(end.saturating_sub(1)).copied() != Some(b'"')
     {
@@ -466,7 +463,7 @@ mod tests {
         let input = Bytes::from_static(
             br#"{"model":"client-alias","messages":[{"role":"user","content":"x"}],"metadata":{"model":"nested"}}"#,
         );
-        let rewritten = rewrite_root_string_field(input, b"model", "claude-sonnet-4").unwrap();
+        let rewritten = rewrite_root_string_field(&input, b"model", "claude-sonnet-4").unwrap();
         assert_eq!(
             rewritten.as_ref(),
             br#"{"model":"claude-sonnet-4","messages":[{"role":"user","content":"x"}],"metadata":{"model":"nested"}}"#
@@ -476,16 +473,8 @@ mod tests {
     #[test]
     fn root_string_rewrite_rejects_missing_or_nested_fields() {
         assert!(
-            rewrite_root_string_field(
-                Bytes::from_static(br#"{"metadata":{"model":"x"}}"#),
-                b"model",
-                "y"
-            )
-            .is_none()
+            rewrite_root_string_field(br#"{"metadata":{"model":"x"}}"#, b"model", "y").is_none()
         );
-        assert!(
-            rewrite_root_string_field(Bytes::from_static(br#"{"model":42}"#), b"model", "y")
-                .is_none()
-        );
+        assert!(rewrite_root_string_field(br#"{"model":42}"#, b"model", "y").is_none());
     }
 }
