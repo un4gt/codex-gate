@@ -473,6 +473,10 @@ MOCK_PORT=19130 GW_PORT=18130 scripts/test_openai_compatible_responses.sh
 
 测试产物写入 `data/tmp/`，脚本末尾会输出结果 JSON 路径。
 
+## 致谢
+
+Codex OAuth 的客户端画像、installation id 和授权 surface 设计参考了 [zyycn/codex-proxy-rs](https://github.com/zyycn/codex-proxy-rs)（Apache-2.0）。
+
 ## 本地验证与回归
 
 - **加密内容恢复（Beta）**：默认关闭，可在「设置 → 高级设置 → Beta 功能」开启。遇到 `invalid_encrypted_content` 时尝试清理加密历史并有限重试，支持 HTTP/SSE、WebSocket 及 Codex OAuth。清理加密压缩项可能丢失早期上下文，详见[恢复行为与边界](docs/encrypted-content-recovery.md)。

@@ -1037,6 +1037,29 @@ async fn proxy_openai(
             None
         };
 
+        if let Some(auth) = prepared_codex_auth.as_ref() {
+            match crate::codex_oauth::scope_request_installation(&out_body, &auth.installation_id) {
+                Ok(body) => out_body = body,
+                Err(error) => {
+                    reservation.neutral();
+                    submit_err(
+                        &mut telemetry_permit,
+                        StatusCode::BAD_REQUEST,
+                        "codex_request_normalization_failed",
+                        error.clone(),
+                        Some(resolved.provider.id),
+                        Some(resolved.endpoint.id),
+                        Some(resolved.key.id),
+                        Some(model_name.clone()),
+                    );
+                    record_request_metric(
+                        Some(StatusCode::BAD_REQUEST.as_u16() as i32),
+                        Some("codex_request_normalization_failed"),
+                    );
+                    return http::json_error(StatusCode::BAD_REQUEST, error);
+                }
+            }
+        }
         let upstream_secret = prepared_codex_auth
             .as_ref()
             .map_or(resolved.key.secret.as_str(), |auth| {

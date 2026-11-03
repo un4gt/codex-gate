@@ -118,6 +118,7 @@ struct ActiveUpstream {
     transport: ActiveTransport,
     // Native WS mode is fixed by the successful handshake, not later config edits.
     responses_lite: bool,
+    codex_installation_id: Option<String>,
     _provider_capacity: Option<crate::provider_runtime::ProviderCapacityPermit>,
 }
 
@@ -169,6 +170,7 @@ enum NativeWsConnectOutcome {
         Box<UpstreamWs>,
         crate::provider_runtime::ProviderCapacityPermit,
         bool,
+        Option<String>,
     ),
     Unsupported(WsBridgeError),
     Unavailable(WsBridgeError),
@@ -690,6 +692,12 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                         crate::responses_lite::normalize_object(root);
                     }
                     crate::responses_ids::normalize_request_value(&mut routed_value);
+                    if let Some(installation_id) = selected.codex_installation_id.as_deref() {
+                        crate::codex_oauth::scope_response_create_installation_value(
+                            &mut routed_value,
+                            installation_id,
+                        );
+                    }
                     let payload = match serde_json::to_string(&routed_value) {
                         Ok(payload) => payload,
                         Err(err) => {
@@ -1008,7 +1016,12 @@ async fn connect_selected_upstream(
             ctx.state.metrics.record_provider_selection(switched);
         }
         match connect_or_bridge_upstream(ctx, &resolved).await {
-            NativeWsConnectOutcome::Connected(ws, permit, responses_lite) => {
+            NativeWsConnectOutcome::Connected(
+                ws,
+                permit,
+                responses_lite,
+                codex_installation_id,
+            ) => {
                 confirm_ws_affinity(
                     ctx,
                     affinity.as_ref(),
@@ -1025,6 +1038,7 @@ async fn connect_selected_upstream(
                     resolved,
                     transport: ActiveTransport::NativeWs(ws),
                     responses_lite,
+                    codex_installation_id,
                     _provider_capacity: Some(permit),
                 });
             }
@@ -1042,6 +1056,7 @@ async fn connect_selected_upstream(
                     resolved,
                     transport: ActiveTransport::HttpBridge,
                     responses_lite: false,
+                    codex_installation_id: None,
                     _provider_capacity: None,
                 });
             }
@@ -1224,6 +1239,7 @@ async fn connect_upstream_ws_once(
         }
     };
 
+    let mut codex_installation_id = None;
     let prepared_codex_auth =
         if resolved.provider.provider_type == crate::codex_oauth::PROVIDER_TYPE {
             match ctx
@@ -1232,7 +1248,10 @@ async fn connect_upstream_ws_once(
                 .prepare_auth(&ctx.state, resolved.key.id, false)
                 .await
             {
-                Ok(auth) => Some(auth),
+                Ok(auth) => {
+                    codex_installation_id = Some(auth.installation_id.clone());
+                    Some(auth)
+                }
                 Err(error) => {
                     reservation.finish(
                         proxy::AttemptOutcome::upstream_response(
@@ -1370,7 +1389,12 @@ async fn connect_upstream_ws_once(
                     scope: proxy::FailureScope::Provider,
                 });
             };
-            NativeWsConnectOutcome::Connected(Box::new(ws), capacity, responses_lite)
+            NativeWsConnectOutcome::Connected(
+                Box::new(ws),
+                capacity,
+                responses_lite,
+                codex_installation_id,
+            )
         }
         Err(err) => {
             finish_ws_trace(ctx, err.status, Some(err.error_type));
@@ -2001,7 +2025,7 @@ where
         root.remove("type");
         root.insert("stream".to_string(), Value::Bool(true));
     }
-    let body = match serde_json::to_vec(&body_value) {
+    let mut body = match serde_json::to_vec(&body_value) {
         Ok(body) => Bytes::from(body),
         Err(err) => {
             let message = format!("failed to encode HTTP bridge payload: {err}");
@@ -2143,6 +2167,12 @@ where
     } else {
         None
     };
+    if let Some(auth) = prepared_codex_auth.as_ref()
+        && let Ok(scoped) =
+            crate::codex_oauth::scope_request_installation(&body, &auth.installation_id)
+    {
+        body = scoped;
+    }
     let upstream_secret = prepared_codex_auth
         .as_ref()
         .map_or(resolved.key.secret.as_str(), |auth| {
@@ -3211,6 +3241,7 @@ mod tests {
                 &crate::codex_oauth::PreparedCodexAuth {
                     access_token: "synthetic-access".into(),
                     account_id: "selected-account".into(),
+                    installation_id: "00000000-0000-4000-8000-000000000001".into(),
                 },
             );
             for (name, value) in expected {

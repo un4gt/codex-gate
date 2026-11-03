@@ -27,7 +27,7 @@ use crate::util;
 pub const PROVIDER_TYPE: &str = "openai_codex_oauth";
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const DEVICE_VERIFICATION_URI: &str = "https://auth.openai.com/codex/device";
-pub const BROWSER_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+pub const BROWSER_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
 
 const DEVICE_USER_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
@@ -39,10 +39,17 @@ const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_SCOPE: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CODEX_MODELS_URL: &str =
-    "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1";
+    "https://chatgpt.com/backend-api/codex/models?client_version=0.166.0";
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
-const CODEX_USER_AGENT: &str = "codex_cli_rs/0.144.1 (Linux; x86_64) little-gate/0.1";
+const CODEX_CLI_VERSION: &str = "0.166.0";
+const CODEX_USER_AGENT: &str = "codex_cli_rs/0.166.0 (Linux 6.8.0; x86_64) unknown";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
+const CODEX_DESKTOP_ORIGINATOR: &str = "Codex Desktop";
+const CODEX_DESKTOP_VERSION: &str = "26.901.51231";
+const CODEX_DESKTOP_USER_AGENT: &str =
+    "Codex Desktop/0.153.4 (Linux 6.8.0; x86_64) unknown (Codex Desktop; 26.901.51231)";
+const CODEX_DESKTOP_AUTH_URL: &str = "https://chatgpt.com/codex/desktop-auth";
+const CODEX_SURFACE_STABLE_ID_DOMAIN: &[u8] = b"openai/codex-desktop/surface-stable-id/v1\0";
 
 const DEVICE_SESSION_TTL_MS: i64 = 15 * 60 * 1_000;
 const BROWSER_SESSION_TTL_MS: i64 = 5 * 60 * 1_000;
@@ -122,10 +129,22 @@ impl CodexQuotaSnapshot {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CodexOAuthCredentials {
+    #[serde(default)]
+    installation_id: String,
     refresh_token: String,
     id_token: String,
     account_id: String,
     email: String,
+}
+
+impl CodexOAuthCredentials {
+    fn effective_installation_id(&self) -> String {
+        if self.installation_id.trim().is_empty() {
+            installation_id_for_account(&self.account_id)
+        } else {
+            self.installation_id.clone()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -230,6 +249,7 @@ pub struct SaveCodexLogin<'a> {
     pub email: &'a str,
     pub plan_type: Option<&'a str>,
     pub token_expires_at_ms: Option<i64>,
+    pub installation_id: &'a str,
     pub now_ms: i64,
 }
 
@@ -364,6 +384,7 @@ LIMIT 1
         let access_token_enc = crypto::encrypt_secret(master_key, input.access_token)
             .map_err(|error| DbError::new(format!("encrypt Codex access token failed: {error}")))?;
         let credentials = CodexOAuthCredentials {
+            installation_id: input.installation_id.to_string(),
             refresh_token: input.refresh_token.to_string(),
             id_token: input.id_token.to_string(),
             account_id: input.account_id.to_string(),
@@ -1099,10 +1120,12 @@ impl SessionStage {
 
 enum SessionFlowData {
     Device {
+        installation_id: String,
         device_auth_id: String,
         user_code: String,
     },
     Browser {
+        installation_id: String,
         state: String,
         code_verifier: String,
         authorization_url: String,
@@ -1214,6 +1237,7 @@ impl CodexOAuthManager {
         let mut starting_guard = self.reserve_starting_target(target)?;
 
         let started = async {
+            let installation_id = random_uuid_v4();
             let (flow_data, poll_interval_ms, expires_at_ms) = match flow {
                 CodexOAuthFlow::Device => {
                     let response = request_device_user_code(&state).await?;
@@ -1237,6 +1261,7 @@ impl CodexOAuthManager {
                     }
                     (
                         SessionFlowData::Device {
+                            installation_id: installation_id.clone(),
                             device_auth_id,
                             user_code,
                         },
@@ -1248,9 +1273,11 @@ impl CodexOAuthManager {
                     let state = random_urlsafe(32);
                     let code_verifier = random_urlsafe(96);
                     let code_challenge = pkce_challenge(&code_verifier);
-                    let authorization_url = build_authorization_url(&state, &code_challenge)?;
+                    let authorization_url =
+                        build_authorization_url(&state, &code_challenge, &installation_id)?;
                     (
                         SessionFlowData::Browser {
+                            installation_id,
                             state,
                             code_verifier,
                             authorization_url,
@@ -1656,6 +1683,18 @@ impl CodexOAuthManager {
         if self.session_cancelled(&session_id) {
             return;
         }
+        let installation_id = {
+            let sessions = self.sessions.lock();
+            match sessions.get(&session_id).map(|record| &record.flow_data) {
+                Some(SessionFlowData::Device {
+                    installation_id, ..
+                })
+                | Some(SessionFlowData::Browser {
+                    installation_id, ..
+                }) => installation_id.clone(),
+                None => return,
+            }
+        };
         let claims = match parse_id_token(&token_bundle.id_token) {
             Ok(claims) => claims,
             Err(error) => {
@@ -1718,6 +1757,7 @@ impl CodexOAuthManager {
                             token_expires_at_ms: Some(now_ms.saturating_add(
                                 token_bundle.expires_in_seconds.saturating_mul(1_000),
                             )),
+                            installation_id: &installation_id,
                             now_ms,
                         },
                     )
@@ -1773,6 +1813,7 @@ impl CodexOAuthManager {
         }
         match &record.flow_data {
             SessionFlowData::Device {
+                installation_id: _,
                 device_auth_id,
                 user_code,
             } => Some(SessionPollSnapshot {
@@ -2006,6 +2047,7 @@ impl CodexOAuthManager {
             .map(parse_id_token)
             .transpose()?;
         let credentials = CodexOAuthCredentials {
+            installation_id: account.credentials.effective_installation_id(),
             refresh_token: refreshed
                 .refresh_token
                 .filter(|value| !value.trim().is_empty())
@@ -2271,15 +2313,18 @@ fn session_view(record: &SessionRecord, include_user_code: bool) -> CodexOAuthSe
     }
 }
 
+#[derive(Clone)]
 pub struct PreparedCodexAuth {
     pub access_token: String,
     pub account_id: String,
+    pub installation_id: String,
 }
 
 fn prepared_auth(account: &CodexOAuthAccount) -> PreparedCodexAuth {
     PreparedCodexAuth {
         access_token: account.access_token.clone(),
         account_id: account.credentials.account_id.clone(),
+        installation_id: account.credentials.effective_installation_id(),
     }
 }
 
@@ -2417,14 +2462,75 @@ fn pkce_challenge(code_verifier: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
-fn build_authorization_url(state: &str, code_challenge: &str) -> Result<String, CodexOAuthError> {
-    let mut url = Url::parse(AUTHORIZE_URL).map_err(|_| {
+fn random_uuid_v4() -> String {
+    let mut bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid_string(bytes)
+}
+
+fn installation_id_for_account(account_id: &str) -> String {
+    let digest = Sha256::digest(
+        [
+            b"little-gate/codex-installation/v1\0".as_slice(),
+            account_id.as_bytes(),
+        ]
+        .concat(),
+    );
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid_string(bytes)
+}
+
+fn surface_stable_id(installation_id: &str) -> String {
+    let digest =
+        Sha256::digest([CODEX_SURFACE_STABLE_ID_DOMAIN, installation_id.as_bytes()].concat());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid_string(bytes)
+}
+
+fn uuid_string(bytes: [u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn build_authorization_url(
+    state: &str,
+    code_challenge: &str,
+    installation_id: &str,
+) -> Result<String, CodexOAuthError> {
+    let surface_stable_id = surface_stable_id(installation_id);
+    let mut inner = Url::parse(AUTHORIZE_URL).map_err(|_| {
         CodexOAuthError::bad_request(
             "oauth_authorize_url_invalid",
             "the OAuth authorization URL is invalid",
         )
     })?;
-    url.query_pairs_mut()
+    inner
+        .query_pairs_mut()
         .append_pair("client_id", CODEX_CLIENT_ID)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", BROWSER_REDIRECT_URI)
@@ -2432,10 +2538,25 @@ fn build_authorization_url(state: &str, code_challenge: &str) -> Result<String, 
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", state)
-        .append_pair("originator", CODEX_ORIGINATOR)
+        .append_pair("originator", CODEX_DESKTOP_ORIGINATOR)
+        .append_pair("codex_app_version", CODEX_DESKTOP_VERSION)
+        .append_pair("source_surface_stable_id", &surface_stable_id)
+        .append_pair("codex_origin_stable_id", &surface_stable_id)
         .append_pair("id_token_add_organizations", "true")
-        .append_pair("codex_cli_simplified_flow", "true");
-    Ok(url.into())
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("codex_streamlined_login", "true");
+    let mut outer = Url::parse(CODEX_DESKTOP_AUTH_URL).map_err(|_| {
+        CodexOAuthError::bad_request(
+            "oauth_authorize_url_invalid",
+            "the Codex Desktop authorization URL is invalid",
+        )
+    })?;
+    outer
+        .query_pairs_mut()
+        .append_pair("authorize_url", inner.as_str())
+        .append_pair("codex_streamlined_login", "true")
+        .append_pair("no_universal_links", "1");
+    Ok(outer.into())
 }
 
 fn parse_browser_callback_url(redirect_url: &str) -> Result<BrowserCallback, CodexOAuthError> {
@@ -2452,7 +2573,7 @@ fn parse_browser_callback_url(redirect_url: &str) -> Result<BrowserCallback, Cod
         )
     })?;
     if url.scheme() != "http"
-        || url.host_str() != Some("localhost")
+        || !matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
         || url.port() != Some(1455)
         || url.path() != "/auth/callback"
         || !url.username().is_empty()
@@ -2925,32 +3046,77 @@ pub fn apply_codex_headers(headers: &mut HeaderMap, auth: &PreparedCodexAuth) {
     if let Ok(value) = HeaderValue::from_str(&auth.account_id) {
         headers.insert(HeaderName::from_static("chatgpt-account-id"), value);
     }
-    if !headers.contains_key(USER_AGENT) {
-        headers.insert(USER_AGENT, HeaderValue::from_static(CODEX_USER_AGENT));
+    if let Ok(value) = HeaderValue::from_str(&auth.installation_id) {
+        headers.insert(HeaderName::from_static("x-codex-installation-id"), value);
     }
-    if !headers.contains_key("originator") {
+
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .and_then(official_codex_identity);
+    if let Some((originator, version)) = user_agent {
+        if let Ok(value) = HeaderValue::from_str(originator) {
+            headers.insert(HeaderName::from_static("originator"), value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&version) {
+            headers.insert(HeaderName::from_static("version"), value);
+        }
+    } else {
+        let desktop = headers
+            .get("originator")
+            .and_then(|value| value.to_str().ok())
+            == Some(CODEX_DESKTOP_ORIGINATOR);
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(if desktop {
+                CODEX_DESKTOP_USER_AGENT
+            } else {
+                CODEX_USER_AGENT
+            }),
+        );
         headers.insert(
             HeaderName::from_static("originator"),
-            HeaderValue::from_static(CODEX_ORIGINATOR),
+            HeaderValue::from_static(if desktop {
+                CODEX_DESKTOP_ORIGINATOR
+            } else {
+                CODEX_ORIGINATOR
+            }),
+        );
+        headers.insert(
+            HeaderName::from_static("version"),
+            HeaderValue::from_static(if desktop {
+                "0.153.4"
+            } else {
+                CODEX_CLI_VERSION
+            }),
         );
     }
-    // The built-in OpenAI provider sends version explicitly. Custom providers
-    // often omit it while retaining the real Codex user agent; use that version
-    // instead of advertising the gateway's fallback client version.
-    if !headers.contains_key("version")
-        && let Some(version) = headers
-            .get(USER_AGENT)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split_ascii_whitespace().next())
-            .and_then(|value| value.split_once('/'))
-            .filter(|(client, version)| {
-                matches!(*client, "codex-tui" | "codex_cli_rs" | "codex_vscode")
-                    && !version.is_empty()
-            })
-            .and_then(|(_, version)| HeaderValue::from_str(version).ok())
-    {
-        headers.insert(HeaderName::from_static("version"), version);
+}
+
+fn official_codex_identity(user_agent: &str) -> Option<(&'static str, String)> {
+    for originator in [
+        "Codex Desktop",
+        "codex_cli_rs",
+        "codex-tui",
+        "codex_exec",
+        "codex_vscode",
+        "codex_sdk_ts",
+        "codex_python_sdk",
+        "codex-app-server",
+        "codex-app-server-sdk",
+        "codex_mcp_server",
+    ] {
+        let Some(rest) = user_agent.strip_prefix(originator) else {
+            continue;
+        };
+        let version = rest
+            .strip_prefix('/')
+            .and_then(|rest| rest.split([' ', '(']).next())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())?;
+        return Some((originator, version.to_string()));
     }
+    None
 }
 
 pub fn normalize_responses_request(
@@ -2971,6 +3137,42 @@ pub fn normalize_responses_request(
 pub fn normalize_response_create_value(value: &mut Value, upstream_model: &str) {
     if let Some(root) = value.as_object_mut() {
         normalize_responses_object(root, upstream_model);
+    }
+}
+
+pub fn scope_request_installation(body: &[u8], installation_id: &str) -> Result<Bytes, String> {
+    let mut value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
+    scope_installation_value(&mut value, installation_id);
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|error| error.to_string())
+}
+
+pub fn scope_response_create_installation_value(value: &mut Value, installation_id: &str) {
+    scope_installation_value(value, installation_id);
+}
+
+fn scope_installation_value(value: &mut Value, installation_id: &str) {
+    if installation_id.trim().is_empty() {
+        return;
+    }
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    let metadata = root
+        .entry("client_metadata".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(metadata) = metadata.as_object_mut() else {
+        return;
+    };
+    metadata.insert(
+        "x-codex-installation-id".to_string(),
+        Value::String(installation_id.to_string()),
+    );
+    for key in ["installation_id", "installationId"] {
+        if metadata.contains_key(key) {
+            metadata.insert(key.to_string(), Value::String(installation_id.to_string()));
+        }
     }
 }
 
@@ -3450,6 +3652,7 @@ mod tests {
             replace_key_id: None,
             flow: CodexOAuthFlow::Device,
             flow_data: SessionFlowData::Device {
+                installation_id: "00000000-0000-4000-8000-000000000001".to_string(),
                 device_auth_id: "device-auth".to_string(),
                 user_code: "ABCD-EFGH".to_string(),
             },
@@ -3475,10 +3678,15 @@ mod tests {
             replace_key_id: None,
             flow: CodexOAuthFlow::Browser,
             flow_data: SessionFlowData::Browser {
+                installation_id: "00000000-0000-4000-8000-000000000001".to_string(),
                 state: "state-123".to_string(),
                 code_verifier: "verifier-123".to_string(),
-                authorization_url: build_authorization_url("state-123", "challenge-123")
-                    .expect("authorization URL"),
+                authorization_url: build_authorization_url(
+                    "state-123",
+                    "challenge-123",
+                    "00000000-0000-4000-8000-000000000001",
+                )
+                .expect("authorization URL"),
                 callback_claimed: false,
             },
             stage: SessionStage::WaitingForUser,
@@ -3534,11 +3742,33 @@ mod tests {
 
     #[test]
     fn browser_authorization_url_contains_codex_pkce_contract() {
-        let raw =
-            build_authorization_url("state-value", "challenge-value").expect("authorization URL");
-        let url = Url::parse(&raw).expect("parse authorization URL");
-        let params = url.query_pairs().into_owned().collect::<HashMap<_, _>>();
-        assert_eq!(url.as_str().split('?').next(), Some(AUTHORIZE_URL));
+        let installation_id = "00000000-0000-4000-8000-000000000001";
+        let raw = build_authorization_url("state-value", "challenge-value", installation_id)
+            .expect("authorization URL");
+        let outer = Url::parse(&raw).expect("parse desktop authorization URL");
+        assert_eq!(
+            outer.as_str().split('?').next(),
+            Some(CODEX_DESKTOP_AUTH_URL)
+        );
+        let outer_params = outer.query_pairs().into_owned().collect::<HashMap<_, _>>();
+        assert_eq!(
+            outer_params
+                .get("codex_streamlined_login")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            outer_params.get("no_universal_links").map(String::as_str),
+            Some("1")
+        );
+        let inner = Url::parse(
+            outer_params
+                .get("authorize_url")
+                .expect("wrapped authorize_url"),
+        )
+        .expect("parse inner authorization URL");
+        let params = inner.query_pairs().into_owned().collect::<HashMap<_, _>>();
+        assert_eq!(inner.as_str().split('?').next(), Some(AUTHORIZE_URL));
         assert_eq!(
             params.get("client_id").map(String::as_str),
             Some(CODEX_CLIENT_ID)
@@ -3567,7 +3797,20 @@ mod tests {
         assert!(!params.contains_key("prompt"));
         assert_eq!(
             params.get("originator").map(String::as_str),
-            Some("codex_cli_rs")
+            Some(CODEX_DESKTOP_ORIGINATOR)
+        );
+        assert_eq!(
+            params.get("codex_app_version").map(String::as_str),
+            Some(CODEX_DESKTOP_VERSION)
+        );
+        let stable = surface_stable_id(installation_id);
+        assert_eq!(
+            params.get("source_surface_stable_id").map(String::as_str),
+            Some(stable.as_str())
+        );
+        assert_eq!(
+            params.get("codex_origin_stable_id").map(String::as_str),
+            Some(stable.as_str())
         );
         assert_eq!(
             params.get("id_token_add_organizations").map(String::as_str),
@@ -3575,6 +3818,10 @@ mod tests {
         );
         assert_eq!(
             params.get("codex_cli_simplified_flow").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            params.get("codex_streamlined_login").map(String::as_str),
             Some("true")
         );
     }
@@ -3631,8 +3878,13 @@ mod tests {
                 error_description: None,
             }
         );
+        let parsed = parse_browser_callback_url(
+            "http://127.0.0.1:1455/auth/callback?code=code-123&state=state-123",
+        )
+        .expect("valid loopback callback");
+        assert_eq!(parsed.state, "state-123");
+        assert_eq!(parsed.code.as_deref(), Some("code-123"));
         for invalid in [
-            "http://127.0.0.1:1455/auth/callback?code=x&state=y",
             "http://localhost:1456/auth/callback?code=x&state=y",
             "http://localhost:1455/wrong?code=x&state=y",
             "https://localhost:1455/auth/callback?code=x&state=y",
@@ -3802,6 +4054,7 @@ mod tests {
                     email: "operator@example.com",
                     plan_type: Some("plus"),
                     token_expires_at_ms: Some(50_000),
+                    installation_id: "00000000-0000-4000-8000-000000000001",
                     now_ms: 2_000,
                 },
             )
@@ -3834,6 +4087,14 @@ mod tests {
         assert_eq!(credentials.refresh_token, "refresh-secret");
         assert_eq!(credentials.id_token, "id-secret");
         assert_eq!(credentials.account_id, "acct-secure");
+        assert_eq!(
+            credentials.installation_id,
+            "00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(
+            credentials.effective_installation_id(),
+            "00000000-0000-4000-8000-000000000001"
+        );
 
         assert!(
             db.delete_upstream_provider(provider_id)
@@ -3867,6 +4128,7 @@ mod tests {
                     email: "first@example.com",
                     plan_type: Some("plus"),
                     token_expires_at_ms: Some(50_000),
+                    installation_id: "00000000-0000-4000-8000-000000000001",
                     now_ms: 2_000,
                 },
             )
@@ -3915,6 +4177,7 @@ mod tests {
                     email: "second@example.com",
                     plan_type: Some("pro"),
                     token_expires_at_ms: Some(80_000),
+                    installation_id: "00000000-0000-4000-8000-000000000001",
                     now_ms: 3_000,
                 },
             )
@@ -3980,6 +4243,7 @@ mod tests {
                     email: "forbidden@example.com",
                     plan_type: Some("team"),
                     token_expires_at_ms: Some(50_000),
+                    installation_id: "00000000-0000-4000-8000-000000000001",
                     now_ms: 2_000,
                 },
             )
@@ -4006,6 +4270,7 @@ mod tests {
                 "owner",
                 "access-2",
                 &CodexOAuthCredentials {
+                    installation_id: random_uuid_v4(),
                     refresh_token: "refresh-2".to_string(),
                     id_token: "id-2".to_string(),
                     account_id: "acct-forbidden".to_string(),
@@ -4154,7 +4419,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_headers_replace_credentials_and_preserve_client_identity() {
+    fn codex_headers_replace_credentials_and_officialize_client_identity() {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("client-agent"));
         headers.insert("originator", HeaderValue::from_static("client-origin"));
@@ -4171,62 +4436,126 @@ mod tests {
             &PreparedCodexAuth {
                 access_token: "access-token".to_string(),
                 account_id: "account-123".to_string(),
+                installation_id: "00000000-0000-4000-8000-000000000001".to_string(),
             },
         );
 
+        assert_eq!(headers[USER_AGENT], CODEX_USER_AGENT);
+        assert_eq!(headers["originator"], CODEX_ORIGINATOR);
+        assert_eq!(headers["version"], CODEX_CLI_VERSION);
         assert_eq!(
-            headers
-                .get(USER_AGENT)
-                .and_then(|value| value.to_str().ok()),
-            Some("client-agent")
+            headers["x-codex-installation-id"],
+            "00000000-0000-4000-8000-000000000001"
         );
-        assert_eq!(
-            headers
-                .get("originator")
-                .and_then(|value| value.to_str().ok()),
-            Some("client-origin")
-        );
-        assert_eq!(
-            headers
-                .get("chatgpt-account-id")
-                .and_then(|value| value.to_str().ok()),
-            Some("account-123")
-        );
-        assert_eq!(
-            headers
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer access-token")
-        );
-        assert!(!headers.contains_key("version"));
+        assert_eq!(headers["chatgpt-account-id"], "account-123");
+        assert_eq!(headers[AUTHORIZATION], "Bearer access-token");
     }
 
     #[test]
-    fn codex_headers_recover_custom_provider_version_without_overwriting_it() {
+    fn codex_headers_preserve_official_client_identity_and_derive_version() {
         let auth = PreparedCodexAuth {
             access_token: "synthetic-access".into(),
             account_id: "synthetic-account".into(),
+            installation_id: "00000000-0000-4000-8000-000000000001".into(),
         };
         for agent in [
             "codex-tui/0.163.0 (Windows 10.0; x86_64)",
             "codex_cli_rs/0.163.0 (Linux; x86_64)",
             "codex_vscode/0.163.0",
+            "Codex Desktop/0.153.4 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.901.51231)",
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(USER_AGENT, HeaderValue::from_static(agent));
             apply_codex_headers(&mut headers, &auth);
-            assert_eq!(headers["version"], "0.163.0");
             assert_eq!(headers[USER_AGENT], agent);
-            headers.insert("version", HeaderValue::from_static("explicit-version"));
-            apply_codex_headers(&mut headers, &auth);
-            assert_eq!(headers["version"], "explicit-version");
+            let expected_version = if agent.starts_with("Codex Desktop/") {
+                "0.153.4"
+            } else {
+                "0.163.0"
+            };
+            assert_eq!(headers["version"], expected_version);
+            assert_eq!(headers["x-codex-installation-id"], auth.installation_id);
         }
         for agent in ["other-client/1.0", "codex-tui/", ""] {
             let mut headers = HeaderMap::new();
             headers.insert(USER_AGENT, HeaderValue::from_static(agent));
             apply_codex_headers(&mut headers, &auth);
-            assert!(!headers.contains_key("version"));
+            assert_eq!(headers[USER_AGENT], CODEX_USER_AGENT);
+            assert_eq!(headers["version"], CODEX_CLI_VERSION);
         }
+    }
+
+    #[test]
+    fn installation_scope_replaces_only_identity_fields_and_preserves_session_data() {
+        let installation_id = "00000000-0000-4000-8000-000000000001";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-6-astra",
+            "input": [{"type": "message", "role": "user", "content": "hello"}],
+            "client_metadata": {
+                "x-codex-installation-id": "old-installation",
+                "installation_id": "old-installation",
+                "installationId": "old-installation",
+                "session_id": "session-1",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "future": true
+            },
+            "session_id": "top-level-session"
+        }))
+        .expect("json");
+        let scoped = scope_request_installation(&body, installation_id).expect("scope");
+        let value: Value = serde_json::from_slice(&scoped).expect("scoped json");
+        assert_eq!(value["model"], "gpt-6-astra");
+        assert_eq!(value["session_id"], "top-level-session");
+        assert_eq!(
+            value["client_metadata"]["x-codex-installation-id"],
+            installation_id
+        );
+        assert_eq!(value["client_metadata"]["installation_id"], installation_id);
+        assert_eq!(value["client_metadata"]["installationId"], installation_id);
+        assert_eq!(value["client_metadata"]["session_id"], "session-1");
+        assert_eq!(value["client_metadata"]["thread_id"], "thread-1");
+        assert_eq!(value["client_metadata"]["turn_id"], "turn-1");
+        assert_eq!(value["client_metadata"]["future"], true);
+
+        let without_metadata = br#"{"model":"gpt-6-astra","input":[]}"#;
+        let scoped = scope_request_installation(without_metadata, installation_id).expect("scope");
+        let value: Value = serde_json::from_slice(&scoped).expect("scoped json");
+        assert_eq!(
+            value["client_metadata"]["x-codex-installation-id"],
+            installation_id
+        );
+    }
+
+    #[test]
+    fn installation_scope_is_deterministic_and_uuid_shaped() {
+        let first = random_uuid_v4();
+        let second = random_uuid_v4();
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "4");
+        assert!(matches!(&first[19..20], "8" | "9" | "a" | "b"));
+        assert_ne!(first, second);
+        let surface = surface_stable_id(&first);
+        assert_eq!(surface, surface_stable_id(&first));
+        assert_ne!(surface, surface_stable_id(&second));
+    }
+
+    #[test]
+    fn official_desktop_client_identity_uses_desktop_profile() {
+        let auth = PreparedCodexAuth {
+            access_token: "synthetic-access".into(),
+            account_id: "synthetic-account".into(),
+            installation_id: "00000000-0000-4000-8000-000000000001".into(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "originator",
+            HeaderValue::from_static(CODEX_DESKTOP_ORIGINATOR),
+        );
+        apply_codex_headers(&mut headers, &auth);
+        assert_eq!(headers[USER_AGENT], CODEX_DESKTOP_USER_AGENT);
+        assert_eq!(headers["originator"], CODEX_DESKTOP_ORIGINATOR);
+        assert_eq!(headers["version"], "0.153.4");
     }
 
     #[test]
