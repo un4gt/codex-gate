@@ -150,7 +150,7 @@ export interface RequestLogSearchParams {
   upstream_key_id?: number;
   api_key_id?: number;
   api_key_log_enabled?: boolean;
-  api_format?: "chat_completions" | "responses";
+  api_format?: "chat_completions" | "responses" | "messages";
   error_type?: string;
   status_class?: number;
   time_from_ms?: number;
@@ -173,6 +173,12 @@ export type NotificationSmtpSecurity = "starttls" | "tls" | "none";
 export type NotificationChannelKind = "smtp" | "webhook";
 export type NotificationWebhookFormat =
   "generic" | "feishu" | "wecom" | "dingtalk" | "slack" | "discord";
+export type NotificationWecomMessageType = "text" | "markdown" | "template_card" | "news";
+export interface NotificationWecomConfig {
+  message_type: NotificationWecomMessageType;
+  details_url: string;
+  image_url: string;
+}
 export type NotificationRuleKind = "scheduled_report" | "threshold_alert";
 export type NotificationAlertMetric =
   | "cpu_usage_percent"
@@ -206,6 +212,7 @@ export interface NotificationWebhookPublicConfig {
   format: NotificationWebhookFormat;
   has_signing_secret: boolean;
   headers: Array<{ name: string; has_value: boolean }>;
+  wecom?: NotificationWecomConfig;
 }
 
 interface NotificationChannelBase {
@@ -246,6 +253,7 @@ export type NotificationChannelInput = {
         format: NotificationWebhookFormat;
         signing_secret?: string;
         headers: NotificationWebhookHeader[];
+        wecom?: NotificationWecomConfig;
       };
     }
 );
@@ -447,7 +455,11 @@ export interface ProviderHealthSummary extends RuntimeHealthSummary {
   key_counts: HealthCounts;
 }
 
-export type RequestOverrideScope = "all" | "chat_completions" | "responses";
+export type RequestOverrideScope =
+  | "all"
+  | "chat_completions"
+  | "responses"
+  | "messages";
 export type RequestOverrideOperation = "set" | "remove";
 
 export interface RequestHeaderOverride {
@@ -633,6 +645,7 @@ export interface ProviderModel {
   enabled: boolean;
   available: boolean;
   responses_via_chat_enabled: boolean;
+  messages_via_chat_enabled: boolean;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -641,7 +654,7 @@ export interface ProviderModelInventory extends ProviderModel {
   display?: ModelDisplay | null;
   provider_name: string;
   provider_type: string;
-  native_api_formats: Array<"chat_completions" | "responses">;
+  native_api_formats: Array<"chat_completions" | "responses" | "messages">;
 }
 
 export interface ConsolePreferences {

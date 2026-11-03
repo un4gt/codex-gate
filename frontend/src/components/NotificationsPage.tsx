@@ -92,6 +92,7 @@ NotificationRuleKind,
 NotificationSmtpSecurity,
 NotificationSummary,
 NotificationWebhookFormat,
+NotificationWecomMessageType,
 ProviderWorkspace,
 StatusTone,
 } from "@/lib/types";
@@ -122,6 +123,9 @@ interface ChannelDraft {
   webhookUrlMasked: string;
   webhookFormat: NotificationWebhookFormat;
   savedWebhookFormat: NotificationWebhookFormat;
+  wecomMessageType: NotificationWecomMessageType;
+  wecomDetailsUrl: string;
+  wecomImageUrl: string;
   signingSecret: string;
   hasSigningSecret: boolean;
   headers: string;
@@ -193,6 +197,9 @@ function emptyChannelDraft(kind: "smtp" | "webhook"): ChannelDraft {
     webhookUrlMasked: "",
     webhookFormat: "generic",
     savedWebhookFormat: "generic",
+    wecomMessageType: "markdown",
+    wecomDetailsUrl: "",
+    wecomImageUrl: "",
     signingSecret: "",
     hasSigningSecret: false,
     headers: "",
@@ -226,6 +233,9 @@ function channelDraftFrom(channel: NotificationChannel): ChannelDraft {
     webhookUrlMasked: channel.config.url_masked,
     webhookFormat: channel.config.format,
     savedWebhookFormat: channel.config.format,
+    wecomMessageType: channel.config.wecom?.message_type ?? "markdown",
+    wecomDetailsUrl: channel.config.wecom?.details_url ?? "",
+    wecomImageUrl: channel.config.wecom?.image_url ?? "",
     hasSigningSecret: channel.config.has_signing_secret,
     headers: channel.config.headers
       .map((header) => `${header.name}:`)
@@ -347,6 +357,13 @@ function channelInputFromDraft(draft: ChannelDraft): NotificationChannelInput {
   if (draft.id === null && !draft.webhookUrl.trim())
     throw new Error(t("Webhook 地址不能为空。"));
   if (
+    draft.webhookFormat === "wecom" &&
+    (draft.wecomMessageType === "template_card" || draft.wecomMessageType === "news") &&
+    !draft.wecomDetailsUrl.trim()
+  ) {
+    throw new Error(t("卡片和图文消息需要填写详情链接。"));
+  }
+  if (
     draft.id !== null &&
     draft.savedWebhookFormat !== "generic" &&
     draft.webhookFormat === "generic" &&
@@ -365,6 +382,13 @@ function channelInputFromDraft(draft: ChannelDraft): NotificationChannelInput {
       format: draft.webhookFormat,
       signing_secret: draft.signingSecret.trim(),
       headers: parseHeaders(draft.headers),
+      ...(draft.webhookFormat === "wecom" ? {
+        wecom: {
+          message_type: draft.wecomMessageType,
+          details_url: draft.wecomDetailsUrl.trim(),
+          image_url: draft.wecomImageUrl.trim(),
+        },
+      } : {}),
     },
   };
 }
@@ -457,6 +481,16 @@ function webhookFormatLabel(format: NotificationWebhookFormat) {
     discord: "Discord",
   };
   return labels[format];
+}
+
+function wecomMessageTypeLabel(type: NotificationWecomMessageType) {
+  const labels: Record<NotificationWecomMessageType, string> = {
+    markdown: "Markdown（推荐）",
+    template_card: "消息卡片",
+    news: "图文消息",
+    text: "纯文本",
+  };
+  return labels[type];
 }
 
 function prettyJson(raw: string | null) {
@@ -2840,7 +2874,9 @@ function ChannelDialog(props: {
                       {t(
                         draft.webhookFormat === "generic"
                           ? "发送版本化 little-gate 事件 JSON。"
-                          : "发送该平台机器人可直接接收的文本消息。",
+                          : draft.webhookFormat === "wecom"
+                            ? "支持 Markdown、消息卡片和图文消息。"
+                            : "发送该平台机器人可直接接收的文本消息。",
                       )}
                     </FormHelperText>
                   </FormControl>
@@ -2880,6 +2916,43 @@ function ChannelDialog(props: {
                     ) : null}
                   </FormControl>
                 </Box>
+                {draft.webhookFormat === "wecom" ? (
+                  <Stack spacing={2}>
+                    <FormControl fullWidth>
+                      <InputLabel id={`${formId}-wecom-style`}>{t("企业微信消息样式")}</InputLabel>
+                      <Select
+                        labelId={`${formId}-wecom-style`}
+                        label={t("企业微信消息样式")}
+                        value={draft.wecomMessageType}
+                        onChange={(event) => update("wecomMessageType", event.target.value as NotificationWecomMessageType)}
+                      >
+                        {(["markdown", "template_card", "news", "text"] as NotificationWecomMessageType[]).map((type) => (
+                          <MenuItem key={type} value={type}>{t(wecomMessageTypeLabel(type))}</MenuItem>
+                        ))}
+                      </Select>
+                      <FormHelperText>{t("时间按规则时区显示；用量较多时保留摘要和省略提示。")}</FormHelperText>
+                    </FormControl>
+                    {draft.wecomMessageType === "template_card" || draft.wecomMessageType === "news" ? (
+                      <>
+                        <TextField
+                          required
+                          type="url"
+                          label={t("详情链接")}
+                          value={draft.wecomDetailsUrl}
+                          onChange={(event) => update("wecomDetailsUrl", event.target.value)}
+                          helperText={t("点击消息后打开的控制台或报表地址，请勿填写机器人 Webhook 地址。")}
+                        />
+                        <TextField
+                          type="url"
+                          label={t("封面图片链接（可选）")}
+                          value={draft.wecomImageUrl}
+                          onChange={(event) => update("wecomImageUrl", event.target.value)}
+                          helperText={t("使用可公开访问的 JPG/PNG 图片；消息卡片填写封面后显示为图文卡片。")}
+                        />
+                      </>
+                    ) : null}
+                  </Stack>
+                ) : null}
                 {draft.webhookFormat === "generic" ? (
                   <FormControl>
                     <TextField

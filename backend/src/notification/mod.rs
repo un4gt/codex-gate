@@ -1,8 +1,10 @@
 mod admin;
+mod presentation;
 mod report;
 mod runtime;
 mod store;
 mod transport;
+mod wecom;
 
 use std::str::FromStr;
 
@@ -201,6 +203,26 @@ pub enum WebhookFormat {
     Discord,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WecomMessageType {
+    Text,
+    #[default]
+    Markdown,
+    TemplateCard,
+    News,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct WecomConfig {
+    #[serde(default)]
+    pub message_type: WecomMessageType,
+    #[serde(default)]
+    pub details_url: String,
+    #[serde(default)]
+    pub image_url: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WebhookChannelConfig {
     pub url: String,
@@ -210,6 +232,8 @@ pub struct WebhookChannelConfig {
     pub signing_secret: String,
     #[serde(default)]
     pub headers: Vec<WebhookHeader>,
+    #[serde(default)]
+    pub wecom: WecomConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

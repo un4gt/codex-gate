@@ -5,16 +5,16 @@ lang: zh-CN
 
 # {{ rule.name }}
 
-时间窗口：{{ window.from_ms }} — {{ window.to_ms }}（{{ window.timezone }}）
+时间窗口：{{ display.window.from }} — {{ display.window.to }}（{{ display.window.timezone }}）
 
 ::: callout
-请求 **{{ usage.totals.requests }}** · 失败 **{{ usage.totals.failed }}** · Token **{{ usage.totals.total_tokens }}** · 成本 **${{ usage.totals.estimated_cost_usd }}**
+请求 **{{ display.requests }}** · 失败 **{{ display.failed }}** · Token **{{ display.tokens }}** · 成本 **{{ display.cost }}**
 :::
 
 ## 服务器状态
 
-- CPU：{{ server.cpu_usage_percent }}%
-- 内存：{{ server.memory_usage_percent }}%
+- CPU：{{ display.cpu }}
+- 内存：{{ display.memory }}
 - 上游：{{ server.healthy }} 正常 / {{ server.warning }} 警告 / {{ server.error }} 异常
 - 数据库：{% if server.database_ready %}就绪{% else %}不可用{% endif %}
 

@@ -114,6 +114,7 @@ struct PublicWebhookConfig {
     format: super::WebhookFormat,
     has_signing_secret: bool,
     headers: Vec<PublicWebhookHeader>,
+    wecom: super::WecomConfig,
 }
 
 #[derive(Serialize)]
@@ -686,6 +687,7 @@ fn channel_view(
             url_masked: mask_webhook_url(&config.url),
             format: config.format,
             has_signing_secret: !config.signing_secret.is_empty(),
+            wecom: config.wecom,
             headers: config
                 .headers
                 .into_iter()
@@ -1018,6 +1020,7 @@ mod tests {
             format: crate::notification::WebhookFormat::Generic,
             signing_secret: String::new(),
             headers: Vec::new(),
+            wecom: Default::default(),
         });
         let generated = ensure_create_secret(&mut config).expect("generated secret");
         let ChannelConfig::Webhook(config) = config else {
@@ -1033,6 +1036,7 @@ mod tests {
             format: crate::notification::WebhookFormat::Feishu,
             signing_secret: String::new(),
             headers: Vec::new(),
+            wecom: Default::default(),
         });
 
         assert!(ensure_create_secret(&mut config).is_none());

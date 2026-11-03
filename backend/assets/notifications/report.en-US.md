@@ -5,16 +5,16 @@ lang: en-US
 
 # {{ rule.name }}
 
-Window: {{ window.from_ms }} — {{ window.to_ms }} ({{ window.timezone }})
+Window: {{ display.window.from }} — {{ display.window.to }} ({{ display.window.timezone }})
 
 ::: callout
-Requests **{{ usage.totals.requests }}** · Failed **{{ usage.totals.failed }}** · Tokens **{{ usage.totals.total_tokens }}** · Cost **${{ usage.totals.estimated_cost_usd }}**
+Requests **{{ display.requests }}** · Failed **{{ display.failed }}** · Tokens **{{ display.tokens }}** · Cost **{{ display.cost }}**
 :::
 
 ## Server status
 
-- CPU: {{ server.cpu_usage_percent }}%
-- Memory: {{ server.memory_usage_percent }}%
+- CPU: {{ display.cpu }}
+- Memory: {{ display.memory }}
 - Providers: {{ server.healthy }} healthy / {{ server.warning }} warning / {{ server.error }} error
 - Database: {% if server.database_ready %}ready{% else %}unavailable{% endif %}
 

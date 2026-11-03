@@ -14,6 +14,7 @@ use minijinja::value::Value;
 use minijinja::{AutoEscape, Environment, context};
 use sha2::Sha256;
 
+use super::presentation::{self, truncate_chars};
 use super::report::{NotificationPayload, UsageDimension};
 use super::{
     ChannelConfig, DELIVERY_TIMEOUT_SECS, NotificationError, NotificationLocale, SmtpChannelConfig,
@@ -26,8 +27,6 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 const MAX_CHAT_MESSAGE_CHARS: usize = 16_000;
-// https://developer.work.weixin.qq.com/document/path/99110 (text.content)
-const MAX_WECOM_TEXT_BYTES: usize = 2_048;
 const MAX_DISCORD_MESSAGE_CHARS: usize = 2_000;
 const USER_AGENT_VALUE: &str = "little-gate-notifications/1";
 
@@ -193,6 +192,9 @@ pub fn validate_webhook_config(config: &WebhookChannelConfig) -> Result<(), Noti
     }
     for header in &config.headers {
         validate_custom_header(header.name.as_str(), header.value.as_str())?;
+    }
+    if config.format == WebhookFormat::Wecom {
+        super::wecom::validate(&config.wecom)?;
     }
     Ok(())
 }
@@ -394,11 +396,16 @@ fn build_webhook_body(
     }
     let payload: NotificationPayload = serde_json::from_str(payload_json)
         .map_err(|error| DeliveryError::permanent("invalid_payload", error.to_string()))?;
+    if config.format == WebhookFormat::Wecom {
+        let body = super::wecom::build_message(&config.wecom, &payload)
+            .map_err(|error| DeliveryError::permanent("webhook_render_failed", error))?;
+        return serde_json::to_string(&body)
+            .map_err(|error| DeliveryError::permanent("webhook_render_failed", error.to_string()));
+    }
     let rendered = render_email(&payload)
         .map_err(|error| DeliveryError::permanent("webhook_render_failed", error))?;
     let message = format!("{}\n\n{}", rendered.subject, rendered.text);
     let message = match config.format {
-        WebhookFormat::Wecom => truncate_utf8_bytes(&message, MAX_WECOM_TEXT_BYTES),
         WebhookFormat::Discord => truncate_chars(&message, MAX_DISCORD_MESSAGE_CHARS),
         _ => truncate_chars(&message, MAX_CHAT_MESSAGE_CHARS),
     };
@@ -489,34 +496,6 @@ fn sign_feishu_webhook(secret: &str, timestamp: &str) -> Result<String, Delivery
     Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
 }
 
-fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-    let suffix = if max_bytes >= '…'.len_utf8() {
-        "…"
-    } else {
-        ""
-    };
-    let mut end = max_bytes - suffix.len();
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{suffix}", &value[..end])
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    let mut truncated = value
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
-}
-
 fn diagnostic_excerpt(value: &str) -> String {
     if value.len() <= MAX_DIAGNOSTIC_BYTES {
         return value.to_string();
@@ -543,8 +522,17 @@ fn render_email(payload: &NotificationPayload) -> Result<RenderedEmail, String> 
     let top_n = usize::from(payload.rule.top_n);
     let provider_html = render_html_table(&payload.usage.providers, top_n, locale);
     let client_key_html = render_html_table(&payload.usage.client_keys, top_n, locale);
-    let provider_text = render_text_table(&payload.usage.providers, top_n);
-    let client_key_text = render_text_table(&payload.usage.client_keys, top_n);
+    let provider_text = render_text_table(&payload.usage.providers, top_n, locale);
+    let client_key_text = render_text_table(&payload.usage.client_keys, top_n, locale);
+    let display = context! {
+        window => presentation::window_display(&payload.window),
+        cpu => presentation::percent(payload.server.cpu_usage_percent),
+        memory => presentation::percent(payload.server.memory_usage_percent),
+        requests => presentation::integer(payload.usage.totals.requests),
+        failed => presentation::integer(payload.usage.totals.failed),
+        tokens => presentation::integer(payload.usage.totals.total_tokens),
+        cost => presentation::cost(&payload.usage.totals.estimated_cost_usd),
+    };
     let mut html_env = Environment::new();
     html_env.set_auto_escape_callback(|_| AutoEscape::Html);
     let mut text_env = Environment::new();
@@ -577,6 +565,7 @@ fn render_email(payload: &NotificationPayload) -> Result<RenderedEmail, String> 
             warnings => &payload.warnings,
             provider_table_html => Value::from_safe_string(provider_html),
             client_key_table_html => Value::from_safe_string(client_key_html),
+            display => &display,
         })
         .map_err(|error| error.to_string())?;
     let text = text_env
@@ -592,19 +581,11 @@ fn render_email(payload: &NotificationPayload) -> Result<RenderedEmail, String> 
             warnings => &payload.warnings,
             provider_table_text => provider_text,
             client_key_table_text => client_key_text,
+            display => &display,
         })
         .map_err(|error| error.to_string())?;
-    let label = match (locale, payload.event.event_type.as_str()) {
-        (NotificationLocale::ZhCn, "alert_triggered") => "[告警]",
-        (NotificationLocale::ZhCn, "alert_reminder") => "[持续告警]",
-        (NotificationLocale::ZhCn, "alert_recovered") => "[已恢复]",
-        (NotificationLocale::EnUs, "alert_triggered") => "[Alert]",
-        (NotificationLocale::EnUs, "alert_reminder") => "[Ongoing alert]",
-        (NotificationLocale::EnUs, "alert_recovered") => "[Recovered]",
-        _ => "",
-    };
     Ok(RenderedEmail {
-        subject: format!("[little-gate]{label} {}", payload.rule.name),
+        subject: format!("[little-gate] {}", presentation::title(payload)),
         html,
         text,
     })
@@ -620,28 +601,32 @@ fn render_html_table(items: &[UsageDimension], top_n: usize, locale: Notificatio
     );
     for item in items.iter().take(top_n) {
         out.push_str(&format!(
-            "<tr><td style=\"border-bottom:1px solid #eee;padding:8px\">{}</td><td align=\"right\" style=\"border-bottom:1px solid #eee;padding:8px\">{}</td><td align=\"right\" style=\"border-bottom:1px solid #eee;padding:8px\">{}</td><td align=\"right\" style=\"border-bottom:1px solid #eee;padding:8px\">${}</td></tr>",
+            "<tr><td style=\"border-bottom:1px solid #eee;padding:8px\">{}</td><td align=\"right\" style=\"border-bottom:1px solid #eee;padding:8px\">{}</td><td align=\"right\" style=\"border-bottom:1px solid #eee;padding:8px\">{}</td><td align=\"right\" style=\"border-bottom:1px solid #eee;padding:8px\">{}</td></tr>",
             escape_html(&item.name),
-            item.aggregate.requests,
-            item.aggregate.total_tokens,
-            escape_html(&item.aggregate.estimated_cost_usd),
+            presentation::integer(item.aggregate.requests),
+            presentation::integer(item.aggregate.total_tokens),
+            escape_html(&presentation::cost(&item.aggregate.estimated_cost_usd)),
         ));
     }
     out.push_str("</tbody></table>");
     out
 }
 
-fn render_text_table(items: &[UsageDimension], top_n: usize) -> String {
+fn render_text_table(items: &[UsageDimension], top_n: usize, locale: NotificationLocale) -> String {
+    let (requests, tokens, cost) = match locale {
+        NotificationLocale::ZhCn => ("请求", "Token", "成本"),
+        NotificationLocale::EnUs => ("requests", "tokens", "cost"),
+    };
     items
         .iter()
         .take(top_n)
         .map(|item| {
             format!(
-                "- {}: requests {}, tokens {}, cost ${}",
+                "- {}: {requests} {}, {tokens} {}, {cost} {}",
                 item.name,
-                item.aggregate.requests,
-                item.aggregate.total_tokens,
-                item.aggregate.estimated_cost_usd
+                presentation::integer(item.aggregate.requests),
+                presentation::integer(item.aggregate.total_tokens),
+                presentation::cost(&item.aggregate.estimated_cost_usd)
             )
         })
         .collect::<Vec<_>>()
@@ -740,6 +725,8 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notification::WecomMessageType;
+    use crate::notification::presentation::truncate_utf8_bytes;
     use crate::notification::report::{
         EventPayload, InstancePayload, RulePayload, ServerPayload, UsageAggregate, UsagePayload,
         WindowPayload,
@@ -784,9 +771,9 @@ mod tests {
             let body = build_webhook_body(&webhook_config(format), &persisted, "10").unwrap();
             let value: serde_json::Value = serde_json::from_str(&body).unwrap();
             if format == WebhookFormat::Wecom {
-                assert_eq!(value["msgtype"], "text");
+                assert_eq!(value["msgtype"], "markdown");
                 assert!(
-                    value["text"]["content"]
+                    value["markdown"]["content"]
                         .as_str()
                         .unwrap()
                         .contains("上游 A")
@@ -802,12 +789,17 @@ mod tests {
     fn wecom_text_respects_utf8_byte_limit_and_platform_response() {
         let mut payload = sample_payload();
         payload.rule.name = "中文🙂".repeat(1_000);
-        let body = build_webhook_body(
-            &webhook_config(WebhookFormat::Wecom),
-            &serde_json::to_string(&payload).unwrap(),
-            "10",
-        )
-        .unwrap();
+        for id in 0..20 {
+            payload.usage.providers.push(UsageDimension {
+                id,
+                name: "中文🙂".repeat(100),
+                aggregate: Default::default(),
+            });
+        }
+        let mut config = webhook_config(WebhookFormat::Wecom);
+        config.wecom.message_type = super::super::WecomMessageType::Text;
+        let body =
+            build_webhook_body(&config, &serde_json::to_string(&payload).unwrap(), "10").unwrap();
         let value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["msgtype"], "text");
         let message = value["text"]["content"].as_str().unwrap();
@@ -826,6 +818,124 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "webhook_platform_rejected");
+    }
+
+    #[test]
+    fn wecom_markdown_formats_time_and_keeps_both_usage_groups_within_budget() {
+        let mut payload = sample_payload();
+        payload.rule.locale = "zh-CN".into();
+        payload.rule.name = "中文🙂".repeat(1_000);
+        payload.window.from_ms = 1_793_387_656_921;
+        payload.window.to_ms = 1_793_387_956_921;
+        payload.window.timezone = "Asia/Shanghai".into();
+        payload.server.cpu_usage_percent = Some(0.2654740820507333);
+        payload.server.memory_usage_percent = None;
+        payload.usage.totals.total_tokens = 2_390_068;
+        payload.usage.totals.estimated_cost_usd = "2.556272".into();
+        for id in 0..100 {
+            payload.usage.providers.push(UsageDimension {
+                id,
+                name: "<@all> **伪标题**\n🙂中文".repeat(50),
+                aggregate: Default::default(),
+            });
+        }
+        payload.usage.client_keys = payload.usage.providers.clone();
+        payload.warnings = vec!["<@all> **提示**🙂".repeat(500); 5];
+        let persisted = serde_json::to_string(&payload).unwrap();
+        let raw =
+            build_webhook_body(&webhook_config(WebhookFormat::Wecom), &persisted, "10").unwrap();
+        let body: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let content = body["markdown"]["content"].as_str().unwrap();
+        assert!(content.len() <= 4096, "{} bytes", content.len());
+        assert!(content.contains("26-10-31 03:14:16 — 26-10-31 03:19:16 (Asia/Shanghai)"));
+        for expected in [
+            "0.27%",
+            "内存 —",
+            "2,390,068",
+            "$2.5563",
+            "上游消耗",
+            "客户端 Key 消耗",
+            "项未展示",
+        ] {
+            assert!(content.contains(expected), "missing {expected}: {content}");
+        }
+        assert!(!content.contains("<@all>"));
+        assert!(!content.contains("**伪标题**"));
+        assert!(!content.contains("1793387656921"));
+        assert_eq!(payload.usage.totals.estimated_cost_usd, "2.556272");
+        assert_eq!(
+            build_webhook_body(&webhook_config(WebhookFormat::Generic), &persisted, "10").unwrap(),
+            persisted
+        );
+        let rendered = render_email(&payload).unwrap();
+        assert!(rendered.text.contains("26-10-31 03:14:16"));
+        assert!(rendered.html.contains("0.27%"));
+    }
+
+    #[test]
+    fn wecom_cards_require_public_links_and_match_documented_shapes() {
+        let mut payload = sample_payload();
+        payload.rule.name = "中文🙂".repeat(100);
+        payload.event.event_type = "alert_recovered".into();
+        let persisted = serde_json::to_string(&payload).unwrap();
+        let mut config = webhook_config(WebhookFormat::Wecom);
+        config.wecom.message_type = WecomMessageType::TemplateCard;
+        assert!(validate_webhook_config(&config).is_err());
+        config.wecom.details_url = "https://gate.example.com/notifications".into();
+        for image in ["", "https://gate.example.com/cover.png"] {
+            config.wecom.image_url = image.into();
+            let raw = build_webhook_body(&config, &persisted, "10").unwrap();
+            let body: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let card = &body["template_card"];
+            assert_eq!(body["msgtype"], "template_card");
+            assert_eq!(
+                card["card_type"],
+                if image.is_empty() {
+                    "text_notice"
+                } else {
+                    "news_notice"
+                }
+            );
+            assert_eq!(card["source"]["desc_color"], 3);
+            assert_eq!(card["card_action"]["url"], config.wecom.details_url);
+            assert!(
+                card["main_title"]["title"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .count()
+                    <= 26
+            );
+            assert!(card["horizontal_content_list"].as_array().unwrap().len() <= 6);
+            if !image.is_empty() {
+                assert_eq!(card["card_image"]["url"], image);
+                assert!(card.get("sub_title_text").is_none());
+            }
+        }
+        config.wecom.message_type = WecomMessageType::News;
+        let raw = build_webhook_body(&config, &persisted, "10").unwrap();
+        let body: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let article = &body["news"]["articles"][0];
+        assert!(article["title"].as_str().unwrap().len() <= 128);
+        assert!(article["description"].as_str().unwrap().len() <= 512);
+        assert_eq!(article["picurl"], config.wecom.image_url);
+        for invalid in [
+            "javascript:alert(1)",
+            "https://user:password@example.com/",
+            "/relative",
+        ] {
+            config.wecom.details_url = invalid.into();
+            assert!(validate_webhook_config(&config).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_wecom_config_defaults_to_markdown_and_text_remains_selectable() {
+        let old: WebhookChannelConfig =
+            serde_json::from_str(r#"{"url":"https://example.com/hook","format":"wecom"}"#).unwrap();
+        assert_eq!(old.wecom.message_type, WecomMessageType::Markdown);
+        let explicit: WebhookChannelConfig = serde_json::from_str(r#"{"url":"https://example.com/hook","format":"wecom","wecom":{"message_type":"text"}}"#).unwrap();
+        assert_eq!(explicit.wecom.message_type, WecomMessageType::Text);
     }
 
     #[test]
@@ -976,6 +1086,7 @@ mod tests {
             format,
             signing_secret: String::new(),
             headers: Vec::new(),
+            wecom: Default::default(),
         }
     }
 

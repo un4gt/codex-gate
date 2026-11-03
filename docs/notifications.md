@@ -9,6 +9,7 @@
 - 报表窗口使用相邻计划边界 `[from, to)`；进程停机后只发送一份合并报表，并在 payload 中标记遗漏次数。
 - 用量按上游 Provider 和客户端访问 Key 汇总，不展开 Provider 内部凭据 Key。
 - 内容包含请求数、失败数、Token、用量覆盖率、估算美元成本和未定价请求数。
+- 人类可读消息的时间窗口使用规则时区，格式为 `YY-MM-DD HH:mm:ss`（例如 `26-10-31 03:14:16 — 26-10-31 03:19:16 (Asia/Shanghai)`）；CPU/内存保留两位小数，计数使用千分位，成本最多显示四位小数，极小非零金额显示 `<$0.0001`。未采集的资源指标显示 `—`。原始事件 JSON 中的毫秒时间戳、数字和金额精度保持不变。
 - 阈值告警支持首次触发、冷却提醒和恢复通知，每分钟评估一次。
 - 数据库租约确保多实例部署中同一个计划或投递只会被一个实例领取。
 
@@ -33,9 +34,39 @@ Webhook 请求使用 `application/json`。通道的“消息格式”决定请�
 
 - `generic`：发送版本化 little-gate 事件 JSON，并使用 little-gate HMAC 请求签名。
 - `feishu`：发送飞书文本消息，顶层包含 `msg_type: "text"` 和 `content.text`；填写飞书机器人签名密钥后还会包含 `timestamp` 和 `sign`。
-- `wecom`、`dingtalk`：发送平台文本消息，顶层包含 `msgtype: "text"` 和 `text.content`。企业微信遵循[官方文本消息规范](https://developer.work.weixin.qq.com/document/path/99110)，将 `text.content` 限制在 2048 个 UTF-8 字节内，超出时按字符边界截断并添加省略号；不会截断中文或 emoji 的编码。
+- `wecom`：按通道的“企业微信消息样式”发送 Markdown、消息卡片、图文或纯文本。未设置样式的已有通道默认使用 Markdown。
+- `dingtalk`：发送平台文本消息，顶层包含 `msgtype: "text"` 和 `text.content`。
 - `slack`：发送包含 `text` 的 Incoming Webhook 消息。
 - `discord`：发送包含 `content` 的 Webhook 消息，并按 Discord 文本长度限制截断。
+
+### 企业微信 Markdown 与卡片
+
+遵循[企业微信消息推送配置说明](https://developer.work.weixin.qq.com/document/path/99110)。在管理台编辑企业微信通道即可选择：
+
+| 消息样式 | 配置值 | 展示与限制 |
+| --- | --- | --- |
+| Markdown（默认） | `markdown` | 标题、加粗汇总、服务器状态、上游和客户端 Key 消耗；最多 4096 个 UTF-8 字节。两组明细分别保留展示空间，超出 Top N 或容量时显示省略项数。 |
+| 消息卡片 | `template_card` | 不填封面时使用 `text_notice` 数据卡片；填写封面后使用 `news_notice` 图文卡片。包含六行状态/用量字段、摘要和“查看详情”操作。 |
+| 图文消息 | `news` | 一条图文摘要，标题最多 128 字节、描述最多 512 字节，可带封面图片。 |
+| 纯文本 | `text` | 简洁文字摘要，最多 2048 个 UTF-8 字节。 |
+
+卡片和图文消息必须填写“详情链接”，用于点击后打开控制台或报表页面；不要填入带机器人密钥的 Webhook 地址。“封面图片链接”是可选的公开 JPG/PNG 地址，由企业微信加载，网关不上传或抓取图片。链接只接受不含用户名/密码的绝对 HTTP(S) URL。
+
+API 在 Webhook `config` 下增加可选的 `wecom` 对象，例如：
+
+```json
+{
+  "format": "wecom",
+  "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_ROBOT_KEY",
+  "wecom": {
+    "message_type": "template_card",
+    "details_url": "https://gate.example.com/notifications",
+    "image_url": "https://gate.example.com/report-cover.png"
+  }
+}
+```
+
+消息渲染会缩短长名称并保护中文/emoji 边界；名称中的 Markdown 与 `@` 标记不会作为群通知指令执行。完整统计仍在发送历史事件数据中保留。切换样式不需要重新填写机器人地址或密钥，也不需要数据库迁移。所有样式继续校验企业微信 `errcode`，HTTP 200 不代表业务成功。
 
 `generic` payload 中的 `schema_version` 当前为 `1`。主要字段包括：
 
@@ -76,4 +107,4 @@ Idempotency-Key: <delivery_id>
 
 已修复带用量明细时出现的 `invalid type: map, expected f64`：`serde_json` 的 `arbitrary_precision` 与 `serde(flatten)` 组合会把统计百分比小数以内部映射形式传递给反序列化器。现在通过 JSON Number 读取失败率和用量覆盖率，保持现有 JSON 结构、大整数及金额精度，无需迁移数据库。企业微信、其他消息平台和 SMTP 共用这份通知数据，因此同时受益。部署修复后，可在发送历史中重试原有失败记录，或重新点击“发送测试”。
 
-离线回归：`python scripts/run_wecom_notification_regression.py`。脚本启动临时网关和本地模拟企业微信接口，产生真实用量统计后调用通道测试 API，验证带小数的统计明细、UTF-8 长度限制、业务错误识别、投递诊断和保存报表的重试；不向真实企业微信群发送消息。可用 `--binary /path/to/backend` 指定现有程序，或设置独立 `CARGO_TARGET_DIR` 避免覆盖运行中的构建产物。
+离线回归：`python scripts/run_wecom_notification_regression.py`。脚本启动临时网关和本地模拟企业微信接口，产生真实用量统计后调用通道测试 API，验证时间格式、带小数的统计明细、Markdown/文本/图文/两种卡片、配置往返、必填链接、UTF-8 长度限制、业务错误识别、投递诊断和保存报表的重试；不向真实企业微信群发送消息。可用 `--binary /path/to/backend` 指定现有程序，或设置独立 `CARGO_TARGET_DIR` 避免覆盖运行中的构建产物。

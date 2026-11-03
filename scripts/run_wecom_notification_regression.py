@@ -4,6 +4,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,10 +23,29 @@ class WecomMock(Mock):
         if self.path != '/wecom':
             return super().do_POST()
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        content = payload.get('text', {}).get('content')
-        valid = (self.headers.get('Content-Type') == 'application/json'
-                 and payload.get('msgtype') == 'text' and isinstance(content, str)
-                 and 0 < len(content.encode('utf-8')) <= 2048)
+        kind = payload.get('msgtype')
+        if kind in ('text', 'markdown'):
+            content = payload.get(kind, {}).get('content')
+            valid = isinstance(content, str) and 0 < len(content.encode()) <= (4096 if kind == 'markdown' else 2048)
+        elif kind == 'news':
+            articles = payload.get('news', {}).get('articles', [])
+            valid = 1 <= len(articles) <= 8 and all(
+                item.get('url') and len(item['title'].encode()) <= 128
+                and len(item.get('description', '').encode()) <= 512 for item in articles)
+        elif kind == 'template_card':
+            card = payload.get('template_card', {})
+            valid = (card.get('card_type') in ('text_notice', 'news_notice')
+                     and card.get('main_title', {}).get('title')
+                     and card.get('card_action', {}).get('url')
+                     and card['card_action']['type'] == 1
+                     and len(card.get('horizontal_content_list', [])) <= 6
+                     and len(card.get('vertical_content_list', [])) <= 4
+                     and len(card.get('jump_list', [])) <= 3)
+            if card.get('card_type') == 'news_notice':
+                valid = valid and bool(card.get('card_image', {}).get('url'))
+        else:
+            valid = False
+        valid = valid and self.headers.get('Content-Type') == 'application/json'
         WecomMock.received.append(payload)
         code = self.business_code if valid else 40058
         self.json({'errcode': code, 'errmsg': 'ok' if code == 0 else 'invalid parameter'})
@@ -64,7 +84,47 @@ def check(test):
     assert detail['last_http_status'] == 200
     assert json.loads(detail['last_request_body']) == WecomMock.received[-1]
     assert json.loads(detail['last_response_body'])['errcode'] == 0
-    print('WeCom send-test: real usage -> persisted payload -> UTF-8 text -> success diagnostics PASS', flush=True)
+    content = WecomMock.received[-1]['markdown']['content']
+    assert re.search(r'\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', content), content
+    assert str(payload['window']['from_ms']) not in content
+    assert '## 通知通道测试' in content and '服务器状态' in content, content
+    print('WeCom legacy config defaults to Markdown with readable time and persisted usage PASS', flush=True)
+
+    # Configuration round trip, real delivery shapes, and business errors for every style.
+    for style, image in [('template_card', ''), ('template_card', 'https://example.test/cover.png'),
+                         ('news', 'https://example.test/cover.png'), ('text', ''), ('markdown', '')]:
+        config = {'message_type': style, 'details_url': 'https://example.test/notifications', 'image_url': image}
+        updated = test.api('PATCH', f'/notifications/channels/{channel}', {
+            'kind': 'webhook', 'config': {'format': 'wecom', 'url': '', 'wecom': config},
+        })
+        assert updated['config']['wecom'] == config, updated
+        assert updated['config']['url_masked'].endswith('/…'), updated
+        run_id = test.api('POST', f'/notifications/channels/{channel}/test', {})['run_id']
+        detail = wait_delivery(test, run_id)
+        assert detail['status'] == 'succeeded', detail
+        body = WecomMock.received[-1]
+        assert body['msgtype'] == style, body
+        if style == 'template_card':
+            card = body['template_card']
+            assert card['card_type'] == ('news_notice' if image else 'text_notice'), card
+            assert card['card_action']['url'] == config['details_url']
+        if style == 'news':
+            assert body['news']['articles'][0]['picurl'] == image
+        WecomMock.business_code = 40058
+        run_id = test.api('POST', f'/notifications/channels/{channel}/test', {})['run_id']
+        failed_style = wait_delivery(test, run_id)
+        assert failed_style['last_error_code'] == 'webhook_platform_rejected', failed_style
+        WecomMock.business_code = 0
+    print('WeCom Markdown/text/news/text-card/image-card config, wire format and business errors PASS', flush=True)
+
+    for link in ['', 'javascript:alert(1)', 'https://user:secret@example.test/report']:
+        status, _ = test.request('POST', '/api/v1/notifications/channels', {
+            'name': 'invalid-card', 'kind': 'webhook',
+            'config': {'format': 'wecom', 'url': f'http://127.0.0.1:{test.mock_port}/wecom',
+                       'wecom': {'message_type': 'template_card', 'details_url': link}},
+        }, ADMIN)
+        assert status == 400, (link, status)
+    print('WeCom required card links and URL validation PASS', flush=True)
 
     # A large report must be shortened by bytes without changing the event payload.
     long_name = '中文统计🙂' * 60
@@ -74,9 +134,10 @@ def check(test):
     run_id = test.api('POST', f'/notifications/channels/{channel}/test', {})['run_id']
     detail = wait_delivery(test, run_id)
     assert detail['status'] == 'succeeded', (detail['last_error_code'], detail['last_error_message'])
-    content = WecomMock.received[-1]['text']['content']
-    assert len(content.encode('utf-8')) <= 2048
-    assert content.endswith('…'), 'fixture must exercise truncation'
+    content = WecomMock.received[-1]['markdown']['content']
+    assert len(content.encode('utf-8')) <= 4096
+    assert '…' in content, 'fixture must exercise truncation'
+    assert '上游消耗' in content and '客户端 Key 消耗' in content
     assert detail['event_payload']['usage']['providers'][0]['name'] == long_name
     print('WeCom UTF-8 byte limit and unmodified stored report PASS', flush=True)
 

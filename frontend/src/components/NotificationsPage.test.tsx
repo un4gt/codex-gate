@@ -269,6 +269,62 @@ describe('notification management page', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it('defaults old WeCom channels to Markdown and preserves card settings after a failed save', async () => {
+    const bodies: unknown[] = [];
+    let savedWecom: Record<string, string> | undefined;
+    const channel = () => ({
+      id: 3, name: 'WeCom report', kind: 'webhook', enabled: true,
+      config: { format: 'wecom', url_masked: 'https://qyapi.weixin.qq.com/…',
+        has_signing_secret: false, headers: [], wecom: savedWecom },
+      created_at_ms: 1, updated_at_ms: 1,
+    });
+    fetchRequest.mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body));
+        bodies.push(body);
+        if (bodies.length === 1) return jsonResponse({ error: 'synthetic save failure' }, 400);
+        savedWecom = body.config.wecom;
+        return jsonResponse(channel());
+      }
+      if (url.pathname.endsWith('/summary')) return jsonResponse({ enabled_channels: 1, enabled_rules: 0, firing_alerts: 0, failed_deliveries_24h: 0 });
+      if (url.pathname.endsWith('/channels')) return jsonResponse({ items: [channel()] });
+      if (url.pathname.endsWith('/rules')) return jsonResponse({ items: [] });
+      if (url.pathname.endsWith('/deliveries')) return jsonResponse({ items: [], offset: 0, limit: 50 });
+      return jsonResponse({});
+    });
+    renderWithTheme(<NotificationsPage
+      settings={{ apiBase: 'http://127.0.0.1:8080', adminToken: 'test-token' }}
+      providers={[]} apiKeys={[]} onMessage={() => undefined}
+    />);
+    await screen.findByText('WeCom report');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('combobox', { name: 'WeCom message style' }).textContent).toContain('Markdown (recommended)');
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'WeCom message style' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'Message card' }));
+    expect((screen.getByLabelText(/Details URL/) as HTMLInputElement).required).toBe(true);
+    fireEvent.change(screen.getByLabelText(/Details URL/), { target: { value: 'https://gate.example.test/notifications' } });
+    fireEvent.change(screen.getByLabelText('Cover image URL (optional)'), { target: { value: 'https://gate.example.test/cover.png' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(false));
+    expect((screen.getByLabelText(/Details URL/) as HTMLInputElement).value).toBe('https://gate.example.test/notifications');
+    expect((screen.getByLabelText('Cover image URL (optional)') as HTMLInputElement).value).toBe('https://gate.example.test/cover.png');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1]).toEqual({
+      name: 'WeCom report', enabled: true, kind: 'webhook', config: {
+        url: '', format: 'wecom', signing_secret: '', headers: [],
+        wecom: { message_type: 'template_card', details_url: 'https://gate.example.test/notifications', image_url: 'https://gate.example.test/cover.png' },
+      },
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('combobox', { name: 'WeCom message style' }).textContent).toContain('Message card');
+    expect((screen.getByLabelText('Cover image URL (optional)') as HTMLInputElement).value).toBe('https://gate.example.test/cover.png');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it('edits a scheduled rule with the flat PATCH contract and restored field values', async () => {
     let patchBody: unknown;
     const rule = {

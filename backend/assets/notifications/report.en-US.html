@@ -127,7 +127,7 @@ h1 { font-size: 32px; font-weight: 700; color: #09090b; margin: 0 0 12px 0; }
       <div
          style="font-family:Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;font-size:16px;line-height:1.6;text-align:left;color:#71717a;"
       ><h1>{{ rule.name }}</h1>
-<p>Window: {{ window.from_ms }} — {{ window.to_ms }} ({{ window.timezone }})</p></div>
+<p>Window: {{ display.window.from }} — {{ display.window.to }} ({{ display.window.timezone }})</p></div>
 
                 </td>
               </tr>
@@ -184,7 +184,7 @@ h1 { font-size: 32px; font-weight: 700; color: #09090b; margin: 0 0 12px 0; }
 
       <div
          style="font-family:Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;font-size:16px;line-height:1.6;text-align:left;color:#71717a;"
-      ><p style="margin-bottom: 0">Requests <strong>{{ usage.totals.requests }}</strong> · Failed <strong>{{ usage.totals.failed }}</strong> · Tokens <strong>{{ usage.totals.total_tokens }}</strong> · Cost <strong>${{ usage.totals.estimated_cost_usd }}</strong></p></div>
+      ><p style="margin-bottom: 0">Requests <strong>{{ display.requests }}</strong> · Failed <strong>{{ display.failed }}</strong> · Tokens <strong>{{ display.tokens }}</strong> · Cost <strong>{{ display.cost }}</strong></p></div>
 
                 </td>
               </tr>
@@ -241,8 +241,8 @@ h1 { font-size: 32px; font-weight: 700; color: #09090b; margin: 0 0 12px 0; }
          style="font-family:Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;font-size:16px;line-height:1.6;text-align:left;color:#71717a;"
       ><h2>Server status</h2>
 <ul>
-<li>CPU: {{ server.cpu_usage_percent }}%</li>
-<li>Memory: {{ server.memory_usage_percent }}%</li>
+<li>CPU: {{ display.cpu }}</li>
+<li>Memory: {{ display.memory }}</li>
 <li>Providers: {{ server.healthy }} healthy / {{ server.warning }} warning / {{ server.error }} error</li>
 <li>Database: {% if server.database_ready %}ready{% else %}unavailable{% endif %}</li>
 </ul>
