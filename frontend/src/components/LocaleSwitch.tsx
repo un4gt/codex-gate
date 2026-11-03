@@ -35,6 +35,7 @@ export function LocaleSwitch() {
           aria-pressed={locale === item}
           sx={{
             ...{
+              minWidth: 0,
               height: "1.75rem",
               paddingInline: "0.5rem",
               fontSize: "0.75rem",

@@ -34,6 +34,8 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Checkbox from "@mui/material/Checkbox";
 import CircularProgress from "@mui/material/CircularProgress";
+import Grid from "@mui/material/Grid";
+import Skeleton from "@mui/material/Skeleton";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
@@ -75,6 +77,7 @@ updateNotificationRule,
 } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { getLocale,t,useI18n } from "@/lib/i18n";
+import { TableSkeleton } from "./console/TableSkeleton";
 import type {
 ApiKeyWorkspace,
 ConnectionSettings,
@@ -1364,15 +1367,69 @@ export function NotificationsPage(props: NotificationsPageProps) {
   if (loading) {
     return (
       <Box
-        sx={{
-          display: "flex",
-          minHeight: "16rem",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-        aria-live="polite"
+        sx={{ display: "flex", flexDirection: "column", gap: 1 }}
+        aria-busy="true"
+        aria-label={t("正在加载通知配置")}
       >
-        <CircularProgress size={28} aria-label={t("正在加载通知配置")} />
+        <Grid container spacing={1.5}>
+          {Array.from({ length: 4 }, (_, index) => (
+            <Grid key={`notification-summary-${index}`} size={{ xs: 12, sm: 6, xl: 3 }}>
+              <Card sx={{ height: 92 }}>
+                <CardContent
+                  sx={{
+                    display: "flex",
+                    height: "100%",
+                    flexDirection: "column",
+                    justifyContent: "center",
+                    gap: 1,
+                  }}
+                >
+                  <Skeleton animation="wave" width={72} />
+                  <Skeleton animation="wave" width={40} height={28} />
+                </CardContent>
+              </Card>
+            </Grid>
+          ))}
+        </Grid>
+        <Grid container spacing={1.5}>
+          {Array.from({ length: 2 }, (_, index) => (
+            <Grid key={`notification-section-${index}`} size={{ xs: 12, lg: 6 }}>
+              <Card sx={{ height: "100%" }}>
+                <CardContent sx={{ display: "grid", gap: 1.5 }}>
+                  <Skeleton animation="wave" width={120} />
+                  {Array.from({ length: 3 }, (_, row) => (
+                    <Skeleton
+                      key={`notification-section-${index}-row-${row}`}
+                      animation="wave"
+                      variant="rounded"
+                      height={54}
+                    />
+                  ))}
+                </CardContent>
+              </Card>
+            </Grid>
+          ))}
+        </Grid>
+        <Card>
+          <CardContent sx={{ display: "grid", gap: 1.5 }}>
+            <Skeleton animation="wave" width={120} />
+            <TableSkeleton
+              ariaLabel={t("正在加载通知配置")}
+              rows={5}
+              minWidth={900}
+              columns={[
+                { label: t("时间") },
+                { label: t("事件") },
+                { label: t("规则") },
+                { label: t("通道") },
+                { label: t("状态") },
+                { label: t("尝试") },
+                { label: t("错误") },
+                { label: t("操作"), align: "right", skeletonWidth: 42 },
+              ]}
+            />
+          </CardContent>
+        </Card>
       </Box>
     );
   }

@@ -96,6 +96,16 @@ export const theme = createTheme({
     MuiFormLabel: { styleOverrides: { root: { fontSize: 13 } } },
     MuiInputBase: { styleOverrides: { root: { fontSize: 13 } } },
     MuiChip: { defaultProps: { size: "small", variant: "outlined" } },
+    MuiSkeleton: {
+      styleOverrides: {
+        wave: {
+          "&::after": {
+            background:
+              "linear-gradient(90deg, transparent, color-mix(in srgb, var(--mui-palette-text-primary) 10%, transparent), transparent)",
+          },
+        },
+      },
+    },
     MuiTableContainer: {
       styleOverrides: {
         root: { maxWidth: "100%", overflowX: "auto", borderRadius: 8 },

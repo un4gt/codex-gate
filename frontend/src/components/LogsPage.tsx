@@ -31,6 +31,7 @@ import { useEffect,useMemo,useRef,useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { t,useI18n } from "@/lib/i18n";
+import { TableSkeleton } from "@/components/console/TableSkeleton";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -1073,7 +1074,7 @@ export function LogsPage(props: LogsPageProps) {
               </MenuItem>
             </Menu>
           </Box>
-          {loading ? <LinearProgress aria-label={t("加载日志")} /> : null}
+          {loading && rows.length > 0 ? <LinearProgress aria-label={t("加载日志")} /> : null}
           {loadError ? (
             <Alert
               severity="error"
@@ -1098,7 +1099,27 @@ export function LogsPage(props: LogsPageProps) {
                 "color-mix(in oklab, var(--mui-palette-divider) 40%, transparent)",
             }}
           >
-            {rows.length > 0 ? (
+            {loading && rows.length === 0 ? (
+              <TableSkeleton
+                ariaLabel={t("加载日志")}
+                rows={6}
+                minWidth={900}
+                containerSx={{
+                  maxHeight: { xs: "65dvh", md: "min(70dvh, 48rem)" },
+                }}
+                columns={[
+                  { label: "", width: 32, skeletonWidth: 14 },
+                  ...visibleColumnDefinitions.map((column) => ({
+                    label: t(column.label),
+                  })),
+                  {
+                    label: t("详情"),
+                    align: "right",
+                    skeletonWidth: 42,
+                  },
+                ]}
+              />
+            ) : rows.length > 0 ? (
               <TableContainer
                 data-testid="request-log-table-container"
                 sx={[

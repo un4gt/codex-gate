@@ -33,7 +33,6 @@ import AppBar from "@mui/material/AppBar";
 import Chip from "@mui/material/Chip";
 import ListItemButton from "@mui/material/ListItemButton";
 import MenuItem from "@mui/material/MenuItem";
-import Skeleton from "@mui/material/Skeleton";
 import { useColorScheme } from "@mui/material/styles";
 import Toolbar from "@mui/material/Toolbar";
 import {
@@ -58,6 +57,7 @@ useLocation,
 
 import { ApiKeysPage } from "@/components/ApiKeysPage";
 import { LocaleSwitch } from "@/components/LocaleSwitch";
+import { OverviewSkeleton } from "@/components/console/OverviewSkeleton";
 import { LogsPage } from "@/components/LogsPage";
 import { ModelsPage } from "@/components/ModelsPage";
 import { NotificationsPage } from "@/components/NotificationsPage";
@@ -95,6 +95,7 @@ import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
 import Snackbar from "@mui/material/Snackbar";
 import TextField from "@mui/material/TextField";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import useMediaQuery from "@mui/material/useMediaQuery";
 const OverviewPage = lazy(() => import("@/components/OverviewPage"));
@@ -825,6 +826,34 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
       >
         <Box
           sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+            minWidth: 0,
+          }}
+        >
+          <TextField
+            select
+            size="small"
+            label={t("外观")}
+            value={mode ?? "system"}
+            onChange={(event) =>
+              setMode(event.target.value as "system" | "light" | "dark")
+            }
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              "& .MuiInputBase-root": { height: { xs: 44, md: 32 } },
+            }}
+          >
+            <MenuItem value="system">{t("跟随系统")}</MenuItem>
+            <MenuItem value="light">{t("浅色")}</MenuItem>
+            <MenuItem value="dark">{t("深色")}</MenuItem>
+          </TextField>
+          <LocaleSwitch />
+        </Box>
+        <Box
+          sx={{
             borderRadius: "8px",
             borderStyle: "solid",
             borderWidth: "1px",
@@ -853,10 +882,24 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
             >
               {t("SYSTEM STATUS")}
             </Box>
-            <ConnectionIndicator
-              status={props.data.status}
-              linkOk={props.data.linkOk}
-            />
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
+              <Tooltip title={t("刷新控制台数据")}>
+                <IconButton
+                  type="button"
+                  size="small"
+                  aria-label={t("刷新控制台数据")}
+                  disabled={props.data.status === "loading"}
+                  onClick={() => void props.data.onRefresh()}
+                  sx={{ color: "var(--mui-palette-text-secondary)" }}
+                >
+                  <RefreshCw fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <ConnectionIndicator
+                status={props.data.status}
+                linkOk={props.data.linkOk}
+              />
+            </Box>
           </Box>
           <Box
             sx={{
@@ -1067,50 +1110,6 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
                 <Typography component="h1" variant="h1" sx={{ lineHeight: 1.3 }}>
                   {t(currentItem.label)}
                 </Typography>
-              </Box>
-              <Box
-                sx={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  gap: "0.5rem",
-                }}
-              >
-                <TextField
-                  select
-                  label={t("外观")}
-                  value={mode ?? "system"}
-                  onChange={(event) =>
-                    setMode(event.target.value as "system" | "light" | "dark")
-                  }
-                  sx={{ width: 112, "& .MuiInputBase-root": { height: 30 } }}
-                >
-                  <MenuItem value="system">{t("跟随系统")}</MenuItem>
-                  <MenuItem value="light">{t("浅色")}</MenuItem>
-                  <MenuItem value="dark">{t("深色")}</MenuItem>
-                </TextField>
-                <LocaleSwitch />
-                <Button
-                  type="button"
-                  variant="outlined"
-                  onClick={() => void props.data.onRefresh()}
-                  disabled={props.data.status === "loading"}
-                >
-                  <RefreshCw
-                    sx={
-                      props.data.status === "loading"
-                        ? {
-                            animation: "none",
-                            "@media (prefers-reduced-motion: reduce)": {
-                              animation: "none",
-                            },
-                          }
-                        : {}
-                    }
-                    fontSize="small"
-                  />
-                  {t(props.data.status === "loading" ? "同步中" : "SYNC")}
-                </Button>
               </Box>
             </Box>
             {props.children}
@@ -2039,9 +2038,7 @@ function ConsoleRoot() {
         <Route
           path="/overview"
           element={
-            <Suspense
-              fallback={<Skeleton variant="rectangular" height={320} />}
-            >
+            <Suspense fallback={<OverviewSkeleton />}>
               <OverviewPage data={data} />
             </Suspense>
           }

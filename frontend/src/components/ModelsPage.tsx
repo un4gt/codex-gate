@@ -8,12 +8,12 @@ import DialogContentText from "@mui/material/DialogContentText";
 import DialogTitle from "@mui/material/DialogTitle";
 import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
-import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import TablePagination from "@mui/material/TablePagination";
 import { useId,useMemo,useState,type FormEvent } from "react";
 import { Link,Navigate,useLocation } from "react-router";
 import { ModelIdentity } from "./console/ModelIdentity";
+import { TableSkeleton } from "./console/TableSkeleton";
 
 import {
 deleteProviderModel,
@@ -525,11 +525,17 @@ function ModelInventory(props: InventoryProps) {
         </Typography>
       ) : null}
       {props.inventory.loading && props.inventory.data === null ? (
-        <Stack sx={{ gap: 0.75 }} aria-busy aria-label={t("正在读取模型")}>
-          {Array.from({ length: 8 }, (_, index) => (
-            <Skeleton key={index} variant="rounded" height={40} />
-          ))}
-        </Stack>
+        <TableSkeleton
+          ariaLabel={t("正在读取模型")}
+          rows={6}
+          minWidth={760}
+          containerSx={{ maxHeight: "70dvh" }}
+          columns={MODEL_COLUMNS.map((column) => ({
+            label: t(column.label),
+            align: column.id === "actions" ? "right" : undefined,
+            skeletonWidth: column.id === "actions" ? 48 : undefined,
+          }))}
+        />
       ) : null}
       {filtered.length ? (
         <TableContainer

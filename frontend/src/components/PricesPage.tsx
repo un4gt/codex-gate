@@ -11,6 +11,7 @@ import { ModelIdentity } from "./console/ModelIdentity";
 import { deletePrice } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
+import { TableSkeleton } from "./console/TableSkeleton";
 import type {
 ConnectionSettings,
 ModelPrice,
@@ -21,7 +22,6 @@ import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
-import Skeleton from "@mui/material/Skeleton";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
@@ -235,11 +235,20 @@ export function PricesPage(props: PricesPageProps) {
         </Alert>
       ) : null}
       {props.loading && props.items.length === 0 ? (
-        <Stack spacing={0.75} aria-label={t("加载中")} aria-busy="true">
-          {Array.from({ length: 5 }, (_, index) => (
-            <Skeleton key={index} variant="rounded" height={36} />
-          ))}
-        </Stack>
+        <TableSkeleton
+          ariaLabel={t("正在加载价格")}
+          rows={5}
+          minWidth={900}
+          columns={[
+            { label: t("模型") },
+            { label: t("范围"), width: 140 },
+            { label: t("价格 输入 / 输出"), width: 150 },
+            { label: t("缓存 读 / 写"), width: 140 },
+            { label: t("层级"), width: 76 },
+            { label: t("更新时间"), width: 128 },
+            { label: t("操作"), width: 72, align: "right", skeletonWidth: 42 },
+          ]}
+        />
       ) : null}
       {visible.length > 0 ? (
         <TableContainer>

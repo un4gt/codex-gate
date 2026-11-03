@@ -2002,7 +2002,9 @@ describe("admin console smoke test", () => {
           })
         : Promise.resolve(catalogResponse(input)),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Sync" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh console data" }),
+    );
     await waitFor(() => expect(completeRefresh).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Log out" }));
     await act(async () => {

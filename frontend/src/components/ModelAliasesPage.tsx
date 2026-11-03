@@ -4,7 +4,6 @@ import Trash2 from "@mui/icons-material/DeleteOutlined";
 import Search from "@mui/icons-material/SearchOutlined";
 import Pencil from "@mui/icons-material/EditOutlined";
 import Chip from "@mui/material/Chip";
-import Skeleton from "@mui/material/Skeleton";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
@@ -31,6 +30,7 @@ import {
   updateModelAliasTarget,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { TableSkeleton } from "./console/TableSkeleton";
 import type {
   ConnectionSettings,
   ModelAlias,
@@ -166,11 +166,18 @@ export function ModelAliasesPage(props: ModelAliasesPageProps) {
         </Alert>
       ) : null}
       {props.loading && props.aliases.length === 0 ? (
-        <Stack spacing={0.75} aria-label={t("加载中")} aria-busy="true">
-          {Array.from({ length: 4 }, (_, index) => (
-            <Skeleton key={index} variant="rounded" height={36} />
-          ))}
-        </Stack>
+        <TableSkeleton
+          ariaLabel={t("正在加载路由别名")}
+          rows={5}
+          minWidth={640}
+          columns={[
+            { label: t("别名"), width: 220 },
+            { label: t("目标") },
+            { label: t("模式"), width: 92 },
+            { label: t("状态"), width: 80 },
+            { label: t("操作"), width: 64, align: "right", skeletonWidth: 42 },
+          ]}
+        />
       ) : null}
       {filtered.length > 0 ? (
         <TableContainer>

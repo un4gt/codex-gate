@@ -520,13 +520,17 @@ export default function OverviewPage(props: { data: AppDataContext }) {
                 >
                   <Box sx={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column" }}>
                     <Typography color="text.secondary" sx={{ fontSize: 12 }}>
-                      {t(item.label)}
+                      {loading && !overview ? (
+                        <Skeleton animation="wave" width={56} />
+                      ) : (
+                        t(item.label)
+                      )}
                     </Typography>
                     <Typography
                       component="div"
                       sx={{ mt: 0.5, fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.2 }}
                     >
-                      {loading && !overview ? <Skeleton width={72} /> : item.value}
+                      {loading && !overview ? <Skeleton animation="wave" width={72} /> : item.value}
                     </Typography>
                     <Typography
                       variant="caption"
@@ -534,12 +538,12 @@ export default function OverviewPage(props: { data: AppDataContext }) {
                       title={item.title}
                       sx={{ mt: "auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                     >
-                      {loading && !overview ? <Skeleton width="60%" /> : t(item.hint ?? "")}
+                      {loading && !overview ? <Skeleton animation="wave" width="60%" /> : t(item.hint ?? "")}
                     </Typography>
                   </Box>
                   <Box sx={{ width: 96, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {loading && !overview ? (
-                      <Skeleton variant="rounded" width={96} height={44} />
+                      <Skeleton animation="wave" variant="rounded" width={96} height={44} />
                     ) : index === 0 ? (
                       <SparkLineChart
                         data={sparkRequests}
@@ -623,7 +627,7 @@ export default function OverviewPage(props: { data: AppDataContext }) {
               </Stack>
               <Box sx={{ height: 280, mt: 1 }}>
                 {loading ? (
-                  <Skeleton variant="rounded" height={268} sx={{ mt: 1 }} />
+                  <Skeleton animation="wave" variant="rounded" height={268} sx={{ mt: 1 }} />
                 ) : overview?.series && chartData.length > 0 ? (
                   <ChartsContainer
                     skipAnimation
@@ -696,7 +700,7 @@ export default function OverviewPage(props: { data: AppDataContext }) {
               </Typography>
               <Box sx={{ height: 280, mt: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 {loading ? (
-                  <Skeleton variant="circular" width={190} height={190} />
+                  <Skeleton animation="wave" variant="circular" width={190} height={190} />
                 ) : overview && overview.token_usage.total_tokens > 0 ? (
                   <PieChart
                     skipAnimation
