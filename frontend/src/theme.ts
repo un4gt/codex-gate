@@ -94,7 +94,14 @@ export const theme = createTheme({
     MuiFormControl: { defaultProps: { size: "small", variant: "outlined" } },
     MuiSelect: { defaultProps: { size: "small", variant: "outlined" } },
     MuiFormLabel: { styleOverrides: { root: { fontSize: 13 } } },
-    MuiInputBase: { styleOverrides: { root: { fontSize: 13 } } },
+    MuiInputBase: {
+      styleOverrides: {
+        root: {
+          fontSize: 13,
+          "@media (pointer: coarse)": { minHeight: 44 },
+        },
+      },
+    },
     MuiChip: { defaultProps: { size: "small", variant: "outlined" } },
     MuiSkeleton: {
       styleOverrides: {
