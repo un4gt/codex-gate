@@ -3305,7 +3305,11 @@ pub fn parse_model_ids(bytes: &[u8]) -> Result<Vec<String>, CodexOAuthError> {
         .flatten()
         .filter_map(Value::as_array)
         .flat_map(|items| items.iter())
-        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .filter_map(|item| {
+            item.as_str()
+                .or_else(|| item.get("slug").and_then(Value::as_str))
+                .or_else(|| item.get("id").and_then(Value::as_str))
+        })
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_string)
@@ -3823,6 +3827,24 @@ mod tests {
         assert_eq!(
             params.get("codex_streamlined_login").map(String::as_str),
             Some("true")
+        );
+    }
+
+    #[test]
+    fn model_inventory_accepts_codex_slug_and_api_id_shapes() {
+        let ids = parse_model_ids(
+            br#"{"models":[{"slug":"gpt-6-astra"},{"slug":"gpt-5.4"}],"data":[{"id":"fallback-model"}]}"#,
+        )
+        .expect("models");
+        assert_eq!(ids, vec!["fallback-model", "gpt-5.4", "gpt-6-astra"]);
+        let ids = parse_model_ids(br#"{"data":[{"id":"model-a"},{"id":"model-b"}]}"#)
+            .expect("api models");
+        assert_eq!(ids, vec!["model-a", "model-b"]);
+        assert_eq!(
+            parse_model_ids(br#"{"models":[]}"#)
+                .expect_err("empty inventory")
+                .code,
+            "models_empty"
         );
     }
 
