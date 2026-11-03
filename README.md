@@ -294,6 +294,7 @@ Prompt cache 的关键规则：
 - 中途 system/developer 消息保留在消息原位，不提升到顶层，避免追加 reminder 时改变前缀。
 - 转换不注入时间戳、随机 ID 或每轮变化的内容；同一 Messages 历史重复转换得到相同的 Chat 消息顺序和工具顺序。
 - OpenAI usage 的 `prompt_tokens` 会拆成 Anthropic 的未缓存输入与 cache read/write，避免重复计量。
+- 日志用量单元格右上角显示缓存率胶囊：`cache_read / (未缓存输入 + cache_read + cache_write)`，便于直接观察缓存命中情况。
 
 ### Provider 请求覆写
 

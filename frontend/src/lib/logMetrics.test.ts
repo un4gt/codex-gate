@@ -1,5 +1,10 @@
 import { describe, expect, it } from "@rstest/core";
-import { formatTtft, outputTokensPerSecond } from "./logMetrics";
+import {
+  cacheHitRate,
+  formatCacheHitRate,
+  formatTtft,
+  outputTokensPerSecond,
+} from "./logMetrics";
 
 const row = { output_tokens: 1000, duration_ms: 20000, usage_observed: true,
   span_kind: "request", http_status: 200, error_type: null };
@@ -16,6 +21,14 @@ describe("log throughput and timing semantics", () => {
       { span_kind: "ws_session" }, { span_kind: "ws_session_close" }]) {
       expect(outputTokensPerSecond({ ...row, ...change })).toBeNull();
     }
+  });
+  it("reports cache read as a share of all prompt input", () => {
+    const usage = { ...row, input_tokens: 100, cache_read_input_tokens: 300, cache_creation_input_tokens: 100 };
+    expect(cacheHitRate(usage)).toBe(60);
+    expect(formatCacheHitRate(usage)).toBe("60.0%");
+    expect(cacheHitRate({ ...usage, cache_read_input_tokens: 0 })).toBe(0);
+    expect(cacheHitRate({ ...usage, usage_observed: false })).toBeNull();
+    expect(cacheHitRate({ ...usage, input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })).toBeNull();
   });
   it("distinguishes complete-output timing from deltas and keeps zero valid", () => {
     expect(formatTtft({ t_first_token_ms: null })).toBe("—");

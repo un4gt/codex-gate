@@ -22,6 +22,33 @@ export function formatOutputRate(row: RequestLogRow): string {
 
 export const OUTPUT_RATE_HELP = "输出 Token（已包含推理 Token）÷ 请求总耗时，包含首个输出前的等待时间。";
 
+export const CACHE_HIT_RATE_HELP =
+  "缓存读取 ÷ 总输入（未缓存输入 + 缓存读 + 缓存写）。";
+
+export function cacheHitRate(
+  row: Pick<
+    RequestLogRow,
+    | "usage_observed"
+    | "input_tokens"
+    | "cache_read_input_tokens"
+    | "cache_creation_input_tokens"
+  >,
+): number | null {
+  if (!row.usage_observed) return null;
+  const input =
+    row.input_tokens +
+    row.cache_read_input_tokens +
+    row.cache_creation_input_tokens;
+  if (!Number.isFinite(input) || input <= 0) return null;
+  const rate = (row.cache_read_input_tokens / input) * 100;
+  return Number.isFinite(rate) ? Math.min(100, Math.max(0, rate)) : null;
+}
+
+export function formatCacheHitRate(row: Parameters<typeof cacheHitRate>[0]): string {
+  const rate = cacheHitRate(row);
+  return rate == null ? "—" : `${rate.toFixed(1)}%`;
+}
+
 export function formatTtft(row: Pick<RequestLogRow, "t_first_token_ms" | "ttft_source">): string {
   const ms = row.t_first_token_ms;
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";

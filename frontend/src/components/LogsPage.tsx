@@ -1,4 +1,12 @@
-import { formatOutputRate, formatTtft, ttftHelp, OUTPUT_RATE_HELP } from "@/lib/logMetrics";
+import {
+  CACHE_HIT_RATE_HELP,
+  cacheHitRate,
+  formatCacheHitRate,
+  formatOutputRate,
+  formatTtft,
+  ttftHelp,
+  OUTPUT_RATE_HELP,
+} from "@/lib/logMetrics";
 import ChevronRight from "@mui/icons-material/ChevronRightOutlined";
 import CloseOutlined from "@mui/icons-material/CloseOutlined";
 import Copy from "@mui/icons-material/ContentCopyOutlined";
@@ -5391,6 +5399,7 @@ function LogColumnValue(props: {
 function UsageBreakdown({ row }: { row: RequestLogRow }) {
   const { t } = useI18n();
   const cache = row.cache_read_input_tokens + row.cache_creation_input_tokens;
+  const rate = cacheHitRate(row);
   const description = [
     [t("输入"), row.input_tokens],
     [t("输出"), row.output_tokens],
@@ -5399,7 +5408,7 @@ function UsageBreakdown({ row }: { row: RequestLogRow }) {
     [t("思考（包含在输出中）"), row.reasoning_output_tokens],
   ]
     .map(([label, value]) => `${label}: ${value}`)
-    .join(" · ");
+    .join(" · ") + (rate == null ? "" : ` · ${t("缓存率")}: ${formatCacheHitRate(row)}（${t(CACHE_HIT_RATE_HELP)}）`);
   const parts = [
     { key: "in", label: t("入"), value: row.input_tokens, color: "var(--mui-palette-primary-main)" },
     { key: "out", label: t("出"), value: row.output_tokens, color: "var(--mui-palette-success-main)" },
@@ -5409,17 +5418,53 @@ function UsageBreakdown({ row }: { row: RequestLogRow }) {
   return (
     <Tooltip title={description}>
       <Box tabIndex={0} aria-label={description} sx={{ fontSize: 12, fontVariantNumeric: "tabular-nums", minWidth: 140 }}>
-        <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-          <Box component="span" sx={{ fontWeight: 600 }}>
-            {formatCompactInteger(totalTokens(row))}
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 1,
+            minWidth: 0,
+          }}
+        >
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 1,
+              flexWrap: "wrap",
+              minWidth: 0,
+            }}
+          >
+            <Box component="span" sx={{ fontWeight: 600 }}>
+              {formatCompactInteger(totalTokens(row))}
+            </Box>
+            <Box component="span" sx={{ display: "inline-flex", gap: 1, fontSize: 11, color: "text.secondary" }}>
+              {parts.map((part) => (
+                <Box component="span" key={part.key}>
+                  {part.label} {formatCompactInteger(part.value)}
+                </Box>
+              ))}
+            </Box>
           </Box>
-          <Box component="span" sx={{ display: "inline-flex", gap: 1, fontSize: 11, color: "text.secondary" }}>
-            {parts.map((part) => (
-              <Box component="span" key={part.key}>
-                {part.label} {formatCompactInteger(part.value)}
-              </Box>
-            ))}
-          </Box>
+          {rate == null ? null : (
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${t("缓存")} ${formatCacheHitRate(row)}`}
+              sx={{
+                height: 20,
+                flexShrink: 0,
+                borderRadius: 999,
+                fontSize: 10.5,
+                fontVariantNumeric: "tabular-nums",
+                bgcolor: "action.hover",
+                borderColor: "divider",
+                color: "text.secondary",
+                "& .MuiChip-label": { px: 0.75 },
+              }}
+            />
+          )}
         </Box>
         <Box sx={{ mt: "4px", display: "flex", height: 3, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}>
           {total > 0
