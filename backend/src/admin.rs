@@ -18,8 +18,8 @@ use crate::pricing::PriceCard;
 use crate::request_overrides::{RequestOverrideContext, RequestOverrideTarget, RequestOverrides};
 use crate::state::SharedState;
 use crate::types::{
-    ApiKeyAuth, ModelAlias, ModelAliasTarget, UpstreamEndpoint, UpstreamKeyMeta, UpstreamProvider,
-    Usage,
+    ApiKeyAuth, ModelAlias, ModelAliasTarget, StatsUsageBreakdownRow, UpstreamEndpoint,
+    UpstreamKeyMeta, UpstreamProvider, Usage,
 };
 use crate::upstream_url;
 use crate::util;
@@ -4025,38 +4025,40 @@ async fn stats_overview(req: Request<Incoming>, state: SharedState) -> HttpRespo
     };
     let (agg, points) = stats_series_points(from_ms, to_ms, interval_ms, buckets);
     let breakdown_timeout = std::time::Duration::from_secs(2);
-    let (by_model, by_provider) = tokio::join!(
-        tokio_time::timeout(
-            breakdown_timeout,
-            state.db.aggregate_stats_usage_by_model(from_ms, to_ms)
-        ),
-        tokio_time::timeout(
-            breakdown_timeout,
-            state.db.aggregate_stats_usage_by_provider(from_ms, to_ms)
-        )
-    );
-    let by_model = match by_model {
+    let usage_breakdown = match tokio_time::timeout(
+        breakdown_timeout,
+        state.db.aggregate_stats_usage_breakdown(from_ms, to_ms),
+    )
+    .await
+    {
         Ok(Ok(rows)) => rows,
         Ok(Err(error)) => {
-            log::warn!("Failed to aggregate model usage breakdown: {error}");
+            log::warn!("Failed to aggregate usage breakdown: {error}");
             Vec::new()
         }
         Err(_) => {
-            log::warn!("Model usage breakdown aggregation timed out");
+            log::warn!("Usage breakdown aggregation timed out");
             Vec::new()
         }
     };
-    let by_provider = match by_provider {
-        Ok(Ok(rows)) => rows,
-        Ok(Err(error)) => {
-            log::warn!("Failed to aggregate provider usage breakdown: {error}");
-            Vec::new()
-        }
-        Err(_) => {
-            log::warn!("Provider usage breakdown aggregation timed out");
-            Vec::new()
-        }
-    };
+    let by_model = usage_breakdown
+        .iter()
+        .map(|row| StatsUsageBreakdownRow {
+            model: row.model.clone(),
+            provider_id: None,
+            provider_name: None,
+            ..row.clone()
+        })
+        .collect::<Vec<_>>();
+    let by_provider = usage_breakdown
+        .iter()
+        .map(|row| StatsUsageBreakdownRow {
+            model: None,
+            provider_id: row.provider_id,
+            provider_name: row.provider_name.clone(),
+            ..row.clone()
+        })
+        .collect::<Vec<_>>();
     let mut price_version_ids = pricing_groups
         .iter()
         .filter_map(|group| group.price_version_id)

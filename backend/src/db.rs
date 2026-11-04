@@ -1631,32 +1631,17 @@ WHERE id = $7
         }
     }
 
-    pub async fn aggregate_stats_usage_by_model(
+    pub async fn aggregate_stats_usage_breakdown(
         &self,
         time_from_ms: i64,
         time_to_ms: i64,
     ) -> Result<Vec<StatsUsageBreakdownRow>, DbError> {
         match self {
             Database::Sqlite(pool) => {
-                aggregate_stats_usage_by_model_sqlite(pool, time_from_ms, time_to_ms).await
+                aggregate_stats_usage_breakdown_sqlite(pool, time_from_ms, time_to_ms).await
             }
             Database::Postgres(pool) => {
-                aggregate_stats_usage_by_model_postgres(pool, time_from_ms, time_to_ms).await
-            }
-        }
-    }
-
-    pub async fn aggregate_stats_usage_by_provider(
-        &self,
-        time_from_ms: i64,
-        time_to_ms: i64,
-    ) -> Result<Vec<StatsUsageBreakdownRow>, DbError> {
-        match self {
-            Database::Sqlite(pool) => {
-                aggregate_stats_usage_by_provider_sqlite(pool, time_from_ms, time_to_ms).await
-            }
-            Database::Postgres(pool) => {
-                aggregate_stats_usage_by_provider_postgres(pool, time_from_ms, time_to_ms).await
+                aggregate_stats_usage_breakdown_postgres(pool, time_from_ms, time_to_ms).await
             }
         }
     }
@@ -3906,147 +3891,44 @@ ORDER BY price_version_id, price_tier_index
         .collect())
 }
 
-async fn aggregate_stats_usage_by_model_sqlite(
+async fn aggregate_stats_usage_breakdown_sqlite(
     pool: &SqlitePool,
     time_from_ms: i64,
     time_to_ms: i64,
 ) -> Result<Vec<StatsUsageBreakdownRow>, DbError> {
+    // Read pricing from events rather than hourly aggregates: reconciliation
+    // repairs event/log price IDs, while hourly rows retain their original
+    // (possibly unpriced) price snapshot.
     let rows = sqlx::query(
         r#"
 SELECT
-  model,
-  NULLIF(price_version_id, 0) AS price_version_id,
-  CASE WHEN price_tier_index < 0 THEN NULL ELSE price_tier_index END AS price_tier_index,
-  COALESCE(SUM(usage_observed_requests), 0) AS request_count,
-  COALESCE(SUM(input_tokens), 0) AS input_tokens,
-  COALESCE(SUM(output_tokens), 0) AS output_tokens,
-  COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
-  COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens
-FROM stats_hourly
-WHERE bucket_ms >= ? AND bucket_ms <= ? AND usage_observed_requests > 0
-GROUP BY
-  model,
-  price_version_id,
-  price_tier_index,
-  CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END,
-  CASE WHEN output_tokens > 0 THEN 1 ELSE 0 END,
-  CASE WHEN cache_read_input_tokens > 0 THEN 1 ELSE 0 END,
-  CASE WHEN cache_creation_input_tokens > 0 THEN 1 ELSE 0 END
-ORDER BY (
-  COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) +
-  COALESCE(SUM(cache_read_input_tokens), 0) + COALESCE(SUM(cache_creation_input_tokens), 0)
-) DESC, model ASC
-"#,
-    )
-    .bind(time_from_ms)
-    .bind(time_to_ms)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| StatsUsageBreakdownRow {
-            model: Some(row.get::<String, _>("model")),
-            provider_id: None,
-            provider_name: None,
-            price_version_id: row.get::<Option<i64>, _>("price_version_id"),
-            price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
-            request_count: row.get::<i64, _>("request_count"),
-            input_tokens: row.get::<i64, _>("input_tokens"),
-            output_tokens: row.get::<i64, _>("output_tokens"),
-            cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
-            cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
-        })
-        .collect())
-}
-
-async fn aggregate_stats_usage_by_model_postgres(
-    pool: &PgPool,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<Vec<StatsUsageBreakdownRow>, DbError> {
-    let rows = sqlx::query(
-        r#"
-SELECT
-  model,
-  NULLIF(price_version_id, 0) AS price_version_id,
-  CASE WHEN price_tier_index < 0 THEN NULL ELSE price_tier_index END AS price_tier_index,
-  COALESCE(SUM(usage_observed_requests), 0)::BIGINT AS request_count,
-  COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
-  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
-  COALESCE(SUM(cache_read_input_tokens), 0)::BIGINT AS cache_read_input_tokens,
-  COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens
-FROM stats_hourly
-WHERE bucket_ms >= $1 AND bucket_ms <= $2 AND usage_observed_requests > 0
-GROUP BY
-  model,
-  price_version_id,
-  price_tier_index,
-  input_tokens > 0,
-  output_tokens > 0,
-  cache_read_input_tokens > 0,
-  cache_creation_input_tokens > 0
-ORDER BY (
-  COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) +
-  COALESCE(SUM(cache_read_input_tokens), 0) + COALESCE(SUM(cache_creation_input_tokens), 0)
-) DESC, model ASC
-"#,
-    )
-    .bind(time_from_ms)
-    .bind(time_to_ms)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| StatsUsageBreakdownRow {
-            model: Some(row.get::<String, _>("model")),
-            provider_id: None,
-            provider_name: None,
-            price_version_id: row.get::<Option<i64>, _>("price_version_id"),
-            price_tier_index: row.get::<Option<i32>, _>("price_tier_index"),
-            request_count: row.get::<i64, _>("request_count"),
-            input_tokens: row.get::<i64, _>("input_tokens"),
-            output_tokens: row.get::<i64, _>("output_tokens"),
-            cache_read_input_tokens: row.get::<i64, _>("cache_read_input_tokens"),
-            cache_creation_input_tokens: row.get::<i64, _>("cache_creation_input_tokens"),
-        })
-        .collect())
-}
-
-async fn aggregate_stats_usage_by_provider_sqlite(
-    pool: &SqlitePool,
-    time_from_ms: i64,
-    time_to_ms: i64,
-) -> Result<Vec<StatsUsageBreakdownRow>, DbError> {
-    let rows = sqlx::query(
-        r#"
-SELECT
-  hourly.provider_id,
+  event.model,
+  event.provider_id,
   COALESCE(provider.name, '') AS provider_name,
-  NULLIF(hourly.price_version_id, 0) AS price_version_id,
-  CASE WHEN hourly.price_tier_index < 0 THEN NULL ELSE hourly.price_tier_index END AS price_tier_index,
-  COALESCE(SUM(hourly.usage_observed_requests), 0) AS request_count,
-  COALESCE(SUM(hourly.input_tokens), 0) AS input_tokens,
-  COALESCE(SUM(hourly.output_tokens), 0) AS output_tokens,
-  COALESCE(SUM(hourly.cache_read_input_tokens), 0) AS cache_read_input_tokens,
-  COALESCE(SUM(hourly.cache_creation_input_tokens), 0) AS cache_creation_input_tokens
-FROM stats_hourly hourly
-LEFT JOIN upstream_providers provider ON provider.id = hourly.provider_id
-WHERE hourly.bucket_ms >= ? AND hourly.bucket_ms <= ? AND hourly.usage_observed_requests > 0
+  NULLIF(event.price_version_id, 0) AS price_version_id,
+  CASE WHEN event.price_tier_index < 0 THEN NULL ELSE event.price_tier_index END AS price_tier_index,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(event.input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(event.output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(event.cache_read_input_tokens), 0) AS cache_read_input_tokens,
+  COALESCE(SUM(event.cache_creation_input_tokens), 0) AS cache_creation_input_tokens
+FROM stats_events event
+LEFT JOIN upstream_providers provider ON provider.id = event.provider_id
+WHERE event.time_ms >= ? AND event.time_ms <= ? AND event.usage_observed != 0
 GROUP BY
-  hourly.provider_id,
+  event.model,
+  event.provider_id,
   provider.name,
-  hourly.price_version_id,
-  hourly.price_tier_index,
-  CASE WHEN hourly.input_tokens > 0 THEN 1 ELSE 0 END,
-  CASE WHEN hourly.output_tokens > 0 THEN 1 ELSE 0 END,
-  CASE WHEN hourly.cache_read_input_tokens > 0 THEN 1 ELSE 0 END,
-  CASE WHEN hourly.cache_creation_input_tokens > 0 THEN 1 ELSE 0 END
+  event.price_version_id,
+  event.price_tier_index,
+  CASE WHEN event.input_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN event.output_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN event.cache_read_input_tokens > 0 THEN 1 ELSE 0 END,
+  CASE WHEN event.cache_creation_input_tokens > 0 THEN 1 ELSE 0 END
 ORDER BY (
-  COALESCE(SUM(hourly.input_tokens), 0) + COALESCE(SUM(hourly.output_tokens), 0) +
-  COALESCE(SUM(hourly.cache_read_input_tokens), 0) + COALESCE(SUM(hourly.cache_creation_input_tokens), 0)
-) DESC, hourly.provider_id ASC
+  COALESCE(SUM(event.input_tokens), 0) + COALESCE(SUM(event.output_tokens), 0) +
+  COALESCE(SUM(event.cache_read_input_tokens), 0) + COALESCE(SUM(event.cache_creation_input_tokens), 0)
+) DESC, event.model ASC, event.provider_id ASC
 "#,
     )
     .bind(time_from_ms)
@@ -4057,8 +3939,8 @@ ORDER BY (
     Ok(rows
         .into_iter()
         .map(|row| StatsUsageBreakdownRow {
-            model: None,
-            provider_id: Some(row.get::<i64, _>("provider_id")),
+            model: row.get::<Option<String>, _>("model"),
+            provider_id: row.get::<Option<i64>, _>("provider_id"),
             provider_name: Some(row.get::<String, _>("provider_name"))
                 .filter(|value| !value.is_empty()),
             price_version_id: row.get::<Option<i64>, _>("price_version_id"),
@@ -4072,7 +3954,7 @@ ORDER BY (
         .collect())
 }
 
-async fn aggregate_stats_usage_by_provider_postgres(
+async fn aggregate_stats_usage_breakdown_postgres(
     pool: &PgPool,
     time_from_ms: i64,
     time_to_ms: i64,
@@ -4080,31 +3962,33 @@ async fn aggregate_stats_usage_by_provider_postgres(
     let rows = sqlx::query(
         r#"
 SELECT
-  hourly.provider_id,
+  event.model,
+  event.provider_id,
   COALESCE(provider.name, '') AS provider_name,
-  NULLIF(hourly.price_version_id, 0) AS price_version_id,
-  CASE WHEN hourly.price_tier_index < 0 THEN NULL ELSE hourly.price_tier_index END AS price_tier_index,
-  COALESCE(SUM(hourly.usage_observed_requests), 0)::BIGINT AS request_count,
-  COALESCE(SUM(hourly.input_tokens), 0)::BIGINT AS input_tokens,
-  COALESCE(SUM(hourly.output_tokens), 0)::BIGINT AS output_tokens,
-  COALESCE(SUM(hourly.cache_read_input_tokens), 0)::BIGINT AS cache_read_input_tokens,
-  COALESCE(SUM(hourly.cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens
-FROM stats_hourly hourly
-LEFT JOIN upstream_providers provider ON provider.id = hourly.provider_id
-WHERE hourly.bucket_ms >= $1 AND hourly.bucket_ms <= $2 AND hourly.usage_observed_requests > 0
+  NULLIF(event.price_version_id, 0) AS price_version_id,
+  CASE WHEN event.price_tier_index < 0 THEN NULL ELSE event.price_tier_index END AS price_tier_index,
+  COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(event.input_tokens), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(event.output_tokens), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(event.cache_read_input_tokens), 0)::BIGINT AS cache_read_input_tokens,
+  COALESCE(SUM(event.cache_creation_input_tokens), 0)::BIGINT AS cache_creation_input_tokens
+FROM stats_events event
+LEFT JOIN upstream_providers provider ON provider.id = event.provider_id
+WHERE event.time_ms >= $1 AND event.time_ms <= $2 AND event.usage_observed
 GROUP BY
-  hourly.provider_id,
+  event.model,
+  event.provider_id,
   provider.name,
-  hourly.price_version_id,
-  hourly.price_tier_index,
-  hourly.input_tokens > 0,
-  hourly.output_tokens > 0,
-  hourly.cache_read_input_tokens > 0,
-  hourly.cache_creation_input_tokens > 0
+  event.price_version_id,
+  event.price_tier_index,
+  event.input_tokens > 0,
+  event.output_tokens > 0,
+  event.cache_read_input_tokens > 0,
+  event.cache_creation_input_tokens > 0
 ORDER BY (
-  COALESCE(SUM(hourly.input_tokens), 0) + COALESCE(SUM(hourly.output_tokens), 0) +
-  COALESCE(SUM(hourly.cache_read_input_tokens), 0) + COALESCE(SUM(hourly.cache_creation_input_tokens), 0)
-) DESC, hourly.provider_id ASC
+  COALESCE(SUM(event.input_tokens), 0) + COALESCE(SUM(event.output_tokens), 0) +
+  COALESCE(SUM(event.cache_read_input_tokens), 0) + COALESCE(SUM(event.cache_creation_input_tokens), 0)
+) DESC, event.model ASC, event.provider_id ASC
 "#,
     )
     .bind(time_from_ms)
@@ -4115,8 +3999,8 @@ ORDER BY (
     Ok(rows
         .into_iter()
         .map(|row| StatsUsageBreakdownRow {
-            model: None,
-            provider_id: Some(row.get::<i64, _>("provider_id")),
+            model: row.get::<Option<String>, _>("model"),
+            provider_id: row.get::<Option<i64>, _>("provider_id"),
             provider_name: Some(row.get::<String, _>("provider_name"))
                 .filter(|value| !value.is_empty()),
             price_version_id: row.get::<Option<i64>, _>("price_version_id"),
@@ -8266,7 +8150,53 @@ CREATE TABLE stats_events (
     }
 
     #[tokio::test]
-    async fn aggregate_stats_usage_breakdown_should_group_models_and_providers() {
+    async fn aggregate_stats_usage_breakdown_should_group_events_by_model_and_provider() {
+        let db = sqlite_memory_db().await;
+        let mut events = vec![
+            stats_event("a1", 1_000, Some(200)),
+            stats_event("a2", 1_500, Some(200)),
+            stats_event("b1", 2_000, Some(200)),
+            stats_event("unobserved", 1_600, Some(200)),
+            stats_event("before", 999, Some(200)),
+            stats_event("after", 2_001, Some(200)),
+        ];
+        events[2].provider_id = Some(3);
+        events[2].model = Some("model-b".to_string());
+        events[2].price_version_id = None;
+        events[2].price_tier_index = None;
+        events[3].usage_observed = false;
+        db.insert_stats_events(&events)
+            .await
+            .expect("insert stats events");
+
+        let rows = db
+            .aggregate_stats_usage_breakdown(1_000, 2_000)
+            .await
+            .expect("usage breakdown");
+        assert_eq!(rows.len(), 2);
+        let model_a = rows
+            .iter()
+            .find(|row| row.model.as_deref() == Some("model-a"))
+            .expect("model-a");
+        assert_eq!(model_a.provider_id, Some(2));
+        assert_eq!(model_a.request_count, 2);
+        assert_eq!(model_a.input_tokens, 20);
+        assert_eq!(model_a.price_version_id, Some(7));
+        let serialized = serde_json::to_value(model_a).expect("serialize breakdown row");
+        assert_eq!(serialized["tier_index"], 1);
+        assert!(serialized.get("price_tier_index").is_none());
+        let model_b = rows
+            .iter()
+            .find(|row| row.model.as_deref() == Some("model-b"))
+            .expect("model-b");
+        assert_eq!(model_b.provider_id, Some(3));
+        assert_eq!(model_b.request_count, 1);
+        assert_eq!(model_b.price_version_id, None);
+        assert_eq!(model_b.price_tier_index, None);
+    }
+
+    #[tokio::test]
+    async fn aggregate_stats_provider_usage_totals_should_sum_all_hourly_buckets() {
         let db = sqlite_memory_db().await;
         db.upsert_stats_hourly(&[
             stats_hourly_row(2, "model-a", 1_000, 7, 1),
@@ -8278,51 +8208,6 @@ CREATE TABLE stats_events (
         ])
         .await
         .expect("insert hourly stats");
-
-        let by_model = db
-            .aggregate_stats_usage_by_model(1_000, 2_000)
-            .await
-            .expect("model breakdown");
-        assert_eq!(by_model.len(), 2);
-        let model_a = by_model
-            .iter()
-            .find(|row| row.model.as_deref() == Some("model-a"))
-            .expect("model-a");
-        assert_eq!(model_a.request_count, 2);
-        assert_eq!(model_a.input_tokens, 20);
-        assert_eq!(model_a.price_version_id, Some(7));
-        let serialized = serde_json::to_value(model_a).expect("serialize breakdown row");
-        assert_eq!(serialized["tier_index"], 1);
-        assert!(serialized.get("price_tier_index").is_none());
-        let model_b = by_model
-            .iter()
-            .find(|row| row.model.as_deref() == Some("model-b"))
-            .expect("model-b");
-        assert_eq!(model_b.request_count, 1);
-        assert_eq!(model_b.price_version_id, None);
-        assert_eq!(model_b.price_tier_index, None);
-
-        let by_provider = db
-            .aggregate_stats_usage_by_provider(1_000, 2_000)
-            .await
-            .expect("provider breakdown");
-        assert_eq!(by_provider.len(), 2);
-        assert_eq!(
-            by_provider
-                .iter()
-                .find(|row| row.provider_id == Some(2))
-                .expect("provider 2")
-                .request_count,
-            2
-        );
-        assert_eq!(
-            by_provider
-                .iter()
-                .find(|row| row.provider_id == Some(3))
-                .expect("provider 3")
-                .request_count,
-            1
-        );
 
         let totals = db
             .aggregate_stats_provider_usage_totals()
