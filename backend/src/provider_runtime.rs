@@ -82,6 +82,9 @@ struct ProviderAttemptToken {
     probe_id: Option<u64>,
 }
 
+/// Concurrency burst coalescing window for transport-level failures.
+const DUPLICATE_TRANSPORT_FAILURE_WINDOW_MS: i64 = 5_000;
+
 pub struct ProviderRuntimeBook {
     errors: RwLock<HashMap<i64, std::collections::VecDeque<serde_json::Value>>>,
     ewma_alpha: f64,
@@ -261,6 +264,15 @@ impl ProviderRuntimeBook {
         }
 
         let previous_state = circuit_state(provider, state, now_ms);
+        // A single upstream connection reset fails every stream multiplexed on
+        // it at once. Count that burst as one provider failure so a transient
+        // network event cannot open the breaker on its own.
+        let duplicate_transport_failure = matches!(
+            error_type,
+            "upstream_body_error" | "upstream_timeout" | "upstream_websocket_read_error"
+        ) && state.last_failure_at_ms.is_some_and(|last| {
+            now_ms.saturating_sub(last) < DUPLICATE_TRANSPORT_FAILURE_WINDOW_MS
+        });
         state.last_status = status;
         state.last_error_type = Some(error_type.to_string());
         state.last_error_message = Some(error_message.to_string());
@@ -268,9 +280,14 @@ impl ProviderRuntimeBook {
         release_probe_owner(state, token);
 
         if !provider.circuit_breaker_enabled {
-            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+            if !duplicate_transport_failure {
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+            }
             state.open_until_ms = None;
             state.half_open_successes = 0;
+            return BreakerTransition::Unchanged;
+        }
+        if duplicate_transport_failure {
             return BreakerTransition::Unchanged;
         }
         state.consecutive_failures = state.consecutive_failures.saturating_add(1);
@@ -655,6 +672,24 @@ impl QuotaBook {
         state.updated_at_ms = Some(now_ms);
     }
 
+    /// Shorten an existing cooldown so a quota deadline cannot outlive the
+    /// probe window. Unlike `set_cooldown_until`, this may lower the deadline.
+    pub fn clamp_cooldown(&self, key_id: i64, until_ms: i64) {
+        let mut guard = self.by_key.write();
+        let Some(state) = guard.get_mut(&key_id) else {
+            return;
+        };
+        if state
+            .cooldown_until_ms
+            .is_some_and(|current| current > until_ms)
+        {
+            state.cooldown_until_ms = Some(until_ms);
+        }
+        if state.reset_at_ms.is_some_and(|current| current > until_ms) {
+            state.reset_at_ms = Some(until_ms);
+        }
+    }
+
     pub fn clear_cooldown(&self, key_id: i64, now_ms: i64) {
         let mut guard = self.by_key.write();
         let state = guard.entry(key_id).or_default();
@@ -829,6 +864,26 @@ mod tests {
             book.snapshot(&provider, 33_001).state,
             CircuitState::HalfOpen
         );
+    }
+
+    #[test]
+    fn concurrent_transport_failures_should_count_as_one_provider_failure() {
+        let book = Arc::new(ProviderRuntimeBook::new());
+        let provider = provider();
+        // One upstream connection reset fails every multiplexed stream at once.
+        for _ in 0..4 {
+            book.try_begin_attempt(&provider, 1_000)
+                .expect("closed attempt")
+                .failure(Some(200), "upstream_body_error", "connection reset", 1_000);
+        }
+        let view = book.snapshot(&provider, 1_001);
+        assert_eq!(view.consecutive_failures, 1);
+        assert_eq!(view.state, CircuitState::Closed);
+        // A later, genuinely separate failure still counts.
+        book.try_begin_attempt(&provider, 10_000)
+            .expect("closed attempt")
+            .failure(Some(200), "upstream_body_error", "connection reset", 10_000);
+        assert_eq!(book.snapshot(&provider, 10_001).consecutive_failures, 2);
     }
 
     #[test]
