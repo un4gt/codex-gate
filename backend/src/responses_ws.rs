@@ -1537,6 +1537,7 @@ async fn connect_upstream_ws(
             {
                 state.upstream_key_health.defer_until(key_id, until);
             }
+            proxy::clamp_codex_quota_block(state, &resolved.provider.provider_type, key_id, now);
         }
         map_ws_connect_error(error)
     })
@@ -2385,6 +2386,12 @@ where
             .upstream_key_health
             .defer_until(resolved.key.id, until);
     }
+    proxy::clamp_codex_quota_block(
+        &ctx.state,
+        &resolved.provider.provider_type,
+        resolved.key.id,
+        util::now_ms(),
+    );
     let (parts, mut body) = upstream_resp.into_parts();
     let is_sse = parts
         .headers
@@ -2553,9 +2560,16 @@ async fn observe_codex_account_error(
         StatusCode::PAYMENT_REQUIRED | StatusCode::TOO_MANY_REQUESTS
     ) && let Some(reset_at_ms) = crate::codex_oauth::quota_reset_hint_from_error(body, now_ms)
     {
+        // Window resets can be days away; keep the block inside the probe window.
+        let until = crate::codex_oauth::cap_quota_block(
+            now_ms,
+            reset_at_ms,
+            state.config.codex_quota_block_cap_ms,
+        );
         state
             .quota
-            .set_cooldown_until(resolved.key.id, reset_at_ms, now_ms);
+            .set_cooldown_until(resolved.key.id, until, now_ms);
+        state.quota.clamp_cooldown(resolved.key.id, until);
     }
 }
 

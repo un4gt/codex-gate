@@ -154,10 +154,12 @@ impl UpstreamSnapshot {
                     key.enabled
                         && self.key_allows_model(key.id, upstream_model)
                         && (provider.provider_type != crate::codex_oauth::PROVIDER_TYPE
-                            || self
-                                .codex_oauth_by_key
-                                .get(&key.id)
-                                .is_some_and(|account| account.is_routable(crate::util::now_ms())))
+                            || self.codex_oauth_by_key.get(&key.id).is_some_and(|account| {
+                                account.is_routable(
+                                    crate::util::now_ms(),
+                                    crate::codex_oauth::DEFAULT_QUOTA_BLOCK_CAP_MS,
+                                )
+                            }))
                 }) {
                     continue;
                 }

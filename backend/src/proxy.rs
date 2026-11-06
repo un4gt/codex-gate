@@ -302,7 +302,12 @@ fn codex_catalog_candidates(
                                             || snap
                                                 .codex_oauth_by_key
                                                 .get(&key.id)
-                                                .is_some_and(|account| account.is_routable(now_ms)))
+                                                .is_some_and(|account| {
+                                                    account.is_routable(
+                                                        now_ms,
+                                                        crate::codex_oauth::DEFAULT_QUOTA_BLOCK_CAP_MS,
+                                                    )
+                                                }))
                                 })
                             })
                 })
@@ -1365,6 +1370,12 @@ async fn proxy_openai(
                 .upstream_key_health
                 .defer_until(resolved.key.id, until);
         }
+        clamp_codex_quota_block(
+            &state,
+            &resolved.provider.provider_type,
+            resolved.key.id,
+            util::now_ms(),
+        );
         if oauth_replayed && status_code == StatusCode::UNAUTHORIZED {
             let _ = state
                 .db
@@ -1988,6 +1999,26 @@ async fn proxy_openai(
         failure.error_message,
         plan_retry_at(&state, &plan),
     )
+}
+
+/// Keep Codex quota deadlines inside the probe window, including the key
+/// health deferral that earlier blocked routing for the full retry-after.
+pub(crate) fn clamp_codex_quota_block(
+    state: &SharedState,
+    provider_type: &str,
+    key_id: i64,
+    now_ms: i64,
+) {
+    if provider_type != crate::codex_oauth::PROVIDER_TYPE {
+        return;
+    }
+    let Some(until) = state.quota.snapshot(key_id, now_ms).cooldown_until_ms else {
+        return;
+    };
+    let capped =
+        crate::codex_oauth::cap_quota_block(now_ms, until, state.config.codex_quota_block_cap_ms);
+    state.quota.clamp_cooldown(key_id, capped);
+    state.upstream_key_health.clamp_open_until(key_id, capped);
 }
 
 fn plan_retry_at(state: &SharedState, plan: &UpstreamPlan) -> Option<i64> {
@@ -2817,6 +2848,7 @@ pub(crate) async fn build_upstream_plan(
     let mut transient_spill_provider_ids = HashSet::new();
     let mut key_ready_providers = 0usize;
     let mut static_ready_providers = 0usize;
+    let mut quota_blocked_keys: Vec<(i64, i64)> = Vec::new();
     for route in enabled_routes {
         let provider = &route.provider;
 
@@ -2931,6 +2963,7 @@ pub(crate) async fn build_upstream_plan(
                 );
                 if availability.reason == Some("quota_unavailable") {
                     state.metrics.record_quota_cooldown_skip();
+                    quota_blocked_keys.push((provider.id, key.id));
                 }
                 if !availability.available {
                     diagnostics.reject(
@@ -3060,6 +3093,12 @@ pub(crate) async fn build_upstream_plan(
                 format!("Model \"{requested_model}\" has no enabled upstream endpoint"),
                 diagnostics,
             ));
+        }
+        if !quota_blocked_keys.is_empty() {
+            log::warn!(
+                "model {requested_model} is blocked by exhausted upstream quota on {} account(s); retry_at_ms={retry_at_ms:?}",
+                quota_blocked_keys.len()
+            );
         }
         let mut error = RouteResolutionError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4861,7 +4900,18 @@ fn finalize_tap(
             && let Some(reset_at_ms) =
                 crate::codex_oauth::quota_reset_hint_from_error(&captured, now_ms)
         {
-            state.quota.set_cooldown_until(key_id, reset_at_ms, now_ms);
+            // A reset hint can point at a window that is days away. Re-probe
+            // instead of blocking routing until that deadline: the operator can
+            // restore quota at any time.
+            let until = crate::codex_oauth::cap_quota_block(
+                now_ms,
+                reset_at_ms,
+                state.config.codex_quota_block_cap_ms,
+            );
+            state.quota.set_cooldown_until(key_id, until, now_ms);
+            // Header-derived cooldowns may already be longer than the probe window.
+            state.quota.clamp_cooldown(key_id, until);
+            state.upstream_key_health.clamp_open_until(key_id, until);
         }
     }
     let error_type = inputs

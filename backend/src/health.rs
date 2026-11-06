@@ -258,6 +258,23 @@ impl RuntimeHealthBook {
         state.last_error_message = None;
     }
 
+    /// Lower a deferred deadline so a long quota window cannot outlive the
+    /// probe window. Raises nothing; `defer_until` owns extensions.
+    pub fn clamp_open_until(&self, id: i64, until_ms: i64) {
+        let mut guard = self.by_id.write();
+        let Some(state) = guard.get_mut(&id) else {
+            return;
+        };
+        if state
+            .open_until_ms
+            .is_some_and(|current| current > until_ms)
+        {
+            state.open_until_ms = Some(until_ms);
+            state.updated_at_ms = Some(crate::util::now_ms());
+            advance_generation(state);
+        }
+    }
+
     pub fn defer_until(&self, id: i64, until_ms: i64) {
         let mut guard = self.by_id.write();
         let state = guard.entry(id).or_default();

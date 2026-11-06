@@ -163,21 +163,40 @@ pub(crate) struct CodexOAuthAccount {
     pub refresh_lease_until_ms: Option<i64>,
 }
 
+/// A quota reset applied on the OpenAI side cannot be observed here, so an
+/// exhausted snapshot may only block routing for this long before the gateway
+/// probes upstream again. One minute keeps recovery fast without hammering the
+/// quota endpoint while an account is genuinely out of quota.
+pub const DEFAULT_QUOTA_BLOCK_CAP_MS: i64 = 60_000;
+
+/// Bound a quota deadline to the probe window. Window resets can be days away,
+/// but blocking for days turns a manual reset into a hard outage.
+pub fn cap_quota_block(now_ms: i64, until_ms: i64, cap_ms: i64) -> i64 {
+    until_ms.min(now_ms.saturating_add(cap_ms.max(1_000)))
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CodexOAuthRoutingAccount {
     pub auth_status: String,
     pub quota: Option<CodexQuotaSnapshot>,
+    pub quota_checked_at_ms: Option<i64>,
 }
 
 impl CodexOAuthRoutingAccount {
-    pub fn is_routable(&self, now_ms: i64) -> bool {
+    pub fn is_routable(&self, now_ms: i64, block_cap_ms: i64) -> bool {
         if self.auth_status != AUTH_STATUS_ACTIVE {
             return false;
         }
         let Some(quota) = self.quota.as_ref() else {
             return true;
         };
-        quota.blocked_until_ms(now_ms).is_none() && !quota.is_exhausted_without_reset()
+        if quota.blocked_until_ms(now_ms).is_none() && !quota.is_exhausted_without_reset() {
+            return true;
+        }
+        // Allow a probe once the snapshot outlives the block cap.
+        !self
+            .quota_checked_at_ms
+            .is_some_and(|checked_at| now_ms.saturating_sub(checked_at) < block_cap_ms.max(1_000))
     }
 }
 
@@ -186,6 +205,7 @@ impl CodexOAuthAccount {
         CodexOAuthRoutingAccount {
             auth_status: self.auth_status.clone(),
             quota: self.quota.clone(),
+            quota_checked_at_ms: self.quota_checked_at_ms,
         }
     }
 }
@@ -2155,7 +2175,10 @@ impl CodexOAuthManager {
                     .await
                     .map_err(CodexOAuthError::database)?;
                 if let Some(until) = quota.blocked_until_ms(now_ms) {
-                    state.quota.set_cooldown_until(key_id, until, now_ms);
+                    let capped =
+                        cap_quota_block(now_ms, until, state.config.codex_quota_block_cap_ms);
+                    state.quota.set_cooldown_until(key_id, capped, now_ms);
+                    state.quota.clamp_cooldown(key_id, capped);
                 } else {
                     state.quota.clear_cooldown(key_id, now_ms);
                 }
@@ -3586,6 +3609,60 @@ fn encode_component(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exhausted_routing_account(checked_at_ms: i64, reset_at_ms: i64) -> CodexOAuthRoutingAccount {
+        CodexOAuthRoutingAccount {
+            auth_status: AUTH_STATUS_ACTIVE.to_string(),
+            quota: Some(CodexQuotaSnapshot {
+                plan_type: Some("prolite".to_string()),
+                allowed: Some(true),
+                primary_window: Some(CodexQuotaWindow {
+                    used_percent: 100.0,
+                    remaining_percent: 0.0,
+                    window_seconds: Some(604_800),
+                    reset_at_ms: Some(reset_at_ms),
+                }),
+                secondary_window: None,
+                code_review_window: None,
+                credits: CodexQuotaCredits::default(),
+            }),
+            quota_checked_at_ms: Some(checked_at_ms),
+        }
+    }
+
+    #[test]
+    fn quota_block_is_capped_instead_of_waiting_for_the_window_reset() {
+        let now = 1_000_000;
+        // Six days away: what the real weekly window looks like.
+        let reset_at = now + 6 * 24 * 60 * 60 * 1_000;
+        assert_eq!(cap_quota_block(now, reset_at, 60_000), now + 60_000);
+        // A deadline inside the cap is preserved.
+        assert_eq!(cap_quota_block(now, now + 5_000, 60_000), now + 5_000);
+    }
+
+    #[test]
+    fn exhausted_snapshot_stops_blocking_once_it_outlives_the_probe_window() {
+        let now = 1_000_000;
+        let reset_at = now + 6 * 24 * 60 * 60 * 1_000;
+        let fresh = exhausted_routing_account(now - 1_000, reset_at);
+        assert!(!fresh.is_routable(now, 60_000));
+        let stale = exhausted_routing_account(now - 61_000, reset_at);
+        assert!(stale.is_routable(now, 60_000));
+        // A manual quota reset is invisible here; only staleness lets it probe.
+        let restored = CodexOAuthRoutingAccount {
+            quota: Some(CodexQuotaSnapshot {
+                primary_window: Some(CodexQuotaWindow {
+                    used_percent: 0.0,
+                    remaining_percent: 100.0,
+                    window_seconds: Some(604_800),
+                    reset_at_ms: Some(reset_at),
+                }),
+                ..fresh.quota.clone().expect("quota snapshot")
+            }),
+            ..fresh
+        };
+        assert!(restored.is_routable(now, 60_000));
+    }
 
     #[test]
     fn fast_tier_normalizes_for_http_and_websocket_and_done_aggregates() {

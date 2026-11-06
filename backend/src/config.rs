@@ -33,6 +33,7 @@ pub struct Config {
     pub stream_preflight_timeout: Duration,
     pub stream_preflight_max_bytes: usize,
     pub rate_limit_fallback_cooldown: Duration,
+    pub codex_quota_block_cap_ms: i64,
     pub request_log_retention_days: u32,
     pub stats_daily_retention_days: u32,
     pub retention_cleanup_interval: Duration,
@@ -145,6 +146,11 @@ impl Config {
                 .unwrap_or(30_000)
                 .max(1_000),
         );
+        // A quota reset applied on the OpenAI side is invisible to the cached
+        // snapshot, so never trust an exhausted snapshot for longer than this.
+        let codex_quota_block_cap_ms = getenv_u64("CODEX_QUOTA_BLOCK_CAP_MS")
+            .unwrap_or(60_000)
+            .max(1_000) as i64;
 
         let request_log_retention_days = getenv_u32("REQUEST_LOG_RETENTION_DAYS").unwrap_or(30);
         let stats_daily_retention_days = getenv_u32("STATS_DAILY_RETENTION_DAYS").unwrap_or(400);
@@ -193,6 +199,7 @@ impl Config {
             stream_preflight_timeout,
             stream_preflight_max_bytes,
             rate_limit_fallback_cooldown,
+            codex_quota_block_cap_ms,
             request_log_retention_days,
             stats_daily_retention_days,
             retention_cleanup_interval,

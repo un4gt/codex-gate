@@ -57,7 +57,7 @@ pub(crate) fn account(
                 },
             );
         }
-        if !account.is_routable(now) {
+        if !account.is_routable(now, state.config.codex_quota_block_cap_ms) {
             return RoutingAvailability::unavailable("quota_unavailable");
         }
     }
@@ -182,10 +182,24 @@ pub(crate) fn provider_retry_at(
                 health.open_until_ms,
                 quota.cooldown_until_ms,
                 quota.blocked_until_ms(),
-                snap.codex_oauth_by_key
-                    .get(&key.id)
-                    .and_then(|account| account.quota.as_ref())
-                    .and_then(|quota| quota.blocked_until_ms(now)),
+                snap.codex_oauth_by_key.get(&key.id).and_then(|account| {
+                    // A stale exhausted snapshot no longer blocks routing, so it
+                    // must not stretch the advertised retry time either.
+                    if account.is_routable(now, state.config.codex_quota_block_cap_ms) {
+                        return None;
+                    }
+                    account
+                        .quota
+                        .as_ref()
+                        .and_then(|quota| quota.blocked_until_ms(now))
+                        .map(|until| {
+                            crate::codex_oauth::cap_quota_block(
+                                now,
+                                until,
+                                state.config.codex_quota_block_cap_ms,
+                            )
+                        })
+                }),
                 Some(endpoint_at),
             ]
             .into_iter()

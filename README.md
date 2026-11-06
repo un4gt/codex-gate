@@ -409,6 +409,7 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | `UPSTREAM_FIRST_EVENT_TIMEOUT_MS` | `60000` | SSE 首个有效事件到达前允许故障转移的等待上限。 |
 | `UPSTREAM_FIRST_EVENT_MAX_BYTES` | `65536` | SSE 首个有效事件预检缓冲上限。 |
 | `UPSTREAM_RATE_LIMIT_FALLBACK_COOLDOWN_MS` | `30000` | 402/429 未返回 reset 信息时的 key 冷却基准时长。 |
+| `CODEX_QUOTA_BLOCK_CAP_MS` | `60000` | Codex OAuth 额度耗尽后，路由最多被阻塞多久再向上游探测；避免窗口重置时间长达数天时无法自动恢复。 |
 
 模型路由先按访问密钥允许的上游、模型库存、协议能力及启停状态筛选候选，再按模型路由目标的优先级与顺序 / 加权策略选择。未单独配置的模型使用默认路由；上游全局权重和组内优先级覆盖不再参与执行。路由级 Sticky 和跨上游 Failover 默认开启；会话绑定按“访问密钥 + 会话 + 请求模型”隔离，原请求缓存标识保持不变。
 
