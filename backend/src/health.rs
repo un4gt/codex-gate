@@ -60,6 +60,7 @@ struct RuntimeHealthState {
     generation: u64,
     next_probe_id: u64,
     probe_owner: Option<u64>,
+    probe_expires_at_ms: Option<i64>,
     consecutive_failures: u32,
     success_count: u64,
     failure_count: u64,
@@ -79,6 +80,7 @@ impl Default for RuntimeHealthState {
             generation: 1,
             next_probe_id: 0,
             probe_owner: None,
+            probe_expires_at_ms: None,
             consecutive_failures: 0,
             success_count: 0,
             failure_count: 0,
@@ -99,6 +101,10 @@ struct RuntimeHealthAttemptToken {
     generation: u64,
     probe_id: Option<u64>,
 }
+
+/// A half-open probe must not hold the only recovery slot for the whole
+/// duration of a slow (possibly streaming) request.
+const PROBE_LEASE_MS: i64 = 10_000;
 
 pub struct RuntimeHealthBook {
     failure_threshold: u32,
@@ -139,11 +145,16 @@ impl RuntimeHealthBook {
             CircuitState::Closed => None,
             CircuitState::Open => return None,
             CircuitState::HalfOpen => {
-                if state.probe_owner.is_some() {
+                let lease_active = state.probe_owner.is_some()
+                    && state
+                        .probe_expires_at_ms
+                        .is_some_and(|expires_at| expires_at > now_ms);
+                if lease_active {
                     return None;
                 }
                 state.next_probe_id = state.next_probe_id.wrapping_add(1).max(1);
                 state.probe_owner = Some(state.next_probe_id);
+                state.probe_expires_at_ms = Some(now_ms.saturating_add(PROBE_LEASE_MS));
                 state.updated_at_ms = Some(now_ms);
                 Some(state.next_probe_id)
             }
@@ -289,7 +300,12 @@ impl RuntimeHealthBook {
             available: match state_kind {
                 CircuitState::Closed => true,
                 CircuitState::Open => false,
-                CircuitState::HalfOpen => state.probe_owner.is_none(),
+                CircuitState::HalfOpen => {
+                    state.probe_owner.is_none()
+                        || state
+                            .probe_expires_at_ms
+                            .is_none_or(|expires_at| expires_at <= now_ms)
+                }
             },
             consecutive_failures: state.consecutive_failures,
             success_count: state.success_count,
@@ -386,6 +402,7 @@ fn release_probe_owner(state: &mut RuntimeHealthState, token: RuntimeHealthAttem
         .is_some_and(|probe_id| state.probe_owner == Some(probe_id))
     {
         state.probe_owner = None;
+        state.probe_expires_at_ms = None;
         return true;
     }
     false
@@ -394,6 +411,7 @@ fn release_probe_owner(state: &mut RuntimeHealthState, token: RuntimeHealthAttem
 fn advance_generation(state: &mut RuntimeHealthState) {
     state.generation = state.generation.wrapping_add(1).max(1);
     state.probe_owner = None;
+    state.probe_expires_at_ms = None;
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -581,6 +599,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn half_open_probe_lease_expires_so_other_requests_can_recover() {
+        let book = Arc::new(RuntimeHealthBook::new(1, 30_000));
+        book.try_begin_attempt(7, 0)
+            .unwrap()
+            .failure(Some(503), None, None, 0);
+        let probe_at = 30_000;
+        let probe = book
+            .try_begin_attempt(7, probe_at)
+            .expect("half-open probe");
+        assert!(
+            book.try_begin_attempt(7, probe_at + PROBE_LEASE_MS - 1)
+                .is_none()
+        );
+        let fallback = book
+            .try_begin_attempt(7, probe_at + PROBE_LEASE_MS)
+            .expect("lease expired");
+        let view = book.snapshot(7, probe_at + PROBE_LEASE_MS + 1);
+        assert_eq!(view.state, CircuitState::HalfOpen);
+        assert!(!view.available);
+        // The stale probe must not release the newer lease.
+        probe.success(Some(200), None, probe_at + PROBE_LEASE_MS + 2);
+        assert!(!book.snapshot(7, probe_at + PROBE_LEASE_MS + 3).available);
+        drop(fallback);
+        assert!(book.snapshot(7, probe_at + PROBE_LEASE_MS + 4).available);
+    }
 
     #[test]
     fn first_failure_cools_immediately_and_only_one_probe_can_recover() {

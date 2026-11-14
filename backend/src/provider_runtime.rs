@@ -35,6 +35,7 @@ struct ProviderRuntimeState {
     generation: u64,
     next_probe_id: u64,
     probe_owner: Option<u64>,
+    probe_expires_at_ms: Option<i64>,
     consecutive_failures: u32,
     success_count: u64,
     failure_count: u64,
@@ -55,6 +56,7 @@ impl Default for ProviderRuntimeState {
             generation: 1,
             next_probe_id: 0,
             probe_owner: None,
+            probe_expires_at_ms: None,
             consecutive_failures: 0,
             success_count: 0,
             failure_count: 0,
@@ -84,6 +86,9 @@ struct ProviderAttemptToken {
 
 /// Concurrency burst coalescing window for transport-level failures.
 const DUPLICATE_TRANSPORT_FAILURE_WINDOW_MS: i64 = 5_000;
+/// A half-open probe must not hold the only recovery slot for the whole
+/// duration of a slow (possibly streaming) request.
+const PROBE_LEASE_MS: i64 = 10_000;
 
 pub struct ProviderRuntimeBook {
     errors: RwLock<HashMap<i64, std::collections::VecDeque<serde_json::Value>>>,
@@ -179,11 +184,16 @@ impl ProviderRuntimeBook {
             CircuitState::Closed => None,
             CircuitState::Open => return None,
             CircuitState::HalfOpen => {
-                if state.probe_owner.is_some() {
+                let lease_active = state.probe_owner.is_some()
+                    && state
+                        .probe_expires_at_ms
+                        .is_some_and(|expires_at| expires_at > now_ms);
+                if lease_active {
                     return None;
                 }
                 state.next_probe_id = state.next_probe_id.wrapping_add(1).max(1);
                 state.probe_owner = Some(state.next_probe_id);
+                state.probe_expires_at_ms = Some(now_ms.saturating_add(PROBE_LEASE_MS));
                 Some(state.next_probe_id)
             }
         };
@@ -319,6 +329,7 @@ impl ProviderRuntimeBook {
         state.consecutive_failures = 0;
         state.half_open_successes = 0;
         state.probe_owner = None;
+        state.probe_expires_at_ms = None;
         state.open_until_ms = None;
         state.last_status = None;
         state.last_error_type = None;
@@ -455,7 +466,12 @@ fn to_view(
             && match circuit_state {
                 CircuitState::Closed => true,
                 CircuitState::Open => false,
-                CircuitState::HalfOpen => state.probe_owner.is_none(),
+                CircuitState::HalfOpen => {
+                    state.probe_owner.is_none()
+                        || state
+                            .probe_expires_at_ms
+                            .is_none_or(|expires_at| expires_at <= now_ms)
+                }
             },
         in_flight: state.in_flight,
         max_concurrency: provider.max_concurrency,
@@ -488,12 +504,14 @@ fn release_probe_owner(state: &mut ProviderRuntimeState, token: ProviderAttemptT
         .is_some_and(|probe_id| state.probe_owner == Some(probe_id))
     {
         state.probe_owner = None;
+        state.probe_expires_at_ms = None;
     }
 }
 
 fn advance_generation(state: &mut ProviderRuntimeState) {
     state.generation = state.generation.wrapping_add(1).max(1);
     state.probe_owner = None;
+    state.probe_expires_at_ms = None;
 }
 
 fn clear_breaker_state(state: &mut ProviderRuntimeState) {
@@ -501,6 +519,7 @@ fn clear_breaker_state(state: &mut ProviderRuntimeState) {
     state.open_until_ms = None;
     state.half_open_successes = 0;
     state.probe_owner = None;
+    state.probe_expires_at_ms = None;
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -825,6 +844,42 @@ mod tests {
         assert!(book.try_acquire_capacity(&provider).is_none());
         drop(permit);
         assert!(book.try_acquire_capacity(&provider).is_some());
+    }
+
+    #[test]
+    fn half_open_probe_lease_expires_so_other_requests_can_recover() {
+        let book = Arc::new(ProviderRuntimeBook::new());
+        let mut provider = provider();
+        provider.circuit_breaker_failure_threshold = 1;
+        book.try_begin_attempt(&provider, 100)
+            .expect("closed attempt")
+            .failure(Some(502), "upstream_error", "failed", 100);
+        let probe_at = 100 + provider.circuit_breaker_open_ms;
+        let probe = book.try_begin_attempt(&provider, probe_at).expect("probe");
+        assert!(
+            book.try_begin_attempt(&provider, probe_at + PROBE_LEASE_MS - 1)
+                .is_none()
+        );
+        let fallback = book
+            .try_begin_attempt(&provider, probe_at + PROBE_LEASE_MS)
+            .expect("lease expired");
+        assert!(
+            !book
+                .snapshot(&provider, probe_at + PROBE_LEASE_MS + 1)
+                .available
+        );
+        // The stale probe must not release the newer lease.
+        drop(probe);
+        assert!(
+            !book
+                .snapshot(&provider, probe_at + PROBE_LEASE_MS + 2)
+                .available
+        );
+        drop(fallback);
+        assert!(
+            book.snapshot(&provider, probe_at + PROBE_LEASE_MS + 3)
+                .available
+        );
     }
 
     #[test]
