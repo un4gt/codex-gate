@@ -1541,6 +1541,7 @@ async fn proxy_openai(
                 + budget
                     .remaining()
                     .min(provider_timeout(&resolved.provider, &state)),
+            stream_max_deadline: time::Instant::from_std(start + state.config.upstream_stream_max),
             client_duration_ms: None,
             terminal_observed: false,
             requested_reasoning_effort: request_efforts.lock().0.clone(),
@@ -4624,6 +4625,7 @@ struct TapConfig {
     codex_state: Option<SharedState>,
     read_timeout: std::time::Duration,
     first_read_deadline: time::Instant,
+    stream_max_deadline: time::Instant,
     client_duration_ms: Option<i64>,
     terminal_observed: bool,
     requested_reasoning_effort: Option<String>,
@@ -4679,11 +4681,12 @@ impl ProxyTapBody {
             let mut sse = cfg.is_sse.then(|| SseParser::new(cfg.api_format));
             let mut disconnected_at: Option<time::Instant> = None;
             let mut preflight_complete = !cfg.is_sse;
-            let mut read_deadline = cfg.first_read_deadline;
+            let mut read_deadline = cfg.first_read_deadline.min(cfg.stream_max_deadline);
             loop {
                 let deadline = disconnected_at
                     .map(|at| (at + crate::response_events::DISCONNECT_GRACE).min(read_deadline))
-                    .unwrap_or(read_deadline);
+                    .unwrap_or(read_deadline)
+                    .min(cfg.stream_max_deadline);
                 let frame = tokio::select! {
                     biased;
                     _ = sender.closed(), if disconnected_at.is_none() => {
@@ -4720,7 +4723,8 @@ impl ProxyTapBody {
                             }
                         }
                         if preflight_complete {
-                            read_deadline = time::Instant::now() + cfg.read_timeout;
+                            read_deadline = (time::Instant::now() + cfg.read_timeout)
+                                .min(cfg.stream_max_deadline);
                         }
                         if disconnected_at.is_none() && sender.send(Ok(frame)).await.is_err() {
                             disconnected_at = Some(time::Instant::now());
@@ -4744,13 +4748,28 @@ impl ProxyTapBody {
                         break;
                     }
                     Err(_) => {
-                        error_type = Some("upstream_timeout".into());
-                        error_message = Some("upstream body read deadline exceeded".into());
-                        let _ = sender
-                            .send(Err(std::io::Error::other(
-                                "upstream body read deadline exceeded",
-                            )))
-                            .await;
+                        let stream_limit_reached = time::Instant::now() >= cfg.stream_max_deadline;
+                        let (kind, message) = if stream_limit_reached {
+                            (
+                                "upstream_stream_timeout",
+                                format!(
+                                    "upstream stream exceeded the maximum duration of {}s",
+                                    cfg.stream_max_deadline
+                                        .saturating_duration_since(time::Instant::from_std(
+                                            cfg.start
+                                        ),)
+                                        .as_secs()
+                                ),
+                            )
+                        } else {
+                            (
+                                "upstream_timeout",
+                                "upstream body read deadline exceeded".to_string(),
+                            )
+                        };
+                        error_type = Some(kind.into());
+                        error_message = Some(message.clone());
+                        let _ = sender.send(Err(std::io::Error::other(message))).await;
                         break;
                     }
                 }
@@ -4856,6 +4875,9 @@ fn finalize_tap(
     let pricing = evaluate_price(inputs.usage, *inputs.usage_observed, cfg.price.as_ref());
     let now_ms = util::now_ms();
     let disconnected = inputs.error_type.as_deref() == Some("client_disconnected");
+    // A gateway-enforced stream duration is not evidence that the upstream is
+    // unhealthy; settle it neutrally so it cannot open the breaker.
+    let stream_limited = inputs.error_type.as_deref() == Some("upstream_stream_timeout");
     let origin = if disconnected {
         OutcomeOrigin::Gateway
     } else if cfg.terminal_observed {
@@ -4930,7 +4952,7 @@ fn finalize_tap(
         .or_else(|| Some(cfg.start.elapsed().as_millis() as i64));
     if let Some(reservation) = reservation.take() {
         let mut reservation = reservation;
-        if disconnected {
+        if disconnected || stream_limited {
             reservation.neutral();
         } else {
             reservation.finish_with_scope(
@@ -4978,6 +5000,7 @@ fn finalize_tap(
             }
         }
     } else if scope.should_avoid_affinity_immediately()
+        && !stream_limited
         && let Some(identity) = cfg.affinity_identity.as_ref()
     {
         cfg.affinity.mark_provider_failed(

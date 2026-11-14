@@ -408,6 +408,7 @@ Codex 预设只解决客户端身份与引擎指纹门禁，不会强制覆盖 `
 | `SESSION_AFFINITY_MAX_ENTRIES` | `10000` | 单进程最多保留的会话亲和条目数。 |
 | `UPSTREAM_FIRST_EVENT_TIMEOUT_MS` | `60000` | SSE 首个有效事件到达前允许故障转移的等待上限。 |
 | `UPSTREAM_FIRST_EVENT_MAX_BYTES` | `65536` | SSE 首个有效事件预检缓冲上限。 |
+| `UPSTREAM_STREAM_MAX_MS` | `300000` | 单条流式响应的总时长上限；超时按网关策略结束，不计为上游故障。 |
 | `UPSTREAM_RATE_LIMIT_FALLBACK_COOLDOWN_MS` | `30000` | 402/429 未返回 reset 信息时的 key 冷却基准时长。 |
 | `CODEX_QUOTA_BLOCK_CAP_MS` | `60000` | Codex OAuth 额度耗尽后，路由最多被阻塞多久再向上游探测；避免窗口重置时间长达数天时无法自动恢复。 |
 
