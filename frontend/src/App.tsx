@@ -916,7 +916,20 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
             {props.data.settings.apiBase}
           </Box>
           {!props.data.linkOk ? (
-            <Typography role="status" variant="caption" color="error" sx={{ mt: 0.5, overflowWrap: "anywhere" }}>
+            <Typography
+              role="status"
+              variant="caption"
+              color="error"
+              title={props.data.message}
+              sx={{
+                mt: 0.5,
+                overflowWrap: "anywhere",
+                display: "-webkit-box",
+                WebkitBoxOrient: "vertical",
+                WebkitLineClamp: 3,
+                overflow: "hidden",
+              }}
+            >
               {props.data.message}
             </Typography>
           ) : null}

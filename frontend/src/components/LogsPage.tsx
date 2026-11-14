@@ -932,9 +932,11 @@ export function LogsPage(props: LogsPageProps) {
             <Box
               sx={{
                 display: "flex",
+                flexWrap: "wrap",
                 alignItems: "center",
                 justifyContent: "space-between",
                 gap: "0.625rem",
+                rowGap: "0.5rem",
               }}
             >
               <Box>
@@ -1211,7 +1213,7 @@ export function LogsPage(props: LogsPageProps) {
                               <TableCell
                                 key={id}
                                 data-column-id={id}
-                                sx={{ maxWidth: 320, overflowWrap: "anywhere" }}
+                                sx={{ maxWidth: 320, overflowWrap: "break-word" }}
                               >
                                 <LogColumnValue
                                   id={id}
@@ -5177,7 +5179,7 @@ function LogColumnValue(props: {
               fontSize: "0.75rem",
               lineHeight: "calc(1 / 0.75)",
             },
-            ...{ maxWidth: "260px", wordBreak: "break-all" },
+            ...{ maxWidth: "260px", overflowWrap: "break-word" },
           }}
           title={formatModelName(row.model)}
         >
@@ -5185,13 +5187,38 @@ function LogColumnValue(props: {
             {isWsSession(row) ? t("WS 会话") : formatModelName(row.model)}
           </Box>
           {row.upstream_reasoning_effort ? (
-            <Typography component="span" variant="caption" sx={{ display: "block", color: "text.secondary" }}>
+            <Typography
+              component="span"
+              variant="caption"
+              sx={{
+                display: "block",
+                color: "text.secondary",
+                whiteSpace: "nowrap",
+              }}
+            >
               {t("思考级别")} · {row.upstream_reasoning_effort}
             </Typography>
           ) : null}
           {row.provider_id ? (
-            <Box component="span" sx={{ display: "block", fontSize: 11, color: "text.secondary", mt: "2px" }}>
-              {props.providerNameMap.get(row.provider_id) ?? `#${row.provider_id}`}
+            <Box
+              component="span"
+              title={
+                props.providerNameMap.get(row.provider_id) ??
+                `#${row.provider_id}`
+              }
+              sx={{
+                display: "block",
+                maxWidth: "100%",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                fontSize: 11,
+                color: "text.secondary",
+                mt: "2px",
+              }}
+            >
+              {props.providerNameMap.get(row.provider_id) ??
+                `#${row.provider_id}`}
             </Box>
           ) : null}
         </Box>
@@ -5236,6 +5263,7 @@ function LogColumnValue(props: {
           sx={{
             fontSize: "0.75rem",
             lineHeight: "calc(1 / 0.75)",
+            whiteSpace: "nowrap",
           }}
         >
           <Box component="span" sx={{ display: "block", fontVariantNumeric: "tabular-nums" }}>
@@ -5268,9 +5296,12 @@ function LogColumnValue(props: {
           {t("未返回用量")}
         </Box>
       );
-    case "api_key":
+    case "api_key": {
+      const name =
+        props.apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`;
       return (
         <Box
+          title={name}
           sx={{
             ...{},
             ...{
@@ -5278,50 +5309,73 @@ function LogColumnValue(props: {
               lineHeight: "calc(1 / 0.75)",
             },
             ...{
-              wordBreak: "break-all",
+              display: "block",
+              maxWidth: 220,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
               color: "var(--mui-palette-text-secondary)",
             },
           }}
         >
-          {props.apiKeyNameMap.get(row.api_key_id) ?? `#${row.api_key_id}`}
+          {name}
         </Box>
       );
-    case "provider":
+    }
+    case "provider": {
+      const name = row.provider_id
+        ? (props.providerNameMap.get(row.provider_id) ??
+          `#${row.provider_id}`)
+        : "—";
       return (
         <Box
+          title={name}
           sx={{
             ...{},
             ...{
               fontSize: "0.75rem",
               lineHeight: "calc(1 / 0.75)",
             },
-            ...{ wordBreak: "break-all" },
+            ...{
+              display: "block",
+              maxWidth: 220,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            },
           }}
         >
-          {row.provider_id
-            ? (props.providerNameMap.get(row.provider_id) ??
-              `#${row.provider_id}`)
-            : "—"}
+          {name}
         </Box>
       );
-    case "endpoint":
+    }
+    case "endpoint": {
+      const name = row.endpoint_id
+        ? (props.endpointNameMap.get(row.endpoint_id) ??
+          `#${row.endpoint_id}`)
+        : "—";
       return (
         <Box
+          title={name}
           sx={{
             ...{},
             ...{
               fontSize: "0.75rem",
               lineHeight: "calc(1 / 0.75)",
             },
-            ...{ wordBreak: "break-all" },
+            ...{
+              display: "block",
+              maxWidth: 220,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            },
           }}
         >
-          {row.endpoint_id
-            ? (props.endpointNameMap.get(row.endpoint_id) ??
-              `#${row.endpoint_id}`)
-            : "—"}
+          {name}
         </Box>
       );
+    }
     case "transport":
       return (
         <Chip
@@ -5352,7 +5406,7 @@ function LogColumnValue(props: {
         </Box>
       );
     case "ttft":
-      return <Tooltip title={ttftHelp(row)}><Box component="span" tabIndex={0}>{formatTtft(row)}</Box></Tooltip>;
+      return <Tooltip title={ttftHelp(row)}><Box component="span" tabIndex={0} sx={{ whiteSpace: "nowrap" }}>{formatTtft(row)}</Box></Tooltip>;
     case "output_rate":
       return <Tooltip title={t(OUTPUT_RATE_HELP)}><Box component="span" tabIndex={0}>{formatOutputRate(row)}</Box></Tooltip>;
     case "reasoning_effort":
@@ -5460,7 +5514,16 @@ function UsageBreakdown({ row }: { row: RequestLogRow }) {
             <Box component="span" sx={{ fontWeight: 600 }}>
               {formatCompactInteger(totalTokens(row))}
             </Box>
-            <Box component="span" sx={{ display: "inline-flex", gap: 1, fontSize: 11, color: "text.secondary" }}>
+            <Box
+              component="span"
+              sx={{
+                display: "inline-flex",
+                gap: 1,
+                fontSize: 11,
+                color: "text.secondary",
+                whiteSpace: "nowrap",
+              }}
+            >
               {parts.map((part) => (
                 <Box component="span" key={part.key}>
                   {part.label} {formatCompactInteger(part.value)}
