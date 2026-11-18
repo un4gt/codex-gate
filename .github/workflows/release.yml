@@ -185,9 +185,10 @@ jobs:
           images: |
             ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+          flavor: latest=false
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
             org.opencontainers.image.title=${{ github.event.repository.name }}
             org.opencontainers.image.description=Codex Gate container image
@@ -243,7 +244,12 @@ jobs:
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
           else
+            flags=()
+            if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+              flags+=(--prerelease --latest=false)
+            fi
             gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+              "${flags[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${GITHUB_REF_NAME}" \
               --notes "Linux and Windows binary packages for ${GITHUB_REF_NAME}."
