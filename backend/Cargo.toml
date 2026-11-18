@@ -1,6 +1,6 @@
 [package]
 name = "backend"
-version = "0.0.53"
+version = "0.0.60-beta"
 edition = "2024"
 
 [features]
