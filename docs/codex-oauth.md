@@ -160,7 +160,7 @@ wire_api = "responses"
 
 目录复用网关的 Responses 路由规则，只包含调用方 API Key 授权、Provider/端点/Key 启用、模型库存及白名单允许的模型；OAuth 账号还必须处于可路由状态。仅支持 Chat 且未开启 Responses 转换的模型不会进入 Codex 目录。普通 `/v1/models` 的现有行为不变。
 
-能力数据来自随程序嵌入的官方 Codex `rust-v0.163.0` 固定快照，[来源、校验值和更新方式](../backend/assets/codex/README.md)均已记录。已知原生 Responses 模型保留完整元数据；指向同一真实模型的别名使用该模型的能力并保留别名身份。未知模型、多目标异构别名、Responses→Chat 转换使用保守元数据，不声明未经确认的推理档位、上下文容量、图片输入或 Responses Lite 支持。目录中的 `supported_in_api=true` 表示可经本项目 Responses API 路由，不表示用户持有 OpenAI 官方 API 权限。
+能力数据来自随程序嵌入的官方 Codex `rust-v0.170.0` 固定快照，[来源、校验值和更新方式](../backend/assets/codex/README.md)均已记录。已知原生 Responses 模型保留完整元数据；指向同一真实模型的别名使用该模型的能力并保留别名身份。未知模型、多目标异构别名、Responses→Chat 转换使用保守元数据，不声明未经确认的推理档位、上下文容量、图片输入或 Responses Lite 支持。目录中的 `supported_in_api=true` 表示可经本项目 Responses API 路由，不表示用户持有 OpenAI 官方 API 权限。
 
 这是固定能力快照与本项目实时路由权限的组合，不是从每个 OAuth 账号实时获取的官方目录，也不代表该账号拥有快照里全部功能。目录不会扩大现有模型库存；仍需先在管理台同步并启用模型。响应按官方优先级排序，最多 1 MiB；超限时返回能完整容纳的有序模型前缀并记录警告，不截断 JSON。对于 `client_version >= 0.159.2` 的三段数字版本，移除与 `model_messages` 重复的旧 `base_instructions`；旧版或无法识别的版本保留兼容字段。
 
@@ -171,7 +171,15 @@ cargo test --manifest-path backend/Cargo.toml --locked
 python scripts/run_codex_catalog_regression.py --codex /path/to/native/codex
 ```
 
-回归使用临时数据库、合成凭据和本地上游，覆盖协议协商、权限、别名、转换、禁用与 OAuth 账号失效；可省略 `--codex` 仅运行网关回归。指定原生 Codex 可执行文件时，用独立 `CODEX_HOME` 启动 `app-server` 并调用 `model/list`，验证真实 CLI 能解码目录和显示模型；不读取现有登录文件、不进行真实推理。已在 `codex-cli 0.163.0` 验证通过。若本地运行实例占用默认构建产物，可设置独立 `CARGO_TARGET_DIR` 后运行。
+回归使用临时数据库、合成凭据和本地上游，覆盖协议协商、权限、别名、转换、禁用与 OAuth 账号失效；可省略 `--codex` 仅运行网关回归。指定原生 Codex 可执行文件时，用独立 `CODEX_HOME` 启动 `app-server` 并调用 `model/list`，验证真实 CLI 能解码目录和显示模型；不读取现有登录文件、不进行真实推理。此快照已通过 `codex-cli 0.169.0` 和 `0.170.0` 验证。若本地运行实例占用默认构建产物，可设置独立 `CARGO_TARGET_DIR` 后运行。
+
+## GPT-6.2 多轮缓存排查
+
+`gpt-6.2-sol` 和 `gpt-6.2-astra` 的官方目录均声明 `use_responses_lite: true`，最低客户端版本为 `0.166.0`。如果使用网关的 `model_catalog_url`，更新网关后刷新 CLI 的模型目录，并用新会话验证；仅更新网关不会改变其他客户端自己构造的请求。
+
+- **区分两类指令。** 根据 [OpenAI 的前缀指南](https://developers.openai.com/api/docs/guides/keep-prefix-unchanged)，可跨轮复用的基础提示词应放入 `input` 的首条 `developer` 消息，后续原样重放；GPT-6.2 的顶层 `instructions` 在 `input` 之后生效，按未缓存输入计费。OAuth 适配层对这两个模型不再补空指令，非空顶层指令仍原样转发。若旧客户端或 Provider 请求覆盖每轮把固定长提示词写进顶层，应从源头调整，不要把真正的单轮指令移入历史。
+- **做同会话对照。** 固定实际模型、OAuth 账号和 `prompt_cache_key`，保持工具定义、已有消息及顺序不变，只追加新内容；排除冷启动、上下文压缩和账号切换。用原始 Responses `usage` 比较 `上轮 input_tokens + 上轮 output_tokens − 本轮 input_tokens_details.cached_tokens`。这个差值用于定位问题，不是账单公式，也不能证明上轮所有输出都进入了本轮输入。若怀疑固定提示词的位置，开两个新会话，只改变它位于顶层还是首条 `developer` 消息，再比较各自预热后的连续轮次。
+- **区分日志口径。** 上式用的是上游总输入。网关日志的 `input_tokens` 已扣除缓存读取和写入；需加回 `cache_read_input_tokens`、`cache_creation_input_tokens` 才能还原总输入。后台命中率为本轮缓存读取量除以本轮总输入，不会按上轮输出补算。
 
 ## 请求日志：TTFT、输出速度与思考级别
 

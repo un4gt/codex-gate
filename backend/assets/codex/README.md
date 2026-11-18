@@ -1,10 +1,10 @@
 # Codex model metadata snapshot
 
-These unmodified assets come from [openai/codex](https://github.com/openai/codex/tree/83086188ae0614bd882818ff1aa23f3194962012), tag `rust-v0.163.0`, commit `83086188ae0614bd882818ff1aa23f3194962012`:
+These unmodified assets come from [openai/codex](https://github.com/openai/codex/tree/29eb79e9866b3262a777fdf8195c1b9e63684c91), tag `rust-v0.170.0`, commit `29eb79e9866b3262a777fdf8195c1b9e63684c91`:
 
 | File | Upstream path | SHA-256 |
 | --- | --- | --- |
-| `models.json` | `codex-rs/models-manager/models.json` | `943ca7fe1d19ed019054158303f0dbbd80b3bef43b3aa425a71aa7cb3fb52c2b` |
+| `models.json` | `codex-rs/models-manager/models.json` | `d50b6749506d97e5f334dbabcb666eb1689f423cf3e88cfabdcf3c536b873068` |
 | `prompt.md` | `codex-rs/models-manager/prompt.md` | `ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807` |
 | `LICENSE` | `LICENSE` | `d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc` |
 | `NOTICE` | `NOTICE` | `9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915` |

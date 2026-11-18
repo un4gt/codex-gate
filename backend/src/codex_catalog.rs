@@ -217,10 +217,10 @@ mod tests {
     fn known_models_retain_full_metadata_and_aliases_use_target_identity() {
         let response = build_catalog(
             vec![
-                candidate("gpt-6-astra", Some("gpt-6-astra")),
-                candidate("我的别名", Some("gpt-6.1-sol")),
+                candidate("gpt-6.2-astra", Some("gpt-6.2-astra")),
+                candidate("我的别名", Some("gpt-6.2-sol")),
             ],
-            "0.163.0",
+            "0.170.0",
         )
         .unwrap();
         let payload: Value = serde_json::from_slice(&response.body).unwrap();
@@ -228,8 +228,10 @@ mod tests {
         assert_eq!(payload["models"][0]["slug"], "我的别名");
         assert_eq!(payload["models"][0]["display_name"], "我的别名");
         assert_eq!(payload["models"][0]["upgrade"], Value::Null);
+        assert_eq!(payload["models"][0]["use_responses_lite"], true);
         let actual = &payload["models"][1];
-        let original = &templates().unwrap()["gpt-6-astra"];
+        assert_eq!(actual["use_responses_lite"], true);
+        let original = &templates().unwrap()["gpt-6.2-astra"];
         for (name, value) in original.as_object().unwrap() {
             if !matches!(
                 name.as_str(),

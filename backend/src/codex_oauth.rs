@@ -3243,7 +3243,14 @@ fn normalize_responses_object(root: &mut Map<String, Value>, upstream_model: &st
     } else {
         root.remove("parallel_tool_calls");
     }
-    if root.get("instructions").is_none_or(Value::is_null) {
+    if matches!(upstream_model, "gpt-6.2-sol" | "gpt-6.2-astra") {
+        if root
+            .get("instructions")
+            .is_some_and(|value| value.is_null() || value.as_str() == Some(""))
+        {
+            root.remove("instructions");
+        }
+    } else if root.get("instructions").is_none_or(Value::is_null) {
         root.insert("instructions".to_string(), Value::String(String::new()));
     }
     for field in [
@@ -4433,6 +4440,40 @@ mod tests {
         assert_eq!(value["tools"][0]["type"], "web_search");
         assert!(value.get("temperature").is_none());
         assert!(value.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn gpt_6_2_preserves_cacheable_history_and_turn_instruction_scope() {
+        let history = serde_json::json!([
+            {"type":"message", "role":"developer", "content":"Stable base"},
+            {"type":"message", "role":"user", "content":"First turn"},
+            {"type":"message", "role":"assistant", "content":"First output"},
+            {"type":"message", "role":"user", "content":"Next turn"}
+        ]);
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            let mut request = serde_json::json!({"model":"alias", "input":history});
+            for instructions in [None, Some(Value::Null), Some(serde_json::json!(""))] {
+                if let Some(value) = instructions {
+                    request["instructions"] = value;
+                }
+                let (body, _) =
+                    normalize_responses_request(&serde_json::to_vec(&request).unwrap(), model)
+                        .unwrap();
+                let http: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(http["input"], history);
+                assert!(http.get("instructions").is_none());
+            }
+
+            let mut continuation = serde_json::json!({
+                "type":"response.create", "model":"alias", "previous_response_id":"resp_1",
+                "input":[{"role":"user", "content":"Follow up"}], "instructions":"Only this turn"
+            });
+            let delta = continuation["input"].clone();
+            normalize_response_create_value(&mut continuation, model);
+            assert_eq!(continuation["input"], delta);
+            assert_eq!(continuation["previous_response_id"], "resp_1");
+            assert_eq!(continuation["instructions"], "Only this turn");
+        }
     }
 
     #[test]

@@ -18,12 +18,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from run_oauth_metering_regression import ADMIN, MODEL, ROOT, Regression, free_port
+from run_oauth_metering_regression import ADMIN, ROOT, Regression, free_port
 
+MODEL = 'gpt-6.2-sol'
 UNKNOWN = 'catalog-unknown-model'
 ALIAS = 'catalog-native-alias'
 MIXED = 'catalog-mixed-alias'
-CHAT = 'gpt-6.1-sol'
+CHAT = 'gpt-6.2-astra'
 
 
 class Mock(BaseHTTPRequestHandler):
@@ -45,7 +46,7 @@ class Mock(BaseHTTPRequestHandler):
 
 
 class CatalogRegression(Regression):
-    def catalog(self, token=None, version='0.163.0'):
+    def catalog(self, token=None, version='0.170.0'):
         conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
         try:
             conn.request('GET', f'/v1/models?client_version={version}',
@@ -82,6 +83,7 @@ class CatalogRegression(Regression):
         expected = {MODEL, UNKNOWN, ALIAS, MIXED}
         models = self.catalog()
         assert set(models) == expected, set(models)
+        assert models[MODEL]['use_responses_lite'] is True
         assert models[ALIAS]['context_window'] == models[MODEL]['context_window']
         assert models[ALIAS]['supported_reasoning_levels'] == models[MODEL]['supported_reasoning_levels']
         assert models[ALIAS]['model_messages'] == models[MODEL]['model_messages']
@@ -107,6 +109,7 @@ class CatalogRegression(Regression):
 
         # Authorization changes both visibility and the set of possible alias capabilities.
         self.api('PATCH', f'/api-keys/{client["id"]}', {'allowed_provider_ids': [self.provider, chat, private]})
+        assert self.catalog()[CHAT]['use_responses_lite'] is True
         assert self.catalog()[MIXED]['context_window'] is None
         assert 'catalog-private-model' in self.catalog()
         self.api('PATCH', f'/api-keys/{client["id"]}', {'allowed_provider_ids': [self.provider, chat]})
