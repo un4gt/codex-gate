@@ -287,6 +287,8 @@ Anthropic 上游只有一个 Provider 类型 `anthropic`，且上游鉴权固定
 
 `Chat → Messages` 的含义与 `Chat → Responses` 一致：上游是 Chat Completions，本地客户端用 `/v1/messages`。在模型详情中勾选 `Chat → Messages` 后，Claude / Anthropic SDK 才能通过该 `openai_compatible` 模型使用 `/v1/messages`。该模型的 `/v1/messages/count_tokens` 由网关本地估算，不请求 Chat 上游。
 
+排查 `Chat → Responses` 流式请求时，HTTP 200 只表示响应头已发出。正常结束看 `response.completed`；上游因长度或内容过滤截断时看 `response.incomplete` 和 `incomplete_details.reason`。收到上游读取错误、缺少 `[DONE]` 的 EOF、非法 JSON 或网关读取超时时，如果下游连接仍可写，网关发送 `response.failed`，不会重放已输出的工具调用。客户端不要执行失败或截断的工具参数；如果连终止事件都没收到，还需要核对反代及客户端链路。自定义工具的自由文本输入从 Chat 的 JSON 包装中解码后发送，普通函数参数仍逐片传输。
+
 Prompt cache 的关键规则：
 
 - 原生 Messages 请求不改写请求体，客户端 `system` / `tools` / 消息断点原样保留。

@@ -1695,8 +1695,13 @@ async fn proxy_openai(
                 );
                 let converted =
                     ConvertedSseBody::responses(body, context, state.config.max_request_bytes);
-                let tap =
-                    ProxyTapBody::new(converted, tap_config, telemetry_permit.take(), reservation);
+                let tap = ProxyTapBody::with_timeout_handler(
+                    converted,
+                    tap_config,
+                    telemetry_permit.take(),
+                    reservation,
+                    |body, message| body.project().converter.fail_stream(message),
+                );
                 return Response::from_parts(resp_parts, http::boxed(tap));
             }
 
@@ -4329,6 +4334,14 @@ impl hyper::body::Body for ConvertedSseBody {
                 Poll::Ready(Some(Ok(frame))) => {
                     if let Some(data) = frame.data_ref() {
                         this.pending.extend(this.converter.push(data));
+                        if let SseConverter::Responses(converter) = &*this.converter {
+                            *this.finished = converter.is_terminal();
+                            if this.pending.is_empty() && !data.is_empty() && !*this.finished {
+                                return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
+                                    b": keep-alive\n\n",
+                                )))));
+                            }
+                        }
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
@@ -4654,9 +4667,23 @@ struct ProxyTapBody {
 impl ProxyTapBody {
     fn new<B>(
         inner: B,
+        cfg: TapConfig,
+        telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
+        reservation: UpstreamAttemptReservation,
+    ) -> Self
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: std::fmt::Display + Send,
+    {
+        Self::with_timeout_handler(inner, cfg, telemetry_permit, reservation, |_, _| Vec::new())
+    }
+
+    fn with_timeout_handler<B>(
+        inner: B,
         mut cfg: TapConfig,
         mut telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
         reservation: UpstreamAttemptReservation,
+        on_timeout: impl FnOnce(Pin<&mut B>, &str) -> Vec<Bytes> + Send + 'static,
     ) -> Self
     where
         B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -4769,7 +4796,18 @@ impl ProxyTapBody {
                         };
                         error_type = Some(kind.into());
                         error_message = Some(message.clone());
-                        let _ = sender.send(Err(std::io::Error::other(message))).await;
+                        if disconnected_at.is_none() {
+                            let terminal = on_timeout(inner.as_mut(), &message);
+                            if terminal.is_empty() {
+                                let _ = sender.send(Err(std::io::Error::other(message))).await;
+                            } else {
+                                for data in terminal {
+                                    if sender.send(Ok(Frame::data(data))).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         break;
                     }
                 }

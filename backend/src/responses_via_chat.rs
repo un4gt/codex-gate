@@ -684,7 +684,7 @@ pub fn chat_response_to_responses(
 ) -> Result<Bytes, String> {
     let chat = serde_json::from_slice::<Value>(body)
         .map_err(|error| format!("invalid Chat Completions response: {error}"))?;
-    if let Some(error) = chat.get("error") {
+    if let Some(error) = chat.get("error").filter(|error| !error.is_null()) {
         return Err(format!("upstream Chat Completions error: {error}"));
     }
     let choice = chat
@@ -709,11 +709,13 @@ pub fn chat_response_to_responses(
         }
     }
     let finish_reason = choice.get("finish_reason").and_then(Value::as_str);
-    let incomplete_details = match finish_reason {
-        Some("length") => Some(json!({ "reason": "max_output_tokens" })),
-        Some("content_filter") => Some(json!({ "reason": "content_filter" })),
-        _ => None,
-    };
+    let incomplete_details =
+        incomplete_reason(finish_reason).map(|reason| json!({"reason":reason}));
+    if incomplete_details.is_some() {
+        for item in &mut output {
+            item["status"] = json!("incomplete");
+        }
+    }
     let response = json!({
         "id": response_id,
         "object": "response",
@@ -885,48 +887,65 @@ fn short_hash(value: &[u8]) -> String {
     hex::encode(&hash.as_bytes()[..12])
 }
 
+fn incomplete_reason(finish_reason: Option<&str>) -> Option<&'static str> {
+    match finish_reason {
+        Some("length") => Some("max_output_tokens"),
+        Some("content_filter") => Some("content_filter"),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct SseDecoder {
     buffer: Vec<u8>,
     event_name: Option<String>,
     data_lines: Vec<String>,
+    event_bytes: usize,
 }
 
 impl SseDecoder {
-    fn push(&mut self, bytes: &[u8], max_bytes: usize) -> Result<Vec<SseEvent>, String> {
-        self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() > max_bytes {
+    fn push_line(&mut self, fragment: &[u8], max_bytes: usize) -> Result<Option<SseEvent>, String> {
+        if self
+            .event_bytes
+            .saturating_add(self.buffer.len())
+            .saturating_add(fragment.len())
+            > max_bytes
+        {
             return Err(format!("SSE conversion buffer exceeded {max_bytes} bytes"));
         }
-        let mut events = Vec::new();
-        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.buffer.drain(..=newline).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            self.process_line(&line, &mut events);
-        }
-        Ok(events)
+        let Some(line) = fragment.strip_suffix(b"\n") else {
+            self.buffer.extend_from_slice(fragment);
+            return Ok(None);
+        };
+        let mut buffer = std::mem::take(&mut self.buffer);
+        let line = if buffer.is_empty() {
+            line
+        } else {
+            buffer.extend_from_slice(line);
+            &buffer
+        };
+        let event = self.process_line(line.strip_suffix(b"\r").unwrap_or(line));
+        buffer.clear();
+        self.buffer = buffer;
+        Ok(event)
     }
 
     fn finish(&mut self) -> Vec<SseEvent> {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            self.process_line(&line, &mut events);
+            events.extend(self.process_line(&line));
         }
-        self.dispatch(&mut events);
+        events.extend(self.dispatch());
         events
     }
 
-    fn process_line(&mut self, line: &[u8], events: &mut Vec<SseEvent>) {
+    fn process_line(&mut self, line: &[u8]) -> Option<SseEvent> {
         if line.is_empty() {
-            self.dispatch(events);
-            return;
+            return self.dispatch();
         }
         if line.first() == Some(&b':') {
-            return;
+            return None;
         }
         let (field, value) =
             line.iter()
@@ -938,22 +957,27 @@ impl SseDecoder {
                 });
         match field {
             b"event" => self.event_name = Some(String::from_utf8_lossy(value).into_owned()),
-            b"data" => self
-                .data_lines
-                .push(String::from_utf8_lossy(value).into_owned()),
+            b"data" => {
+                self.event_bytes += line.len() + 1;
+                self.data_lines
+                    .push(String::from_utf8_lossy(value).into_owned());
+            }
             _ => {}
         }
+        None
     }
 
-    fn dispatch(&mut self, events: &mut Vec<SseEvent>) {
+    fn dispatch(&mut self) -> Option<SseEvent> {
         if self.data_lines.is_empty() && self.event_name.is_none() {
-            return;
+            return None;
         }
-        events.push(SseEvent {
+        let event = SseEvent {
             event_name: self.event_name.take(),
             data: self.data_lines.join("\n"),
-        });
+        };
         self.data_lines.clear();
+        self.event_bytes = 0;
+        Some(event)
     }
 }
 
@@ -991,9 +1015,8 @@ pub struct ChatSseToResponses {
     usage: Value,
     service_tier: Option<String>,
     finish_reason: Option<String>,
-    saw_done: bool,
     terminal: bool,
-    total_seen: usize,
+    retained_output_bytes: usize,
 }
 
 impl ChatSseToResponses {
@@ -1017,9 +1040,8 @@ impl ChatSseToResponses {
             usage: Value::Null,
             service_tier: None,
             finish_reason: None,
-            saw_done: false,
             terminal: false,
-            total_seen: 0,
+            retained_output_bytes: 0,
         }
     }
 
@@ -1027,18 +1049,18 @@ impl ChatSseToResponses {
         if self.terminal {
             return Vec::new();
         }
-        self.total_seen = self.total_seen.saturating_add(bytes.len());
-        if self.total_seen > self.max_bytes {
-            return self.fail(&format!(
-                "SSE conversion state exceeded {} bytes",
-                self.max_bytes
-            ));
+        let mut output = Vec::new();
+        for fragment in bytes.split_inclusive(|byte| *byte == b'\n') {
+            match self.decoder.push_line(fragment, self.max_bytes) {
+                Ok(Some(event)) => output.extend(self.process_event(event)),
+                Ok(None) => {}
+                Err(error) => output.extend(self.fail(&error)),
+            }
+            if self.terminal {
+                break;
+            }
         }
-        let events = match self.decoder.push(bytes, self.max_bytes) {
-            Ok(events) => events,
-            Err(error) => return self.fail(&error),
-        };
-        self.process_events(events)
+        output
     }
 
     pub fn finish(&mut self) -> Vec<Bytes> {
@@ -1046,13 +1068,12 @@ impl ChatSseToResponses {
             return Vec::new();
         }
         let events = self.decoder.finish();
-        let mut output = self.process_events(events);
+        let mut output: Vec<_> = events
+            .into_iter()
+            .flat_map(|event| self.process_event(event))
+            .collect();
         if !self.terminal {
-            if self.saw_done {
-                output.extend(self.complete());
-            } else {
-                output.extend(self.fail("upstream Chat Completions stream ended before [DONE]"));
-            }
+            output.extend(self.fail("upstream Chat Completions stream ended before [DONE]"));
         }
         output
     }
@@ -1061,33 +1082,40 @@ impl ChatSseToResponses {
         self.fail(message)
     }
 
-    fn process_events(&mut self, events: Vec<SseEvent>) -> Vec<Bytes> {
-        let mut output = Vec::new();
-        for event in events {
-            if event.data.trim() == "[DONE]" {
-                self.saw_done = true;
-                output.extend(self.complete());
-                continue;
-            }
-            if event
-                .event_name
-                .as_deref()
-                .is_some_and(|name| name == "error" || name.ends_with(".error"))
-            {
-                output.extend(self.fail(&event.data));
-                continue;
-            }
-            let value = match serde_json::from_str::<Value>(&event.data) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-            if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
-                output.extend(self.fail(&error.to_string()));
-                continue;
-            }
-            output.extend(self.process_chunk(&value));
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    fn process_event(&mut self, event: SseEvent) -> Vec<Bytes> {
+        if self.terminal {
+            return Vec::new();
         }
-        output
+        if event
+            .event_name
+            .as_deref()
+            .is_some_and(|name| name == "error" || name.ends_with(".error"))
+        {
+            return self.fail(&event.data);
+        }
+        if event.data.trim() == "[DONE]" {
+            if !self.created {
+                return self.fail("upstream Chat Completions stream contained no completion chunk");
+            }
+            return self.complete();
+        }
+        if event.data.is_empty() {
+            return Vec::new();
+        }
+        let value = match serde_json::from_str::<Value>(&event.data) {
+            Ok(value) => value,
+            Err(_) => {
+                return self.fail("invalid JSON in upstream Chat Completions stream");
+            }
+        };
+        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+            return self.fail(&error.to_string());
+        }
+        self.process_chunk(&value)
     }
 
     fn process_chunk(&mut self, chunk: &Value) -> Vec<Bytes> {
@@ -1125,6 +1153,9 @@ impl ChatSseToResponses {
         }
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for tool_call in tool_calls {
+                if self.terminal {
+                    break;
+                }
                 events.extend(self.append_tool_delta(tool_call));
             }
         }
@@ -1169,6 +1200,10 @@ impl ChatSseToResponses {
     }
 
     fn append_text(&mut self, delta: &str) -> Vec<Bytes> {
+        self.retained_output_bytes = self.retained_output_bytes.saturating_add(delta.len());
+        if self.retained_output_bytes > self.max_bytes {
+            return self.fail("converted text and tools exceeded the output buffer limit");
+        }
         let mut events = self.ensure_message();
         let output_index = self.message_index.unwrap_or(0);
         if !self.text_started {
@@ -1207,17 +1242,27 @@ impl ChatSseToResponses {
             .pointer("/function/arguments")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if !self.tools.contains_key(&index) {
+        let new_tool = !self.tools.contains_key(&index);
+        self.retained_output_bytes = self
+            .retained_output_bytes
+            .saturating_add(call_id_delta.len() + name_delta.len() + arguments_delta.len());
+        if new_tool {
+            self.retained_output_bytes = self
+                .retained_output_bytes
+                .saturating_add(std::mem::size_of::<StreamToolCall>());
+        }
+        if self.retained_output_bytes > self.max_bytes {
+            return self.fail("converted text and tools exceeded the output buffer limit");
+        }
+        if new_tool {
             self.tool_order.push(index);
-            let output_index = self.output.len();
-            self.output.push(Value::Null);
             self.tools.insert(
                 index,
                 StreamToolCall {
                     call_id: String::new(),
                     name: String::new(),
                     arguments: String::new(),
-                    output_index,
+                    output_index: 0,
                     emitted: false,
                     emitted_arguments_len: 0,
                 },
@@ -1226,11 +1271,13 @@ impl ChatSseToResponses {
         let Some(tool) = self.tools.get_mut(&index) else {
             return Vec::new();
         };
-        if !call_id_delta.is_empty() {
+        if !tool.emitted {
             tool.call_id.push_str(call_id_delta);
-        }
-        if !name_delta.is_empty() {
             tool.name.push_str(name_delta);
+        } else if (!call_id_delta.is_empty() && call_id_delta != tool.call_id)
+            || (!name_delta.is_empty() && name_delta != tool.name)
+        {
+            return self.fail("upstream changed tool identity after emitting arguments");
         }
         tool.arguments.push_str(arguments_delta);
         self.emit_tool(index, false)
@@ -1251,7 +1298,8 @@ impl ChatSseToResponses {
                 tool.name = format!("unknown_tool_{index}");
             }
         }
-        if tool.name.is_empty() || tool.call_id.is_empty() {
+        if tool.name.is_empty() || tool.call_id.is_empty() || (!force && tool.arguments.is_empty())
+        {
             self.tools.insert(index, tool);
             return Vec::new();
         }
@@ -1272,9 +1320,8 @@ impl ChatSseToResponses {
                     Value::String("in_progress".to_string()),
                 );
             }
-            if let Some(slot) = self.output.get_mut(tool.output_index) {
-                *slot = item.clone();
-            }
+            tool.output_index = self.output.len();
+            self.output.push(item.clone());
             events.push(self.event(
                 "response.output_item.added",
                 json!({
@@ -1284,22 +1331,16 @@ impl ChatSseToResponses {
                 }),
             ));
         }
-        if tool.arguments.len() > tool.emitted_arguments_len {
+        let item = &self.output[tool.output_index];
+        let is_custom = item["type"] == "custom_tool_call";
+        if !is_custom && tool.arguments.len() > tool.emitted_arguments_len {
             let delta = tool.arguments[tool.emitted_arguments_len..].to_string();
             tool.emitted_arguments_len = tool.arguments.len();
-            let event_name = if matches!(
-                self.context.tool_by_chat_name.get(&tool.name),
-                Some(ToolKind::Custom { .. })
-            ) {
-                "response.custom_tool_call_input.delta"
-            } else {
-                "response.function_call_arguments.delta"
-            };
             events.push(self.event(
-                event_name,
+                "response.function_call_arguments.delta",
                 json!({
-                    "type": event_name,
-                    "item_id": stream_tool_item_id(&tool, index, &self.context),
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item["id"],
                     "output_index": tool.output_index,
                     "delta": delta,
                 }),
@@ -1314,6 +1355,12 @@ impl ChatSseToResponses {
             return Vec::new();
         }
         let mut events = Vec::new();
+        let incomplete = incomplete_reason(self.finish_reason.as_deref()).is_some();
+        let status = if incomplete {
+            "incomplete"
+        } else {
+            "completed"
+        };
         let tool_order = self.tool_order.clone();
         for index in tool_order {
             events.extend(self.emit_tool(index, true));
@@ -1342,7 +1389,7 @@ impl ChatSseToResponses {
             let item = json!({
                 "id": self.message_id,
                 "type": "message",
-                "status": "completed",
+                "status": status,
                 "role": "assistant",
                 "content": if self.text_started {
                     vec![json!({ "type": "output_text", "text": self.text, "annotations": [], "logprobs": [] })]
@@ -1362,7 +1409,7 @@ impl ChatSseToResponses {
             let Some(tool) = self.tools.get(&index).cloned() else {
                 continue;
             };
-            let item = response_tool_item(
+            let mut item = response_tool_item(
                 &json!({
                     "id": tool.call_id,
                     "function": { "name": tool.name, "arguments": tool.arguments },
@@ -1370,10 +1417,24 @@ impl ChatSseToResponses {
                 index,
                 &self.context,
             );
+            item["status"] = json!(status);
             if let Some(slot) = self.output.get_mut(tool.output_index) {
                 *slot = item.clone();
             }
             let is_custom = item.get("type").and_then(Value::as_str) == Some("custom_tool_call");
+            if is_custom
+                && item["input"]
+                    .as_str()
+                    .is_some_and(|input| !input.is_empty())
+            {
+                events.push(self.event(
+                    "response.custom_tool_call_input.delta",
+                    json!({
+                        "type": "response.custom_tool_call_input.delta", "item_id": item["id"],
+                        "output_index": tool.output_index, "delta": item["input"],
+                    }),
+                ));
+            }
             let done_type = if is_custom {
                 "response.custom_tool_call_input.done"
             } else {
@@ -1394,18 +1455,15 @@ impl ChatSseToResponses {
             })));
         }
         self.terminal = true;
-        let status = if matches!(
-            self.finish_reason.as_deref(),
-            Some("length" | "content_filter")
-        ) {
-            "incomplete"
+        let event_type = if incomplete {
+            "response.incomplete"
         } else {
-            "completed"
+            "response.completed"
         };
         events.push(self.event(
-            "response.completed",
+            event_type,
             json!({
-                "type": "response.completed", "response": self.response_snapshot(status),
+                "type": event_type, "response": self.response_snapshot(status),
             }),
         ));
         events
@@ -1420,31 +1478,27 @@ impl ChatSseToResponses {
         } else {
             self.start_events()
         };
-        let error = json!({
-            "type": "server_error", "code": "responses_via_chat_conversion_failed", "message": message,
-        });
-        events.push(self.event(
-            "error",
-            json!({
-                "type": "error", "code": "responses_via_chat_conversion_failed", "message": message,
-            }),
-        ));
+        let mut response = self.response_snapshot("failed");
+        response["error"] = json!({"code": "server_error", "message": message});
+        response["incomplete_details"] = Value::Null;
+        if let Some(index) = self.message_index {
+            response["output"][index]["status"] = json!("incomplete");
+            response["output"][index]["content"] =
+                json!([{"type":"output_text","text":self.text,"annotations":[],"logprobs":[]}]);
+        }
+        for tool in self.tools.values().filter(|tool| tool.emitted) {
+            let item = &mut response["output"][tool.output_index];
+            item["status"] = json!("incomplete");
+            if item["type"] == "function_call" {
+                item["arguments"] = json!(tool.arguments);
+            }
+        }
         self.terminal = true;
         events.push(self.event(
             "response.failed",
             json!({
                 "type": "response.failed",
-                "response": {
-                    "id": self.response_id,
-                    "object": "response",
-                    "created_at": self.created_at,
-                    "status": "failed",
-                    "error": error,
-                    "output": self.output,
-                    "model": self.model,
-                    "usage": self.usage,
-                    "service_tier": self.service_tier,
-                },
+                "response": response,
             }),
         ));
         events
@@ -1457,11 +1511,7 @@ impl ChatSseToResponses {
             "created_at": self.created_at,
             "status": status,
             "error": Value::Null,
-            "incomplete_details": match self.finish_reason.as_deref() {
-                Some("length") => json!({ "reason": "max_output_tokens" }),
-                Some("content_filter") => json!({ "reason": "content_filter" }),
-                _ => Value::Null,
-            },
+            "incomplete_details": incomplete_reason(self.finish_reason.as_deref()).map(|reason| json!({"reason":reason})),
             "model": self.model,
             "output": self.output,
             "parallel_tool_calls": true,
@@ -1481,21 +1531,6 @@ impl ChatSseToResponses {
         });
         Bytes::from(format!("event: {event_name}\ndata: {data}\n\n"))
     }
-}
-
-fn stream_tool_item_id(tool: &StreamToolCall, index: usize, context: &ConversionContext) -> String {
-    response_tool_item(
-        &json!({
-            "id": tool.call_id,
-            "function": { "name": tool.name, "arguments": tool.arguments },
-        }),
-        index,
-        context,
-    )
-    .get("id")
-    .and_then(Value::as_str)
-    .unwrap_or("fc_missing")
-    .to_string()
 }
 
 #[cfg(test)]
@@ -1673,5 +1708,113 @@ mod tests {
             .collect::<String>();
         assert!(joined.contains("response.failed"));
         assert!(!joined.contains("event: response.completed"));
+    }
+
+    fn event_values(frames: Vec<Bytes>) -> Vec<Value> {
+        frames
+            .into_iter()
+            .map(|frame| {
+                let text = std::str::from_utf8(&frame).unwrap();
+                let (event, data) = text.trim_end().split_once("\ndata: ").unwrap();
+                let value: Value = serde_json::from_str(data).unwrap();
+                assert_eq!(event.strip_prefix("event: ").unwrap(), value["type"]);
+                value
+            })
+            .collect()
+    }
+
+    #[test]
+    fn truncated_tool_call_is_incomplete_not_a_success_or_bad_gateway() {
+        for (finish, reason) in [
+            ("length", "max_output_tokens"),
+            ("content_filter", "content_filter"),
+        ] {
+            let chunk = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",
+                "function":{"name":"lookup","arguments":"{\"recap\": \""}}]}, "finish_reason":finish}]});
+            let mut stream = ChatSseToResponses::new(ConversionContext::default(), 4096);
+            let events =
+                event_values(stream.push(format!("data: {chunk}\n\ndata: [DONE]\n\n").as_bytes()));
+            let terminal = events.last().unwrap();
+            assert_eq!(terminal["type"], "response.incomplete");
+            assert_eq!(terminal["response"]["output"][0]["status"], "incomplete");
+            assert_eq!(terminal["response"]["incomplete_details"]["reason"], reason);
+            let (status, _, detail) = crate::response_events::terminal_status(terminal);
+            assert_eq!(status, hyper::StatusCode::OK);
+            assert_eq!(detail.as_deref(), Some(reason));
+        }
+    }
+
+    #[test]
+    fn stream_limit_bounds_live_state_instead_of_total_wire_bytes() {
+        let small_event = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
+        let many_events = small_event.repeat(100);
+        let mut stream = ChatSseToResponses::new(ConversionContext::default(), 1024);
+        let events = event_values(stream.push(format!("{many_events}data: [DONE]\n\n").as_bytes()));
+        let response = &events.last().unwrap()["response"];
+        assert_eq!(response["status"], "completed");
+        assert_eq!(response["output"][0]["content"][0]["text"], "x".repeat(100));
+
+        let mut stream = ChatSseToResponses::new(ConversionContext::default(), 1024);
+        let events = event_values(stream.push(small_event.repeat(1025).as_bytes()));
+        assert_eq!(events.last().unwrap()["type"], "response.failed");
+        let mut stream = ChatSseToResponses::new(ConversionContext::default(), 1024);
+        let events = event_values(stream.push("data: x\n".repeat(200).as_bytes()));
+        assert_eq!(events.last().unwrap()["type"], "response.failed");
+    }
+
+    #[test]
+    fn malformed_chunk_fails_once_and_ignores_trailing_frames() {
+        let mut stream = ChatSseToResponses::new(ConversionContext::default(), 4096);
+        let events = event_values(stream.push(b"data: {bad\n\ndata: [DONE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n"));
+        let types: Vec<_> = events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "response.created",
+                "response.in_progress",
+                "response.failed"
+            ]
+        );
+        assert!(stream.finish().is_empty());
+    }
+
+    #[test]
+    fn custom_tool_deltas_reconstruct_the_decoded_input() {
+        let request = responses_request_to_chat(
+            br#"{"input":"hi","tools":[{"type":"custom","name":"shell"}]}"#,
+            "model",
+            None,
+        )
+        .unwrap();
+        let name = request.context.response_tool_name("shell");
+        let input = "echo \"hi\"\n中文";
+        let wrapper = json!({"input":input}).to_string();
+        let (first, second) = wrapper.split_at(8);
+        let mut stream = ChatSseToResponses::new(request.context, 4096);
+        let mut frames = Vec::new();
+        for delta in [
+            json!({"index":0,"id":"call_1","function":{"name":name,"arguments":first}}),
+            json!({"index":0,"function":{"arguments":second}}),
+        ] {
+            let chunk = json!({"choices":[{"delta":{"tool_calls":[delta]}}]});
+            frames.extend(stream.push(format!("data: {chunk}\n\n").as_bytes()));
+        }
+        frames.extend(stream.push(b"data: [DONE]\n\n"));
+        let events = event_values(frames);
+        let mut combined = String::new();
+        for (seq, event) in events.iter().enumerate() {
+            assert_eq!(event["sequence_number"], seq);
+            if event["type"] == "response.custom_tool_call_input.delta" {
+                combined.push_str(event["delta"].as_str().unwrap());
+            }
+        }
+        assert_eq!(combined, input);
+        assert_eq!(
+            events.last().unwrap()["response"]["output"][0]["input"],
+            input
+        );
     }
 }

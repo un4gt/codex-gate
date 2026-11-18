@@ -547,7 +547,7 @@ fn response_incomplete_status(value: &Value) -> (StatusCode, Option<String>, Opt
     if response
         .and_then(|response| response.get("error"))
         .or_else(|| value.get("error"))
-        .is_some()
+        .is_some_and(|error| !error.is_null())
     {
         return response_failure_status(value, "response_incomplete", "response incomplete");
     }
