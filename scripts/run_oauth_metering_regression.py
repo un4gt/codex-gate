@@ -157,7 +157,8 @@ class Mock(BaseHTTPRequestHandler):
         if case == 'failed':
             response['status'] = 'failed'
             response['error'] = {'code': 'mock_failure', 'message': 'synthetic failure with usage'}
-        yield {'type': 'response.done', 'response': response}
+        event_type = f"response.{response['status']}" if payload.get('hold_after_terminal') else 'response.done'
+        yield {'type': event_type, 'response': response}
 
     def do_GET(self):
         if self.headers.get('Upgrade', '').lower() == 'websocket':
@@ -220,12 +221,12 @@ class Mock(BaseHTTPRequestHandler):
         try:
             for event in self.events(payload):
                 # Deliberately no event: line; terminal frame has no newline at EOF.
-                data = ('data: ' + json.dumps(event) + ('\r\n\r\n' if event['type'].endswith('delta') or payload.get('test_case') == 'terminal_hold' else '')).encode()
+                data = ('data: ' + json.dumps(event) + ('\r\n\r\n' if event['type'].endswith('delta') or payload.get('hold_after_terminal') else '')).encode()
                 for offset in range(0, len(data), 8191):
                     chunk = data[offset:offset + 8191]
                     self.wfile.write(f'{len(chunk):x}\r\n'.encode() + chunk + b'\r\n')
                     self.wfile.flush()
-            if payload.get('test_case') == 'terminal_hold':
+            if payload.get('hold_after_terminal'):
                 time.sleep(32)
             self.wfile.write(b'0\r\n\r\n')
             self.wfile.flush()
@@ -405,19 +406,27 @@ class Regression:
         print(f'OAuth Codex request headers ({transport}): PASS', flush=True)
 
     def check_disconnect_after_terminal(self):
-        before = len(self.logs())
-        client = http.client.HTTPConnection('127.0.0.1', self.port, timeout=8)
-        client.request('POST', '/v1/responses', json.dumps({'model': MODEL, 'input': 'test', 'stream': True, 'test_case': 'terminal_hold'}), {'Content-Type': 'application/json', 'Authorization': f'Bearer {self.token}'})
-        response = client.getresponse()
-        while b'response.done' not in response.readline():
-            pass
-        client.sock.shutdown(socket.SHUT_RDWR)
-        response.close()
-        client.close()
-        # A terminal event seen before disconnect must settle immediately, without waiting 30 seconds.
-        row = self.settled(before, timeout=5)[0]
-        assert row['usage_observed'] and row['input_tokens'] == 100, row
-        assert row['error_type'] == 'client_disconnected', row
+        for case, status, error_type in [('normal', 200, None), ('failed', 502, 'mock_failure')]:
+            before = len(self.logs())
+            payload = {'model': MODEL, 'input': 'test', 'stream': True, 'test_case': case,
+                       'hold_after_terminal': True}
+            headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {self.token}'}
+            with closing(http.client.HTTPConnection('127.0.0.1', self.port, timeout=8)) as client:
+                client.request('POST', '/v1/responses', json.dumps(payload), headers)
+                with client.getresponse() as response:
+                    assert response.status == 200
+                    terminal_type = 'response.completed' if case == 'normal' else 'response.failed'
+                    for line in iter(response.readline, b''):
+                        if line.startswith(b'data:') and json.loads(line[5:])['type'] == terminal_type:
+                            assert response.readline() == b'\r\n'
+                            break
+                    else:
+                        raise AssertionError('Missing SSE terminal event')
+                    client.sock.shutdown(socket.SHUT_RDWR)
+            row = self.settled(before, timeout=5)[0]
+            assert row['usage_observed'] and row['input_tokens'] == 100, row
+            assert (row['http_status'], row['error_type']) == (status, error_type), row
+        self.api('POST', f'/providers/{self.provider}/circuit/reset', {})
 
     def check_disconnect(self, websocket=False, deadline=False):
         before = len(self.logs())

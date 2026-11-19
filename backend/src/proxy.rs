@@ -15,7 +15,7 @@ use hyper::{Method, Request, Response, StatusCode, Uri};
 use pin_project_lite::pin_project;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 
 use crate::affinity::{AffinityBinding, AffinityIdentity, extract_affinity_identity};
@@ -4660,8 +4660,13 @@ struct TapFinalizeInputs<'a> {
     capture: &'a UsageCaptureBuffer,
 }
 
+type ProxyTapFrame = (
+    Result<Frame<Bytes>, std::io::Error>,
+    Option<oneshot::Sender<()>>,
+);
+
 struct ProxyTapBody {
-    receiver: mpsc::Receiver<Result<Frame<Bytes>, std::io::Error>>,
+    receiver: mpsc::Receiver<ProxyTapFrame>,
 }
 
 impl ProxyTapBody {
@@ -4707,6 +4712,7 @@ impl ProxyTapBody {
             );
             let mut sse = cfg.is_sse.then(|| SseParser::new(cfg.api_format));
             let mut disconnected_at: Option<time::Instant> = None;
+            let mut terminal_handoff = None;
             let mut preflight_complete = !cfg.is_sse;
             let mut read_deadline = cfg.first_read_deadline.min(cfg.stream_max_deadline);
             loop {
@@ -4753,9 +4759,23 @@ impl ProxyTapBody {
                             read_deadline = (time::Instant::now() + cfg.read_timeout)
                                 .min(cfg.stream_max_deadline);
                         }
-                        if disconnected_at.is_none() && sender.send(Ok(frame)).await.is_err() {
-                            disconnected_at = Some(time::Instant::now());
-                            cfg.client_duration_ms = Some(cfg.start.elapsed().as_millis() as i64);
+                        if disconnected_at.is_none() {
+                            let terminal_ack = if terminal_handoff.is_none()
+                                && sse
+                                    .as_ref()
+                                    .is_some_and(|parser| parser.observation.terminal)
+                            {
+                                let (ack, received) = oneshot::channel();
+                                terminal_handoff = Some(received);
+                                Some(ack)
+                            } else {
+                                None
+                            };
+                            if sender.send((Ok(frame), terminal_ack)).await.is_err() {
+                                disconnected_at = Some(time::Instant::now());
+                                cfg.client_duration_ms =
+                                    Some(cfg.start.elapsed().as_millis() as i64);
+                            }
                         }
                         if sse
                             .as_ref()
@@ -4770,7 +4790,7 @@ impl ProxyTapBody {
                         error_type = Some("upstream_body_error".into());
                         error_message = Some(error.to_string());
                         let _ = sender
-                            .send(Err(std::io::Error::other(error.to_string())))
+                            .send((Err(std::io::Error::other(error.to_string())), None))
                             .await;
                         break;
                     }
@@ -4799,10 +4819,12 @@ impl ProxyTapBody {
                         if disconnected_at.is_none() {
                             let terminal = on_timeout(inner.as_mut(), &message);
                             if terminal.is_empty() {
-                                let _ = sender.send(Err(std::io::Error::other(message))).await;
+                                let _ = sender
+                                    .send((Err(std::io::Error::other(message)), None))
+                                    .await;
                             } else {
                                 for data in terminal {
-                                    if sender.send(Ok(Frame::data(data))).await.is_err() {
+                                    if sender.send((Ok(Frame::data(data)), None)).await.is_err() {
                                         break;
                                     }
                                 }
@@ -4851,7 +4873,9 @@ impl ProxyTapBody {
                     cfg.terminal_observed = true;
                 }
             }
-            if disconnected_at.is_some() {
+            let terminal_handed_off =
+                terminal_handoff.is_some_and(|mut ack| ack.try_recv().is_ok());
+            if disconnected_at.is_some() && !terminal_handed_off {
                 error_type = Some("client_disconnected".into());
                 error_message =
                     Some("client disconnected; upstream metering collection finished".into());
@@ -4886,7 +4910,14 @@ impl hyper::body::Body for ProxyTapBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        self.receiver.poll_recv(cx)
+        self.receiver.poll_recv(cx).map(|next| {
+            next.map(|(frame, terminal_ack)| {
+                if let Some(ack) = terminal_ack {
+                    let _ = ack.send(());
+                }
+                frame
+            })
+        })
     }
 }
 
