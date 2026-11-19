@@ -18,6 +18,7 @@ target
 .env.*
 !.env.example
 .opencode.env
+/.oai-platform.env
 
 # Frontend (Vite / Solid / TypeScript)
 frontend/node_modules/
