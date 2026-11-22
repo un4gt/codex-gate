@@ -72,6 +72,7 @@ loadRuntimeSettings,
 loadSystemConfig,
 previewRuntimeEnv,
 subscribeAuthenticationFailures,
+updateProvider,
 } from "@/lib/api";
 import { formatCommitShort,formatVersionLabel } from "@/lib/format";
 import { t,useI18n } from "@/lib/i18n";
@@ -121,6 +122,7 @@ export interface AppDataContext {
   message: string;
   refreshKey: number;
   loadProviders: (successMessage?: string) => Promise<void>;
+  updateProviderEnabled: (id: number, enabled: boolean) => Promise<void>;
   loadApiKeys: (successMessage?: string) => Promise<void>;
   loadSettings: (successMessage?: string) => Promise<void>;
   onApiBaseChange: (value: string) => void;
@@ -1554,6 +1556,7 @@ function UpstreamsPage(props: { data: AppDataContext }) {
         items={props.data.providers}
         onRefresh={props.data.loadProviders}
         onMessage={props.data.onMessage}
+        onToggleEnabled={props.data.updateProviderEnabled}
       />
     </Box>
   );
@@ -1690,6 +1693,7 @@ function ConsoleRoot() {
   );
   const [connectionIssue, setConnectionIssue] = useState<ConnectionIssue>(null);
   const workspaceVersion = useRef(0);
+  const providersRequestVersion = useRef(0);
   const authVersion = useRef(0);
   const authenticationRequest = useRef<{
     settings: ConnectionSettings;
@@ -1713,29 +1717,46 @@ function ConsoleRoot() {
         setProviders([]);
         return;
       }
+      const request = ++providersRequestVersion.current;
+      const isCurrent = () =>
+        generation === workspaceVersion.current && request === providersRequestVersion.current;
       setStatus("loading");
       setProvidersLoaded(false);
       try {
         const providerWorkspace = await loadProviderWorkspace(current);
-        if (generation !== workspaceVersion.current) return;
+        if (!isCurrent()) return;
         setProviders(providerWorkspace);
         setProviderGroups([]);
         setLinkOk(true);
         if (successMessage) setMessage(t(successMessage));
       } catch (error) {
-        if (generation !== workspaceVersion.current) return;
+        if (!isCurrent()) return;
         setProviders([]);
         setProviderGroups([]);
         setLinkOk(false);
         setMessage(error instanceof Error ? error.message : "读取上游失败。");
       } finally {
-        if (generation === workspaceVersion.current) {
+        if (isCurrent()) {
           setStatus("ready");
           setProvidersLoaded(true);
         }
       }
     },
     [settings],
+  );
+  const updateProviderEnabled = useCallback(
+    async (id: number, enabled: boolean) => {
+      const generation = workspaceVersion.current;
+      await updateProvider(settings, id, { enabled });
+      if (generation !== workspaceVersion.current) return;
+      setProviders((current) =>
+        current.map((item) =>
+          item.provider.id === id ? { ...item, provider: { ...item.provider, enabled } } : item,
+        ),
+      );
+      void loadProviders();
+    },
+    [settings, loadProviders],
   );
   const loadApiKeys = useCallback(
     async (successMessage?: string) => {
@@ -1745,15 +1766,18 @@ function ConsoleRoot() {
         setApiKeys([]);
         return;
       }
+      const request = ++providersRequestVersion.current;
       setStatus("loading");
       try {
         const [apiKeyWorkspace, providerWorkspace] = await Promise.all([
           loadApiKeyWorkspace(current),
           loadProviderWorkspace(current),
         ]);
-        setProviders(providerWorkspace);
-        setProvidersLoaded(true);
         if (generation !== workspaceVersion.current) return;
+        if (request === providersRequestVersion.current) {
+          setProviders(providerWorkspace);
+          setProvidersLoaded(true);
+        }
         setApiKeys(apiKeyWorkspace);
         setProviderGroups([]);
         setLinkOk(true);
@@ -1974,6 +1998,7 @@ function ConsoleRoot() {
       message,
       refreshKey,
       loadProviders,
+      updateProviderEnabled,
       loadApiKeys,
       loadSettings,
       onApiBaseChange,
@@ -1988,6 +2013,7 @@ function ConsoleRoot() {
       loadApiKeys,
       loadSettings,
       loadProviders,
+      updateProviderEnabled,
       logout,
       message,
       providerGroups,

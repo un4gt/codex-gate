@@ -816,6 +816,7 @@ describe("admin console smoke test", () => {
         items={[data]}
         onRefresh={async () => {}}
         onMessage={() => {}}
+        onToggleEnabled={async () => {}}
       />,
     );
   }
@@ -829,6 +830,105 @@ describe("admin console smoke test", () => {
     expect(screen.getAllByRole("tab")).toHaveLength(3);
     expect(screen.queryByRole("spinbutton", { name: "优先级" })).toBeNull();
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("locks each upstream switch for three seconds and ignores stale list responses", async () => {
+    upstreamFixture();
+    const first = providerWorkspace();
+    const second = { ...first, provider: { ...first.provider, id: 8, name: "Provider B", enabled: false } };
+    const enabled = new Map([[7, true], [8, false]]);
+    const mutations: { path: string; body: { enabled: boolean }; finish: () => void }[] = [];
+    const refreshes: (() => void)[] = [];
+    fetchRequest.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body));
+        const id = Number(path.split("/").pop());
+        return new Promise<Response>((resolve) => {
+          mutations.push({ path, body, finish: () => {
+            enabled.set(id, body.enabled);
+            resolve(jsonResponse({ ok: true }));
+          } });
+        });
+      }
+      if (path === "/api/v1/upstreams") {
+        const snapshot = [first, second].map((item) => ({
+          ...item,
+          provider: { ...item.provider, enabled: enabled.get(item.provider.id) },
+        }));
+        if (!mutations.length) return jsonResponse(snapshot);
+        return new Promise<Response>((resolve) => {
+          refreshes.push(() => resolve(jsonResponse(snapshot)));
+        });
+      }
+      return catalogResponse(input);
+    });
+    window.sessionStorage.setItem("little_gate_admin_token", "test-token");
+    window.history.replaceState({}, "", "/upstreams");
+    renderWithTheme(<Root />);
+    const firstSwitch = await screen.findByRole<HTMLInputElement>("switch", { name: "启用上游 Provider A" });
+    const secondSwitch = screen.getByRole<HTMLInputElement>("switch", { name: "启用上游 Provider B" });
+    expect(firstSwitch.checked).toBe(true);
+    expect(secondSwitch.checked).toBe(false);
+
+    rs.useFakeTimers();
+    try {
+      fireEvent.click(firstSwitch);
+      expect(firstSwitch.checked).toBe(false);
+      expect(firstSwitch.disabled).toBe(true);
+      fireEvent.click(firstSwitch);
+      expect(secondSwitch.disabled).toBe(false);
+      fireEvent.click(secondSwitch);
+      expect(secondSwitch.checked).toBe(true);
+      expect(mutations.map(({ path, body }) => [path, body])).toEqual([
+        ["/api/v1/upstreams/7", { enabled: false }],
+        ["/api/v1/upstreams/8", { enabled: true }],
+      ]);
+
+      await act(async () => mutations[1].finish());
+      expect(refreshes).toHaveLength(1);
+      act(() => { rs.advanceTimersByTime(2999); });
+      expect(secondSwitch.disabled).toBe(true);
+      act(() => { rs.advanceTimersByTime(1); });
+      expect(secondSwitch.disabled).toBe(false);
+      expect(secondSwitch.checked).toBe(true);
+      expect(firstSwitch.disabled).toBe(true);
+
+      await act(async () => mutations[0].finish());
+      expect(refreshes).toHaveLength(2);
+      act(() => { rs.advanceTimersByTime(1); });
+      expect(firstSwitch.disabled).toBe(false);
+      await act(async () => refreshes[1]());
+      await act(async () => refreshes[0]());
+      expect(firstSwitch.checked).toBe(false);
+      expect(secondSwitch.checked).toBe(true);
+    } finally {
+      rs.useRealTimers();
+    }
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("rolls back a failed upstream toggle and keeps it disabled during cooldown", async () => {
+    upstreamFixture();
+    fetchRequest.mockImplementation(async (input, init) => init?.method === "PATCH"
+      ? new Response("toggle failed", { status: 500 })
+      : catalogResponse(input));
+    window.sessionStorage.setItem("little_gate_admin_token", "test-token");
+    window.history.replaceState({}, "", "/upstreams");
+    renderWithTheme(<Root />);
+    const control = await screen.findByRole<HTMLInputElement>("switch", { name: "启用上游 Provider A" });
+
+    rs.useFakeTimers();
+    try {
+      await act(async () => { fireEvent.click(control); });
+      expect(screen.getByText(/切换上游状态失败。 .*toggle failed/)).toBeTruthy();
+      expect(control.checked).toBe(true);
+      expect(control.disabled).toBe(true);
+      act(() => { rs.advanceTimersByTime(3000); });
+      expect(control.disabled).toBe(false);
+    } finally {
+      rs.useRealTimers();
+    }
   });
 
   it("creates connection resources atomically without upstream scheduling fields", async () => {
@@ -853,30 +953,86 @@ describe("admin console smoke test", () => {
         items={[]}
         onRefresh={async () => {}}
         onMessage={() => {}}
+        onToggleEnabled={async () => {}}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "新增上游" }));
     fireEvent.change(screen.getByLabelText(/^名称/), {
       target: { value: "New upstream" },
     });
-    fireEvent.change(screen.getByLabelText(/^服务地址（每行一个）/), {
-      target: { value: "https://example.test/v1" },
+    const address = screen.getByRole("textbox", { name: "服务地址" });
+    fireEvent.paste(address, {
+      clipboardData: { getData: () => "https://example.test/v1\r\nhttps://backup.test/v1" },
     });
-    fireEvent.change(screen.getByLabelText(/^API Key（每行一个）/), {
-      target: { value: "synthetic-key" },
+    fireEvent.click(screen.getByRole("button", { name: "编辑服务地址 https://example.test/v1" }));
+    fireEvent.change(address, { target: { value: "https://primary.test/v1" } });
+    fireEvent.keyDown(address, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "删除服务地址 https://backup.test/v1" }));
+    fireEvent.change(address, { target: { value: "http://127.0.0.1:8080/v1" } });
+    fireEvent.keyDown(address, { key: "Enter" });
+
+    const key = screen.getByLabelText("API Key", { selector: "input" });
+    expect(key.getAttribute("type")).toBe("password");
+    fireEvent.paste(key, {
+      clipboardData: { getData: () => "synthetic-key-1111\nsynthetic-key-2222" },
     });
+    expect(screen.getByText("•••• 1111")).toBeTruthy();
+    expect(screen.queryByText("synthetic-key-1111")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "编辑第 1 个 API Key" }));
+    fireEvent.change(key, { target: { value: "synthetic-key-3333" } });
+    fireEvent.keyDown(key, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "删除第 2 个 API Key" }));
+    fireEvent.change(key, { target: { value: "synthetic-key-4444" } });
+    expect(writes).toHaveLength(0);
+
     fireEvent.click(screen.getByRole("button", { name: "创建上游" }));
     await waitFor(() => expect(writes).toHaveLength(2));
     expect(writes[0].body).toMatchObject({
       name: "New upstream",
       endpoints: [
-        expect.objectContaining({ base_url: "https://example.test/v1" }),
+        expect.objectContaining({ base_url: "https://primary.test/v1", priority: 0 }),
+        expect.objectContaining({ base_url: "http://127.0.0.1:8080/v1", priority: 10 }),
       ],
-      keys: [expect.objectContaining({ secret: "synthetic-key" })],
+      keys: [
+        expect.objectContaining({ secret: "synthetic-key-3333" }),
+        expect.objectContaining({ secret: "synthetic-key-4444" }),
+      ],
     });
     expect(writes[0].body).not.toHaveProperty("priority");
     expect(writes[0].body).not.toHaveProperty("groups");
     expect(writes[1].path).toBe("/api/v1/upstreams/7/models/sync");
+  });
+
+  it("rejects invalid service addresses before creating an upstream", () => {
+    upstreamFixture();
+    renderUpstream();
+    fireEvent.click(screen.getByRole("button", { name: "新增上游" }));
+    fireEvent.change(screen.getByLabelText(/^名称/), { target: { value: "Draft" } });
+    fireEvent.change(screen.getByLabelText("API Key", { selector: "input" }), {
+      target: { value: "synthetic-key" },
+    });
+    const address = screen.getByRole("textbox", { name: "服务地址" });
+    const create = screen.getByRole("button", { name: "创建上游" });
+
+    fireEvent.change(address, { target: { value: "a" } });
+    fireEvent.blur(address);
+    expect(screen.getByText("请输入有效的 HTTP 或 HTTPS 地址。")).toBeTruthy();
+    fireEvent.keyDown(address, { key: "Enter" });
+    expect(screen.queryByRole("list", { name: "服务地址" })).toBeNull();
+    fireEvent.click(create);
+    expect(fetchRequest).not.toHaveBeenCalled();
+
+    fireEvent.change(address, { target: { value: "https://example.test/v1?version=1" } });
+    fireEvent.click(create);
+    expect(screen.getByText("服务地址不能包含查询参数。")).toBeTruthy();
+    expect(fetchRequest).not.toHaveBeenCalled();
+
+    fireEvent.change(address, { target: { value: "" } });
+    fireEvent.paste(address, {
+      clipboardData: { getData: () => "https://example.test/v1\nhttps://" },
+    });
+    expect(screen.getByText("第 2 项。请输入有效的 HTTP 或 HTTPS 地址。")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "服务地址" })).toBeNull();
   });
 
   it("completes the Codex OAuth browser callback flow", async () => {
@@ -1272,6 +1428,7 @@ describe("admin console smoke test", () => {
         items={[codexProviderWorkspace()]}
         onRefresh={async () => undefined}
         onMessage={() => undefined}
+        onToggleEnabled={async () => undefined}
       />,
     );
 
@@ -1394,10 +1551,10 @@ describe("admin console smoke test", () => {
     fireEvent.change(screen.getByLabelText(/^名称/), {
       target: { value: "Retry" },
     });
-    fireEvent.change(screen.getByLabelText(/^服务地址（每行一个）/), {
+    fireEvent.change(screen.getByRole("textbox", { name: "服务地址" }), {
       target: { value: "https://example.test" },
     });
-    fireEvent.change(screen.getByLabelText(/^API Key（每行一个）/), {
+    fireEvent.change(screen.getByLabelText("API Key", { selector: "input" }), {
       target: { value: "synthetic" },
     });
     fireEvent.click(screen.getByRole("button", { name: "创建上游" }));
@@ -1416,16 +1573,18 @@ describe("admin console smoke test", () => {
     fireEvent.change(screen.getByLabelText(/^名称/), {
       target: { value: "Draft" },
     });
-    fireEvent.change(screen.getByLabelText(/^服务地址（每行一个）/), {
+    fireEvent.change(screen.getByRole("textbox", { name: "服务地址" }), {
       target: { value: "https://example.test" },
     });
-    fireEvent.change(screen.getByLabelText(/^API Key（每行一个）/), {
+    fireEvent.change(screen.getByLabelText("API Key", { selector: "input" }), {
       target: { value: "synthetic" },
     });
     fireEvent.click(screen.getByRole("button", { name: "创建上游" }));
     expect(await screen.findByText(/atomic save failed/)).toBeTruthy();
+    expect(screen.getByText("•••• etic")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "编辑第 1 个 API Key" }));
     expect(
-      (screen.getByLabelText(/^API Key（每行一个）/) as HTMLInputElement).value,
+      screen.getByLabelText<HTMLInputElement>("编辑API Key").value,
     ).toBe("synthetic");
   });
 
@@ -1545,11 +1704,12 @@ describe("admin console smoke test", () => {
     ).toBeNull();
   });
 
-  it("cancels provider deletion without sending a request", async () => {
+  it("cancels provider deletion and preserves the connection draft", async () => {
     const data = upstreamFixture();
     renderUpstream(data);
     fireEvent.click(screen.getByRole("button", { name: "管理" }));
-    await screen.findByLabelText(/^名称/);
+    const name = await screen.findByLabelText<HTMLInputElement>(/^名称/);
+    fireEvent.change(name, { target: { value: "Unsaved" } });
     fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "删除整个上游" }),
@@ -1558,31 +1718,81 @@ describe("admin console smoke test", () => {
       name: "确认删除整个上游？历史数据会保留。",
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(dialog.isConnected).toBe(false));
+    expect(name.value).toBe("Unsaved");
     expect(
       fetchRequest.mock.calls.some(([, i]) => i?.method === "DELETE"),
     ).toBe(false);
   });
 
-  it("deletes a provider once and refreshes the list", async () => {
-    const data = upstreamFixture();
-    renderUpstream(data);
-    fireEvent.click(screen.getByRole("button", { name: "管理" }));
-    await screen.findByLabelText(/^名称/);
-    fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
-    fireEvent.click(
-      await screen.findByRole("menuitem", { name: "删除整个上游" }),
-    );
-    const dialog = await screen.findByRole("dialog", {
-      name: "确认删除整个上游？历史数据会保留。",
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除" }));
-    await waitFor(() =>
+  it.each([false, true])(
+    "deletes an upstream and closes its route with unsaved changes = %s",
+    async (hasDraft) => {
+      const data = upstreamFixture();
+      const listPath = "/api/v1/upstreams";
+      const detailPath = `${listPath}/${data.provider.id}`;
+      let completeDeletion!: () => void;
+      const pendingDeletion = new Promise<void>((resolve) => {
+        completeDeletion = resolve;
+      });
+      let deleted = false;
+      const requests: string[] = [];
+      fetchRequest.mockImplementation(async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        const method = init?.method ?? "GET";
+        if (path === listPath || path === detailPath) {
+          requests.push(`${method} ${path}`);
+        }
+        if (path === listPath) return jsonResponse(deleted ? [] : [data]);
+        if (path === detailPath && method === "DELETE") {
+          await pendingDeletion;
+          deleted = true;
+          return new Response(null, { status: 204 });
+        }
+        if (path === detailPath && deleted) {
+          return new Response("not found", { status: 404 });
+        }
+        return catalogResponse(input);
+      });
+      window.sessionStorage.setItem("little_gate_admin_token", "test-token");
+      window.history.replaceState({}, "", "/upstreams");
+      renderWithTheme(<Root />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "管理" }));
+      const name = await screen.findByLabelText(/^名称/);
+      if (hasDraft) fireEvent.change(name, { target: { value: "Unsaved" } });
+      fireEvent.click(screen.getByRole("tab", { name: "高级设置" }));
+      requests.length = 0;
+
+      fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
+      fireEvent.click(
+        await screen.findByRole("menuitem", { name: "删除整个上游" }),
+      );
+      const dialog = await screen.findByRole("dialog", {
+        name: "确认删除整个上游？历史数据会保留。",
+      });
+      expect(requests).toEqual([]);
       expect(
-        fetchRequest.mock.calls.filter(([, i]) => i?.method === "DELETE"),
-      ).toHaveLength(1),
-    );
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  });
+        Boolean(within(dialog).queryByText("删除后，未保存的修改会丢失。")),
+      ).toBe(hasDraft);
+      const confirm = within(dialog).getByRole<HTMLButtonElement>("button", {
+        name: "确认删除",
+      });
+      fireEvent.click(confirm);
+      expect(confirm.disabled).toBe(true);
+      fireEvent.click(confirm);
+      expect(requests).toEqual([`DELETE ${detailPath}`]);
+      await act(async () => completeDeletion());
+
+      await waitFor(() => {
+        expect(window.location.search).toBe("");
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(screen.getByText("暂无上游")).toBeTruthy();
+      });
+      expect(requests).toEqual([`DELETE ${detailPath}`, `GET ${listPath}`]);
+      expect(consoleError).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps the confirmation open when provider deletion fails", async () => {
     const data = upstreamFixture();
@@ -1593,7 +1803,8 @@ describe("admin console smoke test", () => {
     );
     renderUpstream(data);
     fireEvent.click(screen.getByRole("button", { name: "管理" }));
-    await screen.findByLabelText(/^名称/);
+    const name = await screen.findByLabelText<HTMLInputElement>(/^名称/);
+    fireEvent.change(name, { target: { value: "Unsaved" } });
     fireEvent.click(screen.getByRole("button", { name: "更多操作" }));
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "删除整个上游" }),
@@ -1604,10 +1815,12 @@ describe("admin console smoke test", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "确认删除" }));
     expect(await within(dialog).findByText(/delete failed/)).toBeTruthy();
     expect(
-      screen.getByRole("dialog", {
-        name: "确认删除整个上游？历史数据会保留。",
-      }),
-    ).toBeTruthy();
+      within(dialog).getByRole<HTMLButtonElement>("button", { name: "确认删除" })
+        .disabled,
+    ).toBe(false);
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(dialog.isConnected).toBe(false));
+    expect(name.value).toBe("Unsaved");
   });
 
   it("makes every navigation row sortable while preserving link navigation", async () => {

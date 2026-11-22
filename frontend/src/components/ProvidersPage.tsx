@@ -11,6 +11,7 @@ import CircularProgress from "@mui/material/CircularProgress";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
+import DialogContentText from "@mui/material/DialogContentText";
 import DialogTitle from "@mui/material/DialogTitle";
 import Drawer from "@mui/material/Drawer";
 import FormControlLabel from "@mui/material/FormControlLabel";
@@ -19,6 +20,7 @@ import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
+import Switch from "@mui/material/Switch";
 import Tab from "@mui/material/Tab";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
@@ -43,6 +45,7 @@ Link,
 UNSAFE_DataRouterContext,
 useBlocker,
 useSearchParams,
+type NavigateOptions,
 } from "react-router";
 
 import Plus from "@mui/icons-material/AddOutlined";
@@ -66,6 +69,11 @@ SystemConfigResponse,
 UpstreamRuntimeState,
 } from "@/lib/types";
 import { CodexOAuthPanel } from "./CodexOAuthPanel";
+import {
+  commitUpstreamEntryDraft,
+  createUpstreamEntryDraft,
+  UpstreamEntryField,
+} from "./UpstreamEntryField";
 import { UpstreamKeyModels } from "./UpstreamKeyModels";
 
 const RulesEditor = lazy(() =>
@@ -100,7 +108,11 @@ interface Props {
   onMessage: (message: string) => void;
 }
 
-export function ProvidersPage(props: Props) {
+const UPSTREAM_TOGGLE_COOLDOWN_MS = 3000;
+
+export function ProvidersPage(
+  props: Props & { onToggleEnabled: (id: number, enabled: boolean) => Promise<void> },
+) {
   const { t } = useI18n();
   const [params, setParams] = useSearchParams();
   const id = Number(params.get("provider_id")) || null;
@@ -110,18 +122,50 @@ export function ProvidersPage(props: Props) {
     ? params.get("tab")!
     : "connection";
   const [create, setCreate] = useState(false);
-  const open = (id: number | null) =>
+  const [pendingEnabled, setPendingEnabled] = useState<Partial<Record<number, boolean | null>>>({});
+  const toggleLocks = useRef(new Map<number, { timeout?: number }>());
+  useEffect(() => {
+    const locks = toggleLocks.current;
+    return () => {
+      for (const lock of locks.values()) window.clearTimeout(lock.timeout);
+      locks.clear();
+    };
+  }, []);
+  const toggleEnabled = async (providerId: number, enabled: boolean) => {
+    const locks = toggleLocks.current;
+    if (locks.has(providerId)) return;
+    const startedAt = Date.now();
+    const lock: { timeout?: number } = {};
+    locks.set(providerId, lock);
+    setPendingEnabled((current) => ({ ...current, [providerId]: enabled }));
+    try {
+      await props.onToggleEnabled(providerId, enabled);
+    } catch (error) {
+      if (locks.get(providerId) !== lock) return;
+      setPendingEnabled((current) => ({ ...current, [providerId]: null }));
+      const message = error instanceof Error ? error.message : String(error);
+      props.onMessage(`${t("切换上游状态失败。")} ${message}`);
+    } finally {
+      if (locks.get(providerId) === lock) {
+        lock.timeout = window.setTimeout(() => {
+          locks.delete(providerId);
+          setPendingEnabled((current) => {
+            const next = { ...current };
+            delete next[providerId];
+            return next;
+          });
+        }, Math.max(0, UPSTREAM_TOGGLE_COOLDOWN_MS - (Date.now() - startedAt)));
+      }
+    }
+  };
+  const open = (id: number | null, options?: NavigateOptions) =>
     setParams((current) => {
       const next = new URLSearchParams(current);
-      if (id === null) {
-        next.delete("provider_id");
-        next.delete("tab");
-      } else {
-        next.set("provider_id", String(id));
-        next.delete("tab");
-      }
+      if (id === null) next.delete("provider_id");
+      else next.set("provider_id", String(id));
+      next.delete("tab");
       return next;
-    });
+    }, options);
   return (
     <Stack spacing={2}>
       <Stack
@@ -212,7 +256,6 @@ export function ProvidersPage(props: Props) {
                 <TableCell align="right">{p.key_count ?? 0}</TableCell>
                 <TableCell align="right">{p.model_count ?? 0}</TableCell>
                 <TableCell
-                  align="right"
                   title={
                     p.usage
                       ? `${t("请求")}: ${p.usage.request_count} · ${t("输入")}: ${p.usage.input_tokens} · ${t("输出")}: ${p.usage.output_tokens} · ${t("缓存读")}: ${p.usage.cache_read_input_tokens}`
@@ -222,22 +265,24 @@ export function ProvidersPage(props: Props) {
                   {p.usage ? formatCompactInteger(p.usage.total_tokens) : "—"}
                 </TableCell>
                 <TableCell>
-                  <Chip
-                    sx={{ height: 20, fontSize: 11, fontWeight: 500 }}
-                    color={
-                      !p.enabled
-                        ? "error"
-                        : p.routing_availability?.available
-                          ? "success"
-                          : "warning"
-                    }
-                    label={t(
-                      !p.enabled
-                        ? "停用"
-                        : p.routing_availability?.available
-                          ? "可用"
-                          : "暂不可用",
+                  <Switch
+                    size="small"
+                    checked={pendingEnabled[p.id] ?? p.enabled}
+                    disabled={pendingEnabled[p.id] !== undefined}
+                    color={pendingEnabled[p.id] !== undefined ? "default" : "primary"}
+                    title={t(
+                      pendingEnabled[p.id] !== undefined
+                        ? "处理中…"
+                        : !p.enabled
+                          ? "停用"
+                          : p.routing_availability?.available
+                            ? "可用"
+                            : "暂不可用",
                     )}
+                    slotProps={{
+                      input: { role: "switch", "aria-label": t("启用上游 {{name}}", { name: p.name }) },
+                    }}
+                    onChange={(event) => void toggleEnabled(p.id, event.target.checked)}
                   />
                 </TableCell>
                 <TableCell>
@@ -273,7 +318,7 @@ export function ProvidersPage(props: Props) {
               return next;
             })
           }
-          onClose={() => open(null)}
+          onClose={(options) => open(null, options)}
         />
       ) : null}
     </Stack>
@@ -289,8 +334,9 @@ function CreateUpstream(
   const [error, setError] = useState("");
   const [created, setCreated] = useState<number | null>(null);
   const [name, setName] = useState("");
-  const [urls, setUrls] = useState("");
-  const [secrets, setSecrets] = useState("");
+  const [urls, setUrls] = useState(createUpstreamEntryDraft);
+  const [secrets, setSecrets] = useState(createUpstreamEntryDraft);
+  const oauth = type === "openai_codex_oauth";
   const sync = async (id: number) => {
     await api.syncProviderModels(props.settings, id);
     await props.onRefresh();
@@ -299,28 +345,29 @@ function CreateUpstream(
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
-    setBusy(true);
     setError("");
+    const creating = created === null;
+    const nextUrls = creating
+      ? commitUpstreamEntryDraft("address", urls, { required: true })
+      : urls;
+    const nextSecrets = creating && !oauth
+      ? commitUpstreamEntryDraft("key", secrets, { required: true })
+      : secrets;
+    if (creating) {
+      setUrls(nextUrls);
+      if (!oauth) setSecrets(nextSecrets);
+      if (nextUrls.error || (!oauth && nextSecrets.error)) return;
+    }
+    setBusy(true);
     try {
       if (created) {
         await sync(created);
         return;
       }
-      const baseUrls = urls
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const keys = secrets
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const oauth = type === "openai_codex_oauth";
-      if (!baseUrls.length || (!oauth && !keys.length))
-        throw new Error(t("请填写服务地址和凭据。"));
       const result = await api.createProvider(props.settings, {
         name: name.trim(),
         provider_type: type,
-        endpoints: baseUrls.map((base_url, i) => ({
+        endpoints: nextUrls.entries.map(({ value: base_url }, i) => ({
           name: i ? "备用地址" : "主地址",
           base_url,
           enabled: true,
@@ -329,7 +376,7 @@ function CreateUpstream(
         })),
         keys: oauth
           ? []
-          : keys.map((secret, i) => ({
+          : nextSecrets.entries.map(({ value: secret }, i) => ({
               name: `Key ${i + 1}`,
               secret,
               enabled: true,
@@ -338,7 +385,7 @@ function CreateUpstream(
             })),
       });
       setCreated(result.id);
-      setSecrets("");
+      setSecrets(createUpstreamEntryDraft());
       await props.onRefresh();
       if (oauth) props.onCreated(result.id);
       else await sync(result.id);
@@ -422,9 +469,11 @@ function CreateUpstream(
             onChange={(e) => {
               setType(e.target.value);
               if (e.target.value === "openai_codex_oauth")
-                setUrls("https://chatgpt.com/backend-api/codex");
+                setUrls(createUpstreamEntryDraft([
+                  "https://chatgpt.com/backend-api/codex",
+                ]));
               else if (e.target.value === "anthropic")
-                setUrls("https://api.anthropic.com");
+                setUrls(createUpstreamEntryDraft(["https://api.anthropic.com"]));
             }}
           >
             {providerTypes.map(([v, l]) => (
@@ -444,25 +493,18 @@ function CreateUpstream(
                     : "支持 OpenAI 兼容协议。",
             )}
           </Typography>
-          <TextField
-            label={t("服务地址（每行一个）")}
-            multiline
-            minRows={2}
-            required
-            value={urls}
+          <UpstreamEntryField
+            kind="address"
+            draft={urls}
             disabled={busy || !!created}
-            onChange={(e) => setUrls(e.target.value)}
+            onChange={setUrls}
           />
-          {type !== "openai_codex_oauth" ? (
-            <TextField
-              label={t("API Key（每行一个）")}
-              multiline
-              minRows={2}
-              required={!created}
-              value={secrets}
+          {!oauth ? (
+            <UpstreamEntryField
+              kind="key"
+              draft={secrets}
               disabled={busy || !!created}
-              autoComplete="off"
-              onChange={(e) => setSecrets(e.target.value)}
+              onChange={setSecrets}
             />
           ) : null}
           <Button
@@ -493,7 +535,7 @@ function UpstreamDetail(
     id: number;
     tab: string;
     setTab: (tab: string) => void;
-    onClose: () => void;
+    onClose: (options?: NavigateOptions) => void;
   },
 ) {
   const { t } = useI18n();
@@ -503,9 +545,12 @@ function UpstreamDetail(
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [discard, setDiscard] = useState(false);
-  const [remove, setRemove] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{
+    error: string;
+  } | null>(null);
   const [menu, setMenu] = useState<HTMLElement | null>(null);
   const active = useRef(true);
+  const deletionStatus = useRef<"idle" | "pending" | "deleted">("idle");
   const hasDirty = Object.values(dirty).some(Boolean);
   const dataRouter = useContext(UNSAFE_DataRouterContext);
   const mark = (section: string, value: boolean) =>
@@ -563,6 +608,28 @@ function UpstreamDetail(
   };
   const action = (operation: () => Promise<unknown>, section?: string) =>
     void run(operation, section).catch(() => {});
+  const confirmDeletion = async () => {
+    if (busy || deletionStatus.current !== "idle") return;
+    deletionStatus.current = "pending";
+    setBusy(true);
+    setDeleteConfirmation({ error: "" });
+    try {
+      await api.deleteProvider(props.settings, props.id);
+    } catch (e) {
+      deletionStatus.current = "idle";
+      setDeleteConfirmation({
+        error: e instanceof Error ? e.message : String(e),
+      });
+      setBusy(false);
+      return;
+    }
+
+    if (!active.current) return;
+    // The router reads the blocker before React commits state updates.
+    deletionStatus.current = "deleted";
+    props.onClose({ replace: true });
+    void props.onRefresh();
+  };
   return (
     <Drawer
       anchor="right"
@@ -638,6 +705,7 @@ function UpstreamDetail(
           </Tabs>
           <IconButton
             aria-label={t("更多操作")}
+            disabled={busy}
             onClick={(e) => setMenu(e.currentTarget)}
           >
             <MoreHorizontal />
@@ -646,7 +714,7 @@ function UpstreamDetail(
             <MenuItem
               onClick={() => {
                 setMenu(null);
-                setRemove(true);
+                setDeleteConfirmation({ error: "" });
               }}
             >
               {t("删除整个上游")}
@@ -658,7 +726,14 @@ function UpstreamDetail(
         sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: { xs: 2, sm: 3 } }}
       >
         {dataRouter ? (
-          <UnsavedNavigationGuard dirty={hasDirty} busy={busy} id={props.id} />
+          <UnsavedNavigationGuard
+            shouldBlock={() =>
+              deletionStatus.current !== "deleted" && (hasDirty || busy)
+            }
+            busy={busy}
+            id={props.id}
+            showConfirmation={deleteConfirmation === null}
+          />
         ) : null}
         {error ? (
           <Alert severity="error" sx={{ mb: 2 }}>
@@ -727,39 +802,47 @@ function UpstreamDetail(
             >
               {t("取消")}
             </Button>
-            <Button color="error" loading={busy} onClick={props.onClose}>
+            <Button
+              color="error"
+              loading={busy}
+              onClick={() => props.onClose()}
+            >
               {t("放弃修改")}
             </Button>
           </DialogActions>
         </Dialog>
         <Dialog
-          open={remove}
-          onClose={busy ? undefined : () => setRemove(false)}
+          open={deleteConfirmation !== null}
+          onClose={busy ? undefined : () => setDeleteConfirmation(null)}
           aria-label={t("确认删除整个上游？历史数据会保留。")}
+          aria-describedby={hasDirty ? "delete-upstream-draft" : undefined}
         >
           <DialogTitle>{t("确认删除整个上游？历史数据会保留。")}</DialogTitle>
           <DialogContent>
-            {error ? <Alert severity="error">{error}</Alert> : null}
+            {hasDirty ? (
+              <DialogContentText id="delete-upstream-draft">
+                {t("删除后，未保存的修改会丢失。")}
+              </DialogContentText>
+            ) : null}
+            {deleteConfirmation?.error ? (
+              <Alert severity="error" sx={{ mt: hasDirty ? 1 : 0 }}>
+                {deleteConfirmation.error}
+              </Alert>
+            ) : null}
           </DialogContent>
           <DialogActions>
             <Button
               autoFocus
               variant="outlined"
               disabled={busy}
-              onClick={() => setRemove(false)}
+              onClick={() => setDeleteConfirmation(null)}
             >
               {t("取消")}
             </Button>
             <Button
               color="error"
               loading={busy}
-              onClick={() =>
-                action(async () => {
-                  await api.deleteProvider(props.settings, props.id);
-                  await props.onRefresh();
-                  props.onClose();
-                })
-              }
+              onClick={() => void confirmDeletion()}
             >
               {t("确认删除")}
             </Button>
@@ -1831,25 +1914,27 @@ function RuntimePanel({
 }
 
 function UnsavedNavigationGuard({
-  dirty,
+  shouldBlock,
   busy,
   id,
+  showConfirmation,
 }: {
-  dirty: boolean;
+  shouldBlock: () => boolean;
   busy: boolean;
   id: number;
+  showConfirmation: boolean;
 }) {
   const { t } = useI18n();
   const blocker = useBlocker(
     ({ nextLocation }) =>
-      (dirty || busy) &&
+      shouldBlock() &&
       (nextLocation.pathname !== "/upstreams" ||
         Number(new URLSearchParams(nextLocation.search).get("provider_id")) !==
           id),
   );
   return (
     <Dialog
-      open={blocker.state === "blocked"}
+      open={showConfirmation && blocker.state === "blocked"}
       onClose={
         busy ? undefined : () => blocker.state === "blocked" && blocker.reset()
       }
