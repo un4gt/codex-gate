@@ -24,7 +24,6 @@ import Menu from "@mui/icons-material/MenuOutlined";
 import Bell from "@mui/icons-material/NotificationsOutlined";
 import RefreshCw from "@mui/icons-material/RefreshOutlined";
 import Settings from "@mui/icons-material/SettingsOutlined";
-import SquareTerminal from "@mui/icons-material/TerminalOutlined";
 import ShieldCheck from "@mui/icons-material/VerifiedUserOutlined";
 import Boxes from "@mui/icons-material/ViewInArOutlined";
 import EyeOff from "@mui/icons-material/VisibilityOffOutlined";
@@ -58,6 +57,7 @@ useLocation,
 import { ApiKeysPage } from "@/components/ApiKeysPage";
 import { LocaleSwitch } from "@/components/LocaleSwitch";
 import { OverviewSkeleton } from "@/components/console/OverviewSkeleton";
+import { LittleGateLogo, useLittleGateFavicon } from "@/components/console/LittleGateLogo";
 import { LogsPage } from "@/components/LogsPage";
 import { ModelsPage } from "@/components/ModelsPage";
 import { NotificationsPage } from "@/components/NotificationsPage";
@@ -668,22 +668,7 @@ function TopShell(props: { data: AppDataContext; children: ReactNode }) {
             gap: "0.75rem",
           }}
         >
-          <Box
-            sx={{
-              display: "flex",
-              width: "2.5rem",
-              height: "2.5rem",
-              flexShrink: "0",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: "8px",
-              backgroundColor: "var(--mui-palette-primary-main)",
-              color: "var(--mui-palette-primary-contrastText)",
-              boxShadow: "0 3px 8px -3px rgb(54 89 207 / 0.45)",
-            }}
-          >
-            <SquareTerminal fontSize="small" />
-          </Box>
+          <LittleGateLogo size={40} />
           <Box sx={{ minWidth: "0" }}>
             <Box
               sx={{
@@ -1237,7 +1222,7 @@ function ConnectionGate(props: {
             color: "var(--mui-palette-text-secondary)",
           }}
         >
-          <SquareTerminal fontSize="small" />
+          <LittleGateLogo size={20} />
           <Box component="span">little-gate</Box>
         </Box>
         <LocaleSwitch />
@@ -1263,22 +1248,7 @@ function ConnectionGate(props: {
             textAlign: "center",
           }}
         >
-          <Box
-            sx={{
-              display: "flex",
-              width: "3rem",
-              height: "3rem",
-              flexShrink: "0",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: "8px",
-              backgroundColor: "var(--mui-palette-primary-main)",
-              color: "var(--mui-palette-primary-contrastText)",
-              boxShadow: "0 3px 8px -3px rgb(54 89 207 / 0.45)",
-            }}
-          >
-            <SquareTerminal fontSize="small" />
-          </Box>
+          <LittleGateLogo size={48} />
           <Box>
             <Box
               sx={{
@@ -2134,6 +2104,7 @@ function LegacyPricesRedirect() {
   return <Navigate to={`/models/prices${search}`} replace />;
 }
 export default function Root() {
+  useLittleGateFavicon();
   const [router, setRouter] = useState<ReturnType<
     typeof createBrowserRouter
   > | null>(null);
