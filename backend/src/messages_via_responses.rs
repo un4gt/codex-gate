@@ -821,11 +821,11 @@ impl ResponsesSseToMessages {
         }
         let listed: BTreeSet<_> = parts.iter().map(|(key, _, _)| *key).collect();
         if self.blocks.iter().any(|(key, block)| {
-            !listed.contains(key)
-                && !(reason == "max_tokens"
-                    && block.index.is_none()
-                    && block.state != BlockState::Complete
-                    && matches!(block.kind, BlockKind::Tool { .. }))
+            let truncated_pending_tool = reason == "max_tokens"
+                && block.index.is_none()
+                && block.state != BlockState::Complete
+                && matches!(block.kind, BlockKind::Tool { .. });
+            !(listed.contains(key) || truncated_pending_tool)
         }) {
             return Err(
                 "Responses terminal output omitted an emitted or complete content block".into(),
