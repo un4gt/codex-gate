@@ -17,6 +17,10 @@ impl EndpointSelectorStrategy {
     }
 }
 
+pub fn rank_key_refs<'a>(items: &'a [&'a UpstreamKey]) -> Vec<&'a UpstreamKey> {
+    order_by_priority_weight_refs(items, |key| (key.enabled, key.priority, key.weight))
+}
+
 pub fn rank_key_refs_with_health<'a>(
     items: &'a [&'a UpstreamKey],
     health: &UpstreamKeyHealthBook,

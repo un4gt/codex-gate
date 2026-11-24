@@ -36,6 +36,15 @@ const REQUEST_LOG_SELECT_COLUMNS: &str = r#"
   request_logs.created_at_ms
 "#;
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct ProviderModelPatch {
+    pub alias: Option<Option<String>>,
+    pub enabled: Option<bool>,
+    pub responses_via_chat_enabled: Option<bool>,
+    pub messages_via_chat_enabled: Option<bool>,
+    pub messages_via_responses_enabled: Option<bool>,
+}
+
 #[derive(Debug)]
 pub struct DbError {
     msg: String,
@@ -2016,7 +2025,7 @@ ORDER BY provider_id ASC, priority ASC, id ASC
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, messages_via_responses_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 WHERE provider_id = ?
 ORDER BY upstream_model ASC, id ASC
@@ -2038,6 +2047,9 @@ ORDER BY upstream_model ASC, id ASC
                             != 0,
                         messages_via_chat_enabled: row.get::<i64, _>("messages_via_chat_enabled")
                             != 0,
+                        messages_via_responses_enabled: row
+                            .get::<i64, _>("messages_via_responses_enabled")
+                            != 0,
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -2046,7 +2058,7 @@ ORDER BY upstream_model ASC, id ASC
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, messages_via_responses_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 WHERE provider_id = $1
 ORDER BY upstream_model ASC, id ASC
@@ -2067,6 +2079,8 @@ ORDER BY upstream_model ASC, id ASC
                         responses_via_chat_enabled: row
                             .get::<bool, _>("responses_via_chat_enabled"),
                         messages_via_chat_enabled: row.get::<bool, _>("messages_via_chat_enabled"),
+                        messages_via_responses_enabled: row
+                            .get::<bool, _>("messages_via_responses_enabled"),
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -2080,7 +2094,7 @@ ORDER BY upstream_model ASC, id ASC
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, messages_via_responses_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 ORDER BY provider_id ASC, upstream_model ASC, id ASC
 "#,
@@ -2100,6 +2114,9 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
                             != 0,
                         messages_via_chat_enabled: row.get::<i64, _>("messages_via_chat_enabled")
                             != 0,
+                        messages_via_responses_enabled: row
+                            .get::<i64, _>("messages_via_responses_enabled")
+                            != 0,
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -2108,7 +2125,7 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, created_at_ms, updated_at_ms
+SELECT id, provider_id, upstream_model, alias, enabled, available, responses_via_chat_enabled, messages_via_chat_enabled, messages_via_responses_enabled, created_at_ms, updated_at_ms
 FROM provider_models
 ORDER BY provider_id ASC, upstream_model ASC, id ASC
 "#,
@@ -2127,6 +2144,8 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
                         responses_via_chat_enabled: row
                             .get::<bool, _>("responses_via_chat_enabled"),
                         messages_via_chat_enabled: row.get::<bool, _>("messages_via_chat_enabled"),
+                        messages_via_responses_enabled: row
+                            .get::<bool, _>("messages_via_responses_enabled"),
                         created_at_ms: row.get::<i64, _>("created_at_ms"),
                         updated_at_ms: row.get::<i64, _>("updated_at_ms"),
                     })
@@ -2209,138 +2228,79 @@ ORDER BY provider_id ASC, upstream_model ASC, id ASC
         }
     }
 
-    pub async fn update_provider_model(
+    pub(crate) async fn update_provider_model(
         &self,
         id: i64,
-        alias: Option<Option<String>>,
-        enabled: Option<bool>,
-        responses_via_chat_enabled: Option<bool>,
-        messages_via_chat_enabled: Option<bool>,
+        patch: ProviderModelPatch,
         now_ms: i64,
     ) -> Result<(), DbError> {
+        let ProviderModelPatch {
+            alias,
+            enabled,
+            responses_via_chat_enabled,
+            messages_via_chat_enabled,
+            messages_via_responses_enabled,
+        } = patch;
         if alias.is_none()
             && enabled.is_none()
             && responses_via_chat_enabled.is_none()
             && messages_via_chat_enabled.is_none()
+            && messages_via_responses_enabled.is_none()
         {
             return Ok(());
         }
-
-        let alias = alias.map(|value| {
-            value.and_then(|raw| {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            })
+        let update_alias = alias.is_some();
+        let alias = alias.flatten().and_then(|raw| {
+            let trimmed = raw.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
         });
-
         match self {
             Database::Sqlite(pool) => {
-                if let Some(alias) = alias {
-                    sqlx::query(
-                        r#"
-UPDATE provider_models
-SET alias = ?, updated_at_ms = ?
-WHERE id = ?
-"#,
-                    )
-                    .bind(alias)
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                if let Some(enabled) = enabled {
-                    sqlx::query(
-                        r#"
-UPDATE provider_models
-SET enabled = ?, updated_at_ms = ?
-WHERE id = ?
-"#,
-                    )
-                    .bind(if enabled { 1_i64 } else { 0_i64 })
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                if let Some(responses_via_chat_enabled) = responses_via_chat_enabled {
-                    sqlx::query(
-                        "UPDATE provider_models SET responses_via_chat_enabled = ?, updated_at_ms = ? WHERE id = ?",
-                    )
-                    .bind(if responses_via_chat_enabled { 1_i64 } else { 0_i64 })
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                if let Some(messages_via_chat_enabled) = messages_via_chat_enabled {
-                    sqlx::query(
-                        "UPDATE provider_models SET messages_via_chat_enabled = ?, updated_at_ms = ? WHERE id = ?",
-                    )
-                    .bind(if messages_via_chat_enabled { 1_i64 } else { 0_i64 })
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                Ok(())
+                sqlx::query(
+                    r#"UPDATE provider_models SET
+                        alias = CASE WHEN ? THEN ? ELSE alias END,
+                        enabled = COALESCE(?, enabled),
+                        responses_via_chat_enabled = COALESCE(?, responses_via_chat_enabled),
+                        messages_via_chat_enabled = COALESCE(?, messages_via_chat_enabled),
+                        messages_via_responses_enabled = COALESCE(?, messages_via_responses_enabled),
+                        updated_at_ms = ?
+                        WHERE id = ?"#,
+                )
+                .bind(update_alias)
+                .bind(alias)
+                .bind(enabled)
+                .bind(responses_via_chat_enabled)
+                .bind(messages_via_chat_enabled)
+                .bind(messages_via_responses_enabled)
+                .bind(now_ms)
+                .bind(id)
+                .execute(pool)
+                .await?;
             }
             Database::Postgres(pool) => {
-                if let Some(alias) = alias {
-                    sqlx::query(
-                        r#"
-UPDATE provider_models
-SET alias = $1, updated_at_ms = $2
-WHERE id = $3
-"#,
-                    )
-                    .bind(alias)
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                if let Some(enabled) = enabled {
-                    sqlx::query(
-                        r#"
-UPDATE provider_models
-SET enabled = $1, updated_at_ms = $2
-WHERE id = $3
-"#,
-                    )
-                    .bind(enabled)
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                if let Some(responses_via_chat_enabled) = responses_via_chat_enabled {
-                    sqlx::query(
-                        "UPDATE provider_models SET responses_via_chat_enabled = $1, updated_at_ms = $2 WHERE id = $3",
-                    )
-                    .bind(responses_via_chat_enabled)
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                if let Some(messages_via_chat_enabled) = messages_via_chat_enabled {
-                    sqlx::query(
-                        "UPDATE provider_models SET messages_via_chat_enabled = $1, updated_at_ms = $2 WHERE id = $3",
-                    )
-                    .bind(messages_via_chat_enabled)
-                    .bind(now_ms)
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                }
-                Ok(())
+                sqlx::query(
+                    r#"UPDATE provider_models SET
+                        alias = CASE WHEN $1 THEN $2 ELSE alias END,
+                        enabled = COALESCE($3, enabled),
+                        responses_via_chat_enabled = COALESCE($4, responses_via_chat_enabled),
+                        messages_via_chat_enabled = COALESCE($5, messages_via_chat_enabled),
+                        messages_via_responses_enabled = COALESCE($6, messages_via_responses_enabled),
+                        updated_at_ms = $7
+                        WHERE id = $8"#,
+                )
+                .bind(update_alias)
+                .bind(alias)
+                .bind(enabled)
+                .bind(responses_via_chat_enabled)
+                .bind(messages_via_chat_enabled)
+                .bind(messages_via_responses_enabled)
+                .bind(now_ms)
+                .bind(id)
+                .execute(pool)
+                .await?;
             }
         }
+        Ok(())
     }
 
     pub async fn delete_provider_model(&self, id: i64) -> Result<(), DbError> {
@@ -5572,6 +5532,7 @@ CREATE TABLE IF NOT EXISTS provider_models (
   available INTEGER NOT NULL DEFAULT 1,
   responses_via_chat_enabled INTEGER NOT NULL DEFAULT 0,
   messages_via_chat_enabled INTEGER NOT NULL DEFAULT 0,
+  messages_via_responses_enabled INTEGER NOT NULL DEFAULT 0,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   FOREIGN KEY(provider_id) REFERENCES upstream_providers(id) ON DELETE CASCADE
@@ -6019,6 +5980,7 @@ CREATE TABLE IF NOT EXISTS provider_models (
   available BOOLEAN NOT NULL DEFAULT TRUE,
   responses_via_chat_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   messages_via_chat_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  messages_via_responses_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL,
   UNIQUE(provider_id, upstream_model)
@@ -6688,6 +6650,13 @@ async fn ensure_sqlite_responses_via_chat_columns(pool: &SqlitePool) -> Result<(
     if !sqlite_column_exists(pool, "provider_models", "messages_via_chat_enabled").await? {
         sqlx::query(
             "ALTER TABLE provider_models ADD COLUMN messages_via_chat_enabled INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+    }
+    if !sqlite_column_exists(pool, "provider_models", "messages_via_responses_enabled").await? {
+        sqlx::query(
+            "ALTER TABLE provider_models ADD COLUMN messages_via_responses_enabled INTEGER NOT NULL DEFAULT 0",
         )
         .execute(pool)
         .await?;
@@ -7513,6 +7482,11 @@ async fn ensure_postgres_responses_via_chat_columns(pool: &PgPool) -> Result<(),
     .await?;
     sqlx::query(
         "ALTER TABLE provider_models ADD COLUMN IF NOT EXISTS messages_via_chat_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE provider_models ADD COLUMN IF NOT EXISTS messages_via_responses_enabled BOOLEAN NOT NULL DEFAULT FALSE",
     )
     .execute(pool)
     .await?;
@@ -8880,10 +8854,13 @@ CREATE TABLE stats_events (
             .expect("model-a");
         db.update_provider_model(
             model_a.id,
-            Some(Some("alias-a".to_string())),
-            Some(false),
-            Some(true),
-            None,
+            ProviderModelPatch {
+                alias: Some(Some("alias-a".to_string())),
+                enabled: Some(false),
+                responses_via_chat_enabled: Some(true),
+                messages_via_responses_enabled: Some(true),
+                ..ProviderModelPatch::default()
+            },
             3,
         )
         .await

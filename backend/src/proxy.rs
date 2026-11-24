@@ -25,6 +25,10 @@ use crate::http::{self, HttpResponse};
 use crate::messages_via_chat::{
     ChatSseToMessages, chat_response_to_messages, messages_request_to_chat,
 };
+use crate::messages_via_responses::{
+    ResponsesSseToMessages, messages_count_to_responses, messages_request_to_responses,
+    parse_reported_usage, reported_event_usage, responses_response_to_messages,
+};
 use crate::metrics::{FailoverKind, RequestMetric};
 use crate::openai::{
     OpenAiRequestInfo, ensure_include_usage, parse_request_info, rewrite_root_string_field,
@@ -46,8 +50,8 @@ use crate::util;
 const CODEX_NON_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProxyOperation {
-    Messages,
+pub(crate) enum ProxyOperation {
+    Generate,
     CountTokens,
 }
 
@@ -90,7 +94,7 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         (&Method::POST, "/v1/messages") => {
             proxy_openai(
                 ApiFormat::AnthropicMessages,
-                ProxyOperation::Messages,
+                ProxyOperation::Generate,
                 req,
                 state,
             )
@@ -108,14 +112,14 @@ pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse 
         (&Method::POST, "/v1/chat/completions") => {
             proxy_openai(
                 ApiFormat::ChatCompletions,
-                ProxyOperation::Messages,
+                ProxyOperation::Generate,
                 req,
                 state,
             )
             .await
         }
         (&Method::POST, "/v1/responses") => {
-            proxy_openai(ApiFormat::Responses, ProxyOperation::Messages, req, state).await
+            proxy_openai(ApiFormat::Responses, ProxyOperation::Generate, req, state).await
         }
         _ => http::json_error(StatusCode::NOT_FOUND, "not found"),
     }
@@ -339,6 +343,9 @@ async fn proxy_openai(
     let now_ms = util::now_ms();
 
     let record_request_metric = |http_status: Option<i32>, error_type: Option<&str>| {
+        if operation == ProxyOperation::CountTokens {
+            return;
+        }
         state.metrics.record_request(
             api_format,
             RequestMetric {
@@ -418,19 +425,24 @@ async fn proxy_openai(
 
     let request_efforts = parking_lot::Mutex::new((None::<String>, None::<String>));
     let request_tiers = parking_lot::Mutex::new((None::<String>, None::<String>, None::<String>));
-    let submit_err = |permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
-                      status: StatusCode,
-                      error_type: &'static str,
-                      error_message: String,
-                      provider_id: Option<i64>,
-                      endpoint_id: Option<i64>,
-                      upstream_key_id: Option<i64>,
-                      model: Option<String>| {
-        routing_trace.lock().terminal = Some(serde_json::json!({
-            "status": status.as_u16(),
-            "error_type": error_type,
-            "message": error_message.clone(),
-        }));
+    let submit = |permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
+                  status: StatusCode,
+                  error: Option<(&'static str, String)>,
+                  provider_id: Option<i64>,
+                  endpoint_id: Option<i64>,
+                  upstream_key_id: Option<i64>,
+                  upstream_api_format: Option<&'static str>,
+                  model: Option<String>| {
+        let (error_type, error_message) = error
+            .map(|(kind, message)| (Some(kind.to_owned()), Some(message)))
+            .unwrap_or_default();
+        if error_type.is_some() {
+            routing_trace.lock().terminal = Some(serde_json::json!({
+                "status": status.as_u16(),
+                "error_type": error_type,
+                "message": error_message,
+            }));
+        }
         let (requested_service_tier, upstream_service_tier, service_tier) =
             request_tiers.lock().clone();
         let (requested_reasoning_effort, upstream_reasoning_effort) =
@@ -445,11 +457,11 @@ async fn proxy_openai(
                 endpoint_id,
                 upstream_key_id,
                 api_format: api_format_name(api_format),
-                upstream_api_format: None,
+                upstream_api_format,
                 model,
                 http_status: Some(status.as_u16() as i32),
-                error_type: Some(error_type.to_string()),
-                error_message: Some(error_message),
+                error_type,
+                error_message,
                 t_stream_ms: None,
                 t_first_byte_ms: None,
                 t_first_token_ms: None,
@@ -459,7 +471,10 @@ async fn proxy_openai(
                 price_version_id: None,
                 price_tier_index: None,
                 time_ms: util::now_ms(),
-                span_kind: "request",
+                span_kind: match operation {
+                    ProxyOperation::Generate => "request",
+                    ProxyOperation::CountTokens => "count_tokens",
+                },
                 transport: "http",
                 parent_id: None,
                 ws_session_id: None,
@@ -471,6 +486,25 @@ async fn proxy_openai(
                 service_tier,
                 routing_trace: Some(routing_trace_value(&routing_trace)),
             },
+        );
+    };
+    let submit_err = |permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
+                      status: StatusCode,
+                      error_type: &'static str,
+                      error_message: String,
+                      provider_id: Option<i64>,
+                      endpoint_id: Option<i64>,
+                      upstream_key_id: Option<i64>,
+                      model: Option<String>| {
+        submit(
+            permit,
+            status,
+            Some((error_type, error_message)),
+            provider_id,
+            endpoint_id,
+            upstream_key_id,
+            None,
+            model,
         );
     };
 
@@ -532,8 +566,12 @@ async fn proxy_openai(
     let request_headers = parts.headers.clone();
     let request_path_and_query = parts.uri.path_and_query().cloned();
     let request_override_context = RequestOverrideContext::new();
-    let affinity_identity = extract_affinity_identity(&request_headers, &body_bytes, api_key.id)
-        .map(|i| i.for_model(&model_name));
+    let affinity_identity = if operation == ProxyOperation::Generate {
+        extract_affinity_identity(&request_headers, &body_bytes, api_key.id)
+            .map(|i| i.for_model(&model_name))
+    } else {
+        None
+    };
     let existing_affinity_binding = affinity_identity
         .as_ref()
         .and_then(|identity| state.affinity.lookup(identity, util::now_ms()));
@@ -552,6 +590,7 @@ async fn proxy_openai(
         &api_key,
         affinity_identity.as_ref(),
         true,
+        operation,
     )
     .await
     {
@@ -624,25 +663,55 @@ async fn proxy_openai(
             return route_resolution_error_response(&error, &model_name, api_format);
         }
     }
-    if operation == ProxyOperation::CountTokens {
-        let has_native_messages = plan
-            .attempts
-            .iter()
-            .any(|attempt| !attempt.protocol.is_messages_via_chat());
-        if !has_native_messages {
-            let input_tokens =
-                crate::messages_via_chat::estimate_messages_input_tokens(&body_bytes)
-                    .unwrap_or_else(|| (body_bytes.len() / 4).max(1) as i64);
-            record_request_metric(Some(StatusCode::OK.as_u16() as i32), None);
-            return http::json(
-                StatusCode::OK,
-                &serde_json::json!({ "input_tokens": input_tokens }),
-            );
-        }
-        plan.attempts
-            .retain(|attempt| !attempt.protocol.is_messages_via_chat());
-    }
     routing_trace.lock().model_route = plan.route_policy.clone();
+    if operation == ProxyOperation::CountTokens {
+        return match count_messages_tokens(
+            &state,
+            &parts,
+            &body_bytes,
+            &plan.attempts,
+            &routing_trace,
+        )
+        .await
+        {
+            Ok((input_tokens, upstream)) => {
+                let upstream_api_format =
+                    upstream.map(|route| api_format_name(route.protocol.upstream_api_format));
+                routing_trace.lock().terminal = Some(serde_json::json!({
+                    "status": 200,
+                    "input_tokens": input_tokens,
+                    "count_source": upstream_api_format.unwrap_or("local_estimate"),
+                }));
+                submit(
+                    &mut telemetry_permit,
+                    StatusCode::OK,
+                    None,
+                    upstream.map(|route| route.provider.id),
+                    upstream.map(|route| route.endpoint.id),
+                    upstream.map(|route| route.key.id),
+                    upstream_api_format,
+                    Some(model_name),
+                );
+                http::json(
+                    StatusCode::OK,
+                    &serde_json::json!({ "input_tokens": input_tokens }),
+                )
+            }
+            Err(failure) => {
+                submit_err(
+                    &mut telemetry_permit,
+                    failure.status,
+                    failure.error_type,
+                    failure.error_message.clone(),
+                    failure.provider_id,
+                    failure.endpoint_id,
+                    failure.upstream_key_id,
+                    Some(model_name),
+                );
+                proxy_error(api_format, failure.status, failure.error_message)
+            }
+        };
+    }
     let affinity_identity = if plan.sticky { affinity_identity } else { None };
     let affinity_binding = apply_affinity_to_plan(
         &state,
@@ -754,17 +823,28 @@ async fn proxy_openai(
                     return http::json_error(StatusCode::BAD_REQUEST, error);
                 }
             }
-        } else if resolved.protocol.is_messages_via_chat() {
-            match messages_request_to_chat(
+        } else if resolved.protocol.is_messages_conversion() {
+            let via_responses = resolved.protocol.upstream_api_format == ApiFormat::Responses;
+            let convert = if via_responses {
+                messages_request_to_responses
+            } else {
+                messages_request_to_chat
+            };
+            let failure = if via_responses {
+                "messages_via_responses_request_failed"
+            } else {
+                "messages_via_chat_request_failed"
+            };
+            match convert(
                 &body_bytes,
                 &resolved.upstream_model,
                 affinity_identity.as_ref(),
             ) {
                 Ok(converted) => {
                     routing_trace.lock().conversion = Some(serde_json::json!({
-                        "mode": "messages_via_chat",
+                        "mode": resolved.protocol.conversion_name(),
                         "client_api_format": "messages",
-                        "upstream_api_format": "chat_completions",
+                        "upstream_api_format": api_format_name(resolved.protocol.upstream_api_format),
                         "warnings": converted.context.warnings,
                     }));
                     (converted.body, None)
@@ -774,7 +854,7 @@ async fn proxy_openai(
                     submit_err(
                         &mut telemetry_permit,
                         StatusCode::BAD_REQUEST,
-                        "messages_via_chat_request_failed",
+                        failure,
                         error.clone(),
                         Some(resolved.provider.id),
                         Some(resolved.endpoint.id),
@@ -783,7 +863,7 @@ async fn proxy_openai(
                     );
                     record_request_metric(
                         Some(StatusCode::BAD_REQUEST.as_u16() as i32),
-                        Some("messages_via_chat_request_failed"),
+                        Some(failure),
                     );
                     return proxy_error(api_format, StatusCode::BAD_REQUEST, error);
                 }
@@ -1353,6 +1433,8 @@ async fn proxy_openai(
         let t_stream_ms = upstream_response_elapsed_ms(&upstream_resp, start);
         let status_code = upstream_resp.status();
         let status_i32 = status_code.as_u16() as i32;
+        let strict_responses_usage =
+            resolved.protocol.conversion == Some(ConversionMode::MessagesViaResponses);
         state.quota.observe_response(
             resolved.key.id,
             status_i32,
@@ -1397,6 +1479,7 @@ async fn proxy_openai(
             retry_body_has_usage(
                 upstream_resp.body_mut(),
                 api_format_name(resolved.protocol.upstream_api_format),
+                strict_responses_usage,
                 is_sse,
                 budget
                     .remaining()
@@ -1520,6 +1603,7 @@ async fn proxy_openai(
             start,
             attempt_start,
             is_sse,
+            raw_responses_usage: strict_responses_usage && !status_code.is_success(),
             price: resolved.price.clone(),
             usage_capture_bytes: plan.runtime.usage_capture_bytes,
             usage_capture_tail_bytes: plan.runtime.usage_capture_tail_bytes,
@@ -1559,6 +1643,36 @@ async fn proxy_openai(
                 add_retry_after(&mut resp_parts.headers, plan_retry_at(&state, &plan));
             }
             let tap = ProxyTapBody::new(body, tap_config, telemetry_permit.take(), reservation);
+            if resolved.protocol.conversion == Some(ConversionMode::MessagesViaResponses) {
+                let payload = time::timeout(
+                    budget
+                        .remaining()
+                        .min(provider_timeout(&resolved.provider, &state)),
+                    Limited::new(tap, state.config.max_request_bytes).collect(),
+                )
+                .await;
+                let error = match payload {
+                    Ok(Ok(body)) => serde_json::from_slice::<Value>(&body.to_bytes()).ok(),
+                    _ => None,
+                };
+                let detail = error
+                    .as_ref()
+                    .and_then(|value| value.pointer("/error/message"))
+                    .and_then(Value::as_str);
+                let mut response = proxy_error(
+                    api_format,
+                    status_code,
+                    detail.map(str::to_owned).unwrap_or_else(|| {
+                        format!("Responses upstream returned HTTP {status_i32}")
+                    }),
+                );
+                for name in ["retry-after", "x-request-id", "request-id"] {
+                    if let Some(value) = resp_parts.headers.get(name) {
+                        response.headers_mut().insert(name, value.clone());
+                    }
+                }
+                return response;
+            }
             return Response::from_parts(resp_parts, http::boxed(tap));
         }
         if is_codex_oauth && codex_downstream_stream == Some(false) {
@@ -1609,6 +1723,7 @@ async fn proxy_openai(
             match preflight_sse(
                 body,
                 upstream_api_format_str,
+                strict_responses_usage,
                 state
                     .config
                     .stream_preflight_timeout
@@ -1832,19 +1947,51 @@ async fn proxy_openai(
             return Response::from_parts(resp_parts, http::boxed(tap));
         }
 
-        if resolved.protocol.is_messages_via_chat() {
+        if resolved.protocol.is_messages_conversion() {
+            let via_responses = resolved.protocol.upstream_api_format == ApiFormat::Responses;
             resp_parts.headers.remove(CONTENT_LENGTH);
             if is_sse {
                 resp_parts.headers.insert(
                     CONTENT_TYPE,
                     hyper::header::HeaderValue::from_static("text/event-stream; charset=utf-8"),
                 );
+                if via_responses {
+                    let converted = ConvertedSseBody::messages_from_responses(
+                        body,
+                        &model_name,
+                        state.config.max_request_bytes,
+                    );
+                    let tap = ProxyTapBody::with_handlers(
+                        converted,
+                        tap_config,
+                        telemetry_permit.take(),
+                        reservation,
+                        |body, message| body.project().converter.fail_stream(message),
+                        |body| match body.project().converter {
+                            SseConverter::MessagesFromResponses(converter) => {
+                                Some(converter.reported_usage())
+                            }
+                            _ => None,
+                        },
+                    );
+                    return Response::from_parts(resp_parts, http::boxed(tap));
+                }
                 let converted = ConvertedSseBody::messages(body, state.config.max_request_bytes);
                 let tap =
                     ProxyTapBody::new(converted, tap_config, telemetry_permit.take(), reservation);
                 return Response::from_parts(resp_parts, http::boxed(tap));
             }
 
+            let buffer_error = if via_responses {
+                "messages_via_responses_response_too_large"
+            } else {
+                "messages_via_chat_response_too_large"
+            };
+            let conversion_error = if via_responses {
+                "messages_via_responses_response_failed"
+            } else {
+                "messages_via_chat_response_failed"
+            };
             let collected = match time::timeout(
                 budget
                     .remaining()
@@ -1862,7 +2009,7 @@ async fn proxy_openai(
                     reservation.finish(
                         AttemptOutcome::local_provider(
                             Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                            "messages_via_chat_response_too_large",
+                            buffer_error,
                             &message,
                             Some(t_stream_ms),
                         ),
@@ -1872,7 +2019,7 @@ async fn proxy_openai(
                         &routing_trace,
                         resolved,
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                        Some("messages_via_chat_response_too_large"),
+                        Some(buffer_error),
                         attempt_start.elapsed().as_millis() as i64,
                     );
                     exclusions.note_attempt(resolved);
@@ -1880,7 +2027,7 @@ async fn proxy_openai(
                     last_failure = Some(AttemptFailure::new(
                         resolved,
                         StatusCode::BAD_GATEWAY,
-                        "messages_via_chat_response_too_large",
+                        buffer_error,
                         message.clone(),
                     ));
                     if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
@@ -1890,7 +2037,7 @@ async fn proxy_openai(
                     submit_err(
                         &mut telemetry_permit,
                         StatusCode::BAD_GATEWAY,
-                        "messages_via_chat_response_too_large",
+                        buffer_error,
                         message,
                         Some(resolved.provider.id),
                         Some(resolved.endpoint.id),
@@ -1899,7 +2046,7 @@ async fn proxy_openai(
                     );
                     record_request_metric(
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                        Some("messages_via_chat_response_too_large"),
+                        Some(buffer_error),
                     );
                     return proxy_error(
                         api_format,
@@ -1908,13 +2055,40 @@ async fn proxy_openai(
                     );
                 }
             };
-            let converted = match chat_response_to_messages(&collected, &model_name) {
+            let mut reported_usage = None;
+            let encoded = if via_responses {
+                serde_json::from_slice::<Value>(&collected)
+                    .map_err(|error| error.to_string())
+                    .and_then(|response| {
+                        reported_usage = Some(parse_reported_usage(&response["usage"]));
+                        responses_response_to_messages(&response, &model_name)
+                    })
+            } else {
+                chat_response_to_messages(&collected, &model_name)
+            };
+            let converted = match encoded {
                 Ok(converted) => converted,
+                Err(error) if reported_usage.flatten().is_some() => {
+                    // The upstream reported real usage before response conversion failed.
+                    let mut failed_config = tap_config;
+                    failed_config.http_status = Some(StatusCode::BAD_GATEWAY.as_u16() as i32);
+                    let (parts, body) =
+                        proxy_error(api_format, StatusCode::BAD_GATEWAY, error).into_parts();
+                    let tap = ProxyTapBody::with_handlers(
+                        body,
+                        failed_config,
+                        telemetry_permit.take(),
+                        reservation,
+                        |_, _| Vec::new(),
+                        move |_| reported_usage,
+                    );
+                    return Response::from_parts(parts, http::boxed(tap));
+                }
                 Err(error) => {
                     reservation.finish(
                         AttemptOutcome::local_provider(
                             Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                            "messages_via_chat_response_failed",
+                            conversion_error,
                             &error,
                             Some(t_stream_ms),
                         ),
@@ -1924,7 +2098,7 @@ async fn proxy_openai(
                         &routing_trace,
                         resolved,
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                        Some("messages_via_chat_response_failed"),
+                        Some(conversion_error),
                         attempt_start.elapsed().as_millis() as i64,
                     );
                     exclusions.note_attempt(resolved);
@@ -1932,7 +2106,7 @@ async fn proxy_openai(
                     last_failure = Some(AttemptFailure::new(
                         resolved,
                         StatusCode::BAD_GATEWAY,
-                        "messages_via_chat_response_failed",
+                        conversion_error,
                         error.clone(),
                     ));
                     if has_remaining_candidate(&plan.attempts, index + 1, &exclusions) {
@@ -1942,7 +2116,7 @@ async fn proxy_openai(
                     submit_err(
                         &mut telemetry_permit,
                         StatusCode::BAD_GATEWAY,
-                        "messages_via_chat_response_failed",
+                        conversion_error,
                         error.clone(),
                         Some(resolved.provider.id),
                         Some(resolved.endpoint.id),
@@ -1951,7 +2125,7 @@ async fn proxy_openai(
                     );
                     record_request_metric(
                         Some(StatusCode::BAD_GATEWAY.as_u16() as i32),
-                        Some("messages_via_chat_response_failed"),
+                        Some(conversion_error),
                     );
                     return proxy_error(api_format, StatusCode::BAD_GATEWAY, error);
                 }
@@ -1963,11 +2137,13 @@ async fn proxy_openai(
             if let Ok(length) = hyper::header::HeaderValue::from_str(&converted.len().to_string()) {
                 resp_parts.headers.insert(CONTENT_LENGTH, length);
             }
-            let tap = ProxyTapBody::new(
+            let tap = ProxyTapBody::with_handlers(
                 Full::new(converted),
                 tap_config,
                 telemetry_permit.take(),
                 reservation,
+                |_, _| Vec::new(),
+                move |_| reported_usage,
             );
             return Response::from_parts(resp_parts, http::boxed(tap));
         }
@@ -2267,10 +2443,250 @@ pub(crate) fn dispatch_error_to_http(
     }
 }
 
+fn supports_count_tokens(protocol: ProtocolPlan, base_url: &str, enabled_uris: &[Uri]) -> bool {
+    match protocol.upstream_api_format {
+        ApiFormat::AnthropicMessages => true,
+        ApiFormat::Responses => {
+            upstream_url::build_upstream_uri(base_url, "/responses/input_tokens").is_ok_and(|uri| {
+                uri == "https://api.openai.com/v1/responses/input_tokens"
+                    || enabled_uris.contains(&uri)
+            })
+        }
+        ApiFormat::ChatCompletions => false,
+    }
+}
+
+async fn count_messages_tokens<'a>(
+    state: &SharedState,
+    request: &hyper::http::request::Parts,
+    body: &Bytes,
+    attempts: &'a [ResolvedUpstream],
+    trace: &SharedRoutingTrace,
+) -> Result<(u64, Option<&'a ResolvedUpstream>), AttemptFailure> {
+    let mut budget = crate::resilience::AttemptBudget::new(state.config.upstream_request_timeout);
+    let mut unsupported_endpoints = HashSet::new();
+    let mut last_failure = None;
+    let override_context = RequestOverrideContext::new();
+    for upstream in attempts {
+        if unsupported_endpoints.contains(&upstream.endpoint.id) {
+            continue;
+        }
+        if !budget.provider_available(upstream.provider.id, upstream.provider.max_attempts) {
+            continue;
+        }
+        if !budget.begin().await {
+            break;
+        }
+        let start = Instant::now();
+        let timeout = budget
+            .remaining()
+            .min(provider_timeout(&upstream.provider, state));
+        let result = time::timeout(
+            timeout,
+            count_on_upstream(state, request, body, upstream, &override_context, timeout),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(dispatch_error_to_http(
+                UpstreamDispatchError::Timeout,
+                state,
+            ))
+        });
+        trace.lock().attempts_sent += 1;
+        budget.note_send(upstream.provider.id);
+        let (status, error_type, message) = match result {
+            Ok(input_tokens) => {
+                trace_attempt(
+                    trace,
+                    upstream,
+                    Some(200),
+                    None,
+                    start.elapsed().as_millis() as i64,
+                );
+                return Ok((input_tokens, Some(upstream)));
+            }
+            Err(failure) => failure,
+        };
+        trace_attempt(
+            trace,
+            upstream,
+            Some(status.as_u16() as i32),
+            Some(error_type),
+            start.elapsed().as_millis() as i64,
+        );
+        if error_type == "count_tokens_unsupported" {
+            unsupported_endpoints.insert(upstream.endpoint.id);
+        } else {
+            last_failure = Some(AttemptFailure::new(upstream, status, error_type, message));
+        }
+    }
+    if let Some(failure) = last_failure {
+        return Err(failure);
+    }
+    if let Some(untried) = attempts
+        .iter()
+        .find(|route| !unsupported_endpoints.contains(&route.endpoint.id))
+    {
+        return Err(AttemptFailure::new(
+            untried,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "count_tokens_budget_exhausted",
+            "upstream count_tokens attempt budget exhausted".into(),
+        ));
+    }
+    let input_tokens = crate::messages_via_chat::estimate_messages_input_tokens(body)
+        .and_then(|count| u64::try_from(count).ok())
+        .unwrap_or_else(|| (body.len() / 4).max(1) as u64);
+    Ok((input_tokens, None))
+}
+
+async fn count_on_upstream(
+    state: &SharedState,
+    request: &hyper::http::request::Parts,
+    body: &Bytes,
+    upstream: &ResolvedUpstream,
+    override_context: &RequestOverrideContext,
+    timeout: std::time::Duration,
+) -> Result<u64, (StatusCode, &'static str, String)> {
+    let protocol = upstream.protocol;
+    let outgoing = if protocol.upstream_api_format == ApiFormat::Responses {
+        messages_count_to_responses(body, &upstream.upstream_model).map(|converted| converted.body)
+    } else {
+        rewrite_model_name(body, &upstream.upstream_model)
+    }
+    .map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            "count_tokens_request_failed",
+            message,
+        )
+    })?;
+    let overrides = &upstream.provider.request_overrides;
+    let override_error = |message| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "request_override_failed",
+            message,
+        )
+    };
+    let outgoing = overrides
+        .apply_body(outgoing, protocol.upstream_api_format, override_context)
+        .map_err(override_error)?;
+    let path = upstream_path_and_query(
+        request.uri.path_and_query(),
+        protocol,
+        ProxyOperation::CountTokens,
+    );
+    let uri = build_upstream_uri(&upstream.endpoint.base_url, path.as_ref())
+        .map_err(|message| (StatusCode::BAD_GATEWAY, "invalid_upstream_uri", message))?;
+    let mut headers = build_upstream_headers_for(
+        protocol,
+        &request.headers,
+        outgoing.len(),
+        &upstream.key.secret,
+    );
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    overrides
+        .apply_headers(&mut headers, protocol.upstream_api_format, override_context)
+        .map_err(override_error)?;
+    let response = dispatch_upstream_request_with_timeout(
+        state,
+        &request.method,
+        request.version,
+        &headers,
+        &outgoing,
+        uri,
+        timeout,
+    )
+    .await
+    .map_err(|error| dispatch_error_to_http(error, state))?;
+    let (parts, incoming) = response.into_parts();
+    let collected = Limited::new(incoming, state.config.max_request_bytes)
+        .collect()
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "count_tokens_response_failed",
+                error.to_string(),
+            )
+        })?
+        .to_bytes();
+    if !parts.status.is_success() {
+        return Err(count_upstream_error(parts.status, &collected));
+    }
+    serde_json::from_slice::<Value>(&collected)
+        .ok()
+        .and_then(|value| value["input_tokens"].as_u64())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "count_tokens_response_failed",
+                "upstream count_tokens response must contain a nonnegative integer input_tokens"
+                    .into(),
+            )
+        })
+}
+
+fn count_upstream_error(status: StatusCode, body: &[u8]) -> (StatusCode, &'static str, String) {
+    let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let error = value.get("error").unwrap_or(&value);
+    let code = error["code"].as_str().unwrap_or_default();
+    let kind = error["type"].as_str().unwrap_or_default();
+    let message = error["message"].as_str().or_else(|| error.as_str());
+    let direct_message = message
+        .or_else(|| std::str::from_utf8(body).ok())
+        .unwrap_or_default();
+    let lower = direct_message.trim().to_ascii_lowercase();
+    let model_error = [code, kind].iter().any(|value| {
+        matches!(
+            *value,
+            "model_not_found" | "invalid_model" | "unsupported_model" | "model_not_supported"
+        )
+    });
+    let unsupported = !model_error
+        && (matches!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+        ) || (matches!(status, StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST)
+            && ([code, kind].iter().any(|value| {
+                matches!(
+                    *value,
+                    "unsupported_endpoint"
+                        | "endpoint_not_found"
+                        | "unknown_endpoint"
+                        | "route_not_found"
+                        | "count_tokens_unsupported"
+                )
+            }) || lower == "404 page not found"
+                || lower == "unknown route"
+                || (lower.contains("/responses/input_tokens")
+                    || lower.contains("/messages/count_tokens"))
+                    && (lower.starts_with("cannot post ") || lower.starts_with("no route for ")))));
+    let diagnostic = if unsupported {
+        "count_tokens_unsupported"
+    } else if model_error {
+        "model_not_found"
+    } else {
+        "upstream_count_tokens_error"
+    };
+    let message = message
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("upstream count_tokens returned HTTP {status}"));
+    let status = if status.is_client_error() || status.is_server_error() {
+        status
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (status, diagnostic, message)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConversionMode {
     ResponsesViaChat,
     MessagesViaChat,
+    MessagesViaResponses,
 }
 
 impl ConversionMode {
@@ -2278,6 +2694,7 @@ impl ConversionMode {
         match self {
             Self::ResponsesViaChat => "responses_via_chat",
             Self::MessagesViaChat => "messages_via_chat",
+            Self::MessagesViaResponses => "messages_via_responses",
         }
     }
 }
@@ -2314,12 +2731,23 @@ impl ProtocolPlan {
         }
     }
 
+    fn messages_via_responses() -> Self {
+        Self {
+            client_api_format: ApiFormat::AnthropicMessages,
+            upstream_api_format: ApiFormat::Responses,
+            conversion: Some(ConversionMode::MessagesViaResponses),
+        }
+    }
+
     fn is_responses_via_chat(self) -> bool {
         self.conversion == Some(ConversionMode::ResponsesViaChat)
     }
 
-    fn is_messages_via_chat(self) -> bool {
-        self.conversion == Some(ConversionMode::MessagesViaChat)
+    fn is_messages_conversion(self) -> bool {
+        matches!(
+            self.conversion,
+            Some(ConversionMode::MessagesViaChat | ConversionMode::MessagesViaResponses)
+        )
     }
 
     fn conversion_name(self) -> Option<&'static str> {
@@ -2360,6 +2788,13 @@ fn provider_protocol_plan(
         }
         ("openai_compatible_responses", ApiFormat::Responses) => {
             Some(ProtocolPlan::native(ApiFormat::Responses))
+        }
+        ("openai" | "openai_compatible_responses", ApiFormat::AnthropicMessages)
+            if snap
+                .provider_model_state(provider.id, upstream_model)
+                .is_some_and(|state| state.is_active() && state.messages_via_responses_enabled) =>
+        {
+            Some(ProtocolPlan::messages_via_responses())
         }
         ("anthropic", ApiFormat::AnthropicMessages) => {
             Some(ProtocolPlan::native(ApiFormat::AnthropicMessages))
@@ -2756,6 +3191,7 @@ pub(crate) async fn build_upstream_plan(
     api_key: &ApiKeyAuth,
     affinity: Option<&AffinityIdentity>,
     allow_responses_via_chat: bool,
+    operation: ProxyOperation,
 ) -> Result<UpstreamPlan, RouteResolutionError> {
     let snap = state
         .caches
@@ -2836,17 +3272,22 @@ pub(crate) async fn build_upstream_plan(
         ));
     }
 
-    let retry_at_ms = enabled_routes
-        .iter()
-        .filter_map(|route| {
-            crate::routing_availability::provider_retry_at(
-                state,
-                &snap,
-                &route.provider,
-                Some(&route.upstream_model),
-            )
-        })
-        .min();
+    let count_tokens = operation == ProxyOperation::CountTokens;
+    let retry_at_ms = if count_tokens {
+        None
+    } else {
+        enabled_routes
+            .iter()
+            .filter_map(|route| {
+                crate::routing_availability::provider_retry_at(
+                    state,
+                    &snap,
+                    &route.provider,
+                    Some(&route.upstream_model),
+                )
+            })
+            .min()
+    };
     let affinity_provider_id = affinity
         .and_then(|identity| state.affinity.lookup(identity, now_ms))
         .map(|binding| binding.provider_id);
@@ -2894,7 +3335,7 @@ pub(crate) async fn build_upstream_plan(
         }
         key_ready_providers += 1;
 
-        let endpoints = snap
+        let mut endpoints = snap
             .endpoints_by_provider
             .get(&provider.id)
             .map(|items| {
@@ -2915,6 +3356,18 @@ pub(crate) async fn build_upstream_plan(
             continue;
         }
         static_ready_providers += 1;
+        if count_tokens {
+            endpoints.retain(|endpoint| {
+                supports_count_tokens(
+                    route.protocol,
+                    &endpoint.base_url,
+                    &state.config.responses_input_tokens_uris,
+                )
+            });
+            if endpoints.is_empty() {
+                continue;
+            }
+        }
 
         if affinity.is_some_and(|identity| {
             state
@@ -2930,8 +3383,10 @@ pub(crate) async fn build_upstream_plan(
             );
             continue;
         }
-        let provider_runtime = state.provider_runtime.snapshot(provider, now_ms);
-        if !provider_runtime.available {
+        if !count_tokens
+            && let provider_runtime = state.provider_runtime.snapshot(provider, now_ms)
+            && !provider_runtime.available
+        {
             let (code, message) = if provider_runtime.state == crate::health::CircuitState::Open {
                 ("provider_circuit_open", "provider circuit is open")
             } else if provider_runtime.state == crate::health::CircuitState::HalfOpen {
@@ -2959,6 +3414,9 @@ pub(crate) async fn build_upstream_plan(
         let keys = enabled_model_keys
             .into_iter()
             .filter(|key| {
+                if count_tokens {
+                    return true;
+                }
                 let availability = crate::routing_availability::account(
                     state,
                     &snap,
@@ -2987,8 +3445,11 @@ pub(crate) async fn build_upstream_plan(
             transient_spill_provider_ids.insert(provider.id);
             continue;
         }
-        let ranked_keys =
-            selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms);
+        let ranked_keys = if count_tokens {
+            selector::rank_key_refs(&keys)
+        } else {
+            selector::rank_key_refs_with_health(&keys, &state.upstream_key_health, now_ms)
+        };
         let ranked_keys = order_keys_for_provider(
             state,
             provider.id,
@@ -3007,12 +3468,17 @@ pub(crate) async fn build_upstream_plan(
             continue;
         }
 
-        let mut ranked_endpoints = selector::rank_endpoint_refs_with_health(
-            &endpoints,
-            &state.endpoint_health,
-            runtime.endpoint_selector_strategy,
-            now_ms,
-        );
+        let mut ranked_endpoints = if count_tokens {
+            endpoints.sort_by_key(|endpoint| (endpoint.priority, endpoint.id));
+            endpoints
+        } else {
+            selector::rank_endpoint_refs_with_health(
+                &endpoints,
+                &state.endpoint_health,
+                runtime.endpoint_selector_strategy,
+                now_ms,
+            )
+        };
         if !provider.endpoint_failover {
             ranked_endpoints.truncate(1);
         }
@@ -3079,7 +3545,8 @@ pub(crate) async fn build_upstream_plan(
         });
     }
 
-    if schedulable.is_empty() {
+    let use_local_count = count_tokens && static_ready_providers > 0 && schedulable.is_empty();
+    if schedulable.is_empty() && !use_local_count {
         if key_ready_providers == 0 {
             return Err(RouteResolutionError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -3119,7 +3586,7 @@ pub(crate) async fn build_upstream_plan(
         return Err(error);
     }
 
-    let mut attempts = build_scheduled_attempts(schedulable, affinity_provider_id);
+    let mut attempts = build_scheduled_attempts(schedulable, affinity_provider_id, operation);
     if policy.is_some_and(|p| !p.failover)
         && let Some(first) = attempts.first()
     {
@@ -3127,7 +3594,7 @@ pub(crate) async fn build_upstream_plan(
         attempts.retain(|a| a.provider.id == id);
     }
 
-    if attempts.is_empty() {
+    if attempts.is_empty() && !use_local_count {
         let mut error = RouteResolutionError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "upstream_unavailable",
@@ -3154,19 +3621,22 @@ pub(crate) async fn build_upstream_plan(
 fn build_scheduled_attempts(
     schedulable: Vec<SchedulableProvider>,
     affinity_provider_id: Option<i64>,
+    operation: ProxyOperation,
 ) -> Vec<ResolvedUpstream> {
     let mut attempts = Vec::new();
-    for scheduled in order_schedulable_providers(schedulable, affinity_provider_id)
-        .into_iter()
-        .take(MAX_DISTINCT_PROVIDERS)
-    {
+    let mut ordered = order_schedulable_providers(schedulable, affinity_provider_id);
+    if operation == ProxyOperation::CountTokens {
+        ordered.sort_by_key(|provider| provider.route.protocol.is_messages_conversion());
+    }
+    let (max_providers, max_endpoints) = if operation == ProxyOperation::CountTokens {
+        (usize::MAX, usize::MAX)
+    } else {
+        (MAX_DISTINCT_PROVIDERS, crate::resilience::MAX_ATTEMPTS)
+    };
+    for scheduled in ordered.into_iter().take(max_providers) {
         // Keep sibling candidates even when an earlier pair is skipped after cooling.
         // Actual sends enforce the configured provider limit and the shared request limit.
-        for endpoint in scheduled
-            .endpoints
-            .iter()
-            .take(crate::resilience::MAX_ATTEMPTS)
-        {
+        for endpoint in scheduled.endpoints.iter().take(max_endpoints) {
             for key in scheduled.keys.iter().take(crate::resilience::MAX_ATTEMPTS) {
                 attempts.push(ResolvedUpstream {
                     upstream_model: scheduled.route.upstream_model.clone(),
@@ -3522,10 +3992,18 @@ fn protocol_rejection(
                     "Chat-to-Messages conversion is disabled for this provider model",
                 );
             }
+        } else if matches!(
+            provider.provider_type.as_str(),
+            "openai" | "openai_compatible_responses"
+        ) {
+            return (
+                "messages_via_responses_disabled",
+                "Responses-to-Messages conversion is disabled for this provider model",
+            );
         } else if provider.provider_type != "anthropic" {
             return (
                 "messages_provider_protocol_unsupported",
-                "the Messages API requires an Anthropic Messages upstream or an enabled Chat-to-Messages conversion",
+                "the Messages API requires a native Messages upstream or an enabled Messages conversion",
             );
         }
     }
@@ -4096,21 +4574,20 @@ fn upstream_path_and_query(
     operation: ProxyOperation,
 ) -> Option<hyper::http::uri::PathAndQuery> {
     let original = original?;
-    let endpoint_path = if protocol.is_responses_via_chat() || protocol.is_messages_via_chat() {
-        "/chat/completions"
-    } else {
-        match protocol.upstream_api_format {
-            ApiFormat::ChatCompletions => "/chat/completions",
-            ApiFormat::Responses => "/responses",
-            ApiFormat::AnthropicMessages => {
-                if operation == ProxyOperation::CountTokens {
-                    "/messages/count_tokens"
-                } else {
-                    "/messages"
-                }
-            }
+    let endpoint_path = match protocol.upstream_api_format {
+        ApiFormat::ChatCompletions => "/chat/completions",
+        ApiFormat::Responses if operation == ProxyOperation::CountTokens => {
+            "/responses/input_tokens"
         }
+        ApiFormat::Responses => "/responses",
+        ApiFormat::AnthropicMessages if operation == ProxyOperation::CountTokens => {
+            "/messages/count_tokens"
+        }
+        ApiFormat::AnthropicMessages => "/messages",
     };
+    if protocol.conversion == Some(ConversionMode::MessagesViaResponses) {
+        return endpoint_path.parse().ok();
+    }
     let query = original
         .query()
         .map(|query| format!("?{query}"))
@@ -4258,6 +4735,7 @@ pub(crate) struct ReplayIncomingBody {
 enum SseConverter {
     Responses(ChatSseToResponses),
     Messages(ChatSseToMessages),
+    MessagesFromResponses(ResponsesSseToMessages),
 }
 
 impl SseConverter {
@@ -4265,6 +4743,7 @@ impl SseConverter {
         match self {
             Self::Responses(converter) => converter.push(data),
             Self::Messages(converter) => converter.push(data),
+            Self::MessagesFromResponses(converter) => converter.push(data),
         }
     }
 
@@ -4272,6 +4751,7 @@ impl SseConverter {
         match self {
             Self::Responses(converter) => converter.finish(),
             Self::Messages(converter) => converter.finish(),
+            Self::MessagesFromResponses(converter) => converter.finish(),
         }
     }
 
@@ -4279,6 +4759,15 @@ impl SseConverter {
         match self {
             Self::Responses(converter) => converter.fail_stream(message),
             Self::Messages(converter) => converter.fail_stream(message),
+            Self::MessagesFromResponses(converter) => converter.fail_stream(message),
+        }
+    }
+
+    fn terminal_state(&self) -> Option<bool> {
+        match self {
+            Self::Responses(converter) => Some(converter.is_terminal()),
+            Self::MessagesFromResponses(converter) => Some(converter.is_terminal()),
+            Self::Messages(_) => None,
         }
     }
 }
@@ -4311,6 +4800,17 @@ impl ConvertedSseBody {
             finished: false,
         }
     }
+
+    fn messages_from_responses(inner: ReplayIncomingBody, model: &str, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            converter: SseConverter::MessagesFromResponses(ResponsesSseToMessages::new(
+                model, max_bytes,
+            )),
+            pending: VecDeque::new(),
+            finished: false,
+        }
+    }
 }
 
 impl hyper::body::Body for ConvertedSseBody {
@@ -4334,8 +4834,8 @@ impl hyper::body::Body for ConvertedSseBody {
                 Poll::Ready(Some(Ok(frame))) => {
                     if let Some(data) = frame.data_ref() {
                         this.pending.extend(this.converter.push(data));
-                        if let SseConverter::Responses(converter) = &*this.converter {
-                            *this.finished = converter.is_terminal();
+                        if let Some(terminal) = this.converter.terminal_state() {
+                            *this.finished = terminal;
                             if this.pending.is_empty() && !data.is_empty() && !*this.finished {
                                 return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
                                     b": keep-alive\n\n",
@@ -4489,11 +4989,13 @@ async fn encrypted_content_rejected(
 async fn retry_body_has_usage(
     body: &mut ReplayIncomingBody,
     api_format: &'static str,
+    strict_responses_usage: bool,
     is_sse: bool,
     timeout: std::time::Duration,
 ) -> bool {
     let mut capture = UsageCaptureBuffer::new(crate::response_events::MAX_EVENT_BYTES, 32 * 1024);
     let mut parser = SseParser::new(api_format);
+    parser.strict_responses_usage = strict_responses_usage;
     let mut inspected = VecDeque::new();
     let read = async {
         loop {
@@ -4520,7 +5022,12 @@ async fn retry_body_has_usage(
                         parser.finish();
                         return parser.observation.usage.is_some();
                     }
-                    return extract_usage_from_capture(api_format, &capture).is_some();
+                    let usage = if strict_responses_usage {
+                        extract_reported_responses_usage(&capture)
+                    } else {
+                        extract_usage_from_capture(api_format, &capture)
+                    };
+                    return usage.is_some();
                 }
             }
         }
@@ -4534,12 +5041,14 @@ async fn retry_body_has_usage(
 async fn preflight_sse(
     mut inner: ReplayIncomingBody,
     api_format: &'static str,
+    strict_responses_usage: bool,
     timeout: std::time::Duration,
     max_bytes: usize,
     observed_service_tier: &mut Option<String>,
 ) -> Result<ReplayIncomingBody, String> {
     let preflight = async {
         let mut parser = SseParser::new(api_format);
+        parser.strict_responses_usage = strict_responses_usage;
         let mut buffered = VecDeque::new();
         let mut buffered_bytes = 0usize;
         loop {
@@ -4625,6 +5134,7 @@ struct TapConfig {
     start: Instant,
     attempt_start: Instant,
     is_sse: bool,
+    raw_responses_usage: bool,
     price: Option<PriceVersion>,
     usage_capture_bytes: usize,
     usage_capture_tail_bytes: usize,
@@ -4655,6 +5165,7 @@ struct TapFinalizeInputs<'a> {
     first_token_ms: Option<i64>,
     usage: &'a mut Usage,
     usage_observed: &'a mut bool,
+    reported_usage: Option<Option<Usage>>,
     error_type: &'a Option<String>,
     error_message: &'a Option<String>,
     capture: &'a UsageCaptureBuffer,
@@ -4685,10 +5196,32 @@ impl ProxyTapBody {
 
     fn with_timeout_handler<B>(
         inner: B,
+        cfg: TapConfig,
+        telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
+        reservation: UpstreamAttemptReservation,
+        on_timeout: impl FnOnce(Pin<&mut B>, &str) -> Vec<Bytes> + Send + 'static,
+    ) -> Self
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: std::fmt::Display + Send,
+    {
+        Self::with_handlers(
+            inner,
+            cfg,
+            telemetry_permit,
+            reservation,
+            on_timeout,
+            |_| None,
+        )
+    }
+
+    fn with_handlers<B>(
+        inner: B,
         mut cfg: TapConfig,
         mut telemetry_permit: Option<mpsc::OwnedPermit<TelemetryEvent>>,
         reservation: UpstreamAttemptReservation,
         on_timeout: impl FnOnce(Pin<&mut B>, &str) -> Vec<Bytes> + Send + 'static,
+        read_reported_usage: impl FnOnce(Pin<&mut B>) -> Option<Option<Usage>> + Send + 'static,
     ) -> Self
     where
         B: hyper::body::Body<Data = Bytes> + Send + 'static,
@@ -4710,7 +5243,15 @@ impl ProxyTapBody {
                     .max(crate::response_events::MAX_EVENT_BYTES),
                 cfg.usage_capture_tail_bytes,
             );
-            let mut sse = cfg.is_sse.then(|| SseParser::new(cfg.api_format));
+            let mut sse = cfg.is_sse.then(|| {
+                let mut parser = SseParser::new(if cfg.raw_responses_usage {
+                    cfg.upstream_api_format
+                } else {
+                    cfg.api_format
+                });
+                parser.strict_responses_usage = cfg.raw_responses_usage;
+                parser
+            });
             let mut disconnected_at: Option<time::Instant> = None;
             let mut terminal_handoff = None;
             let mut preflight_complete = !cfg.is_sse;
@@ -4894,6 +5435,7 @@ impl ProxyTapBody {
                     first_token_ms,
                     usage: &mut usage,
                     usage_observed: &mut usage_observed,
+                    reported_usage: read_reported_usage(inner.as_mut()),
                     error_type: &error_type,
                     error_message: &error_message,
                     capture: &capture,
@@ -4933,12 +5475,19 @@ fn finalize_tap(
     }
     *finalized = true;
 
-    if !cfg.is_sse
-        && !inputs.capture.is_empty()
-        && let Some(u) = extract_usage_from_capture(cfg.api_format, inputs.capture)
-    {
-        *inputs.usage = u;
-        *inputs.usage_observed = true;
+    if let Some(reported) = inputs.reported_usage {
+        *inputs.usage = reported.unwrap_or_default();
+        *inputs.usage_observed = reported.is_some();
+    } else if !cfg.is_sse && !inputs.capture.is_empty() {
+        let observed = if cfg.raw_responses_usage {
+            extract_reported_responses_usage(inputs.capture)
+        } else {
+            extract_usage_from_capture(cfg.api_format, inputs.capture)
+        };
+        if let Some(usage) = observed {
+            *inputs.usage = usage;
+            *inputs.usage_observed = true;
+        }
     }
 
     let pricing = evaluate_price(inputs.usage, *inputs.usage_observed, cfg.price.as_ref());
@@ -5278,6 +5827,14 @@ fn upstream_error_details(body: &[u8]) -> Option<(String, Option<String>)> {
     Some((kind.to_string(), message))
 }
 
+fn extract_reported_responses_usage(capture: &UsageCaptureBuffer) -> Option<Usage> {
+    if capture.is_truncated() {
+        return None;
+    }
+    let response = serde_json::from_slice::<Value>(&capture.to_vec()).ok()?;
+    reported_event_usage(&response)
+}
+
 fn extract_usage_from_capture(
     api_format: &'static str,
     capture: &UsageCaptureBuffer,
@@ -5425,6 +5982,7 @@ struct SseParser {
     api_format: &'static str,
     decoder: crate::response_events::SseDecoder,
     observation: crate::response_events::Observation,
+    strict_responses_usage: bool,
     done_first_token: bool,
     terminal_result: Option<(StatusCode, Option<String>, Option<String>)>,
 }
@@ -5434,12 +5992,17 @@ impl SseParser {
             api_format,
             decoder: Default::default(),
             observation: Default::default(),
+            strict_responses_usage: false,
             done_first_token: false,
             terminal_result: None,
         }
     }
     fn push_bytes(&mut self, data: &Bytes) -> SsePushOut {
-        let events = self.decoder.push_bytes(data);
+        let events = if self.strict_responses_usage {
+            self.decoder.push_bytes_until_error(data)
+        } else {
+            self.decoder.push_bytes(data)
+        };
         self.observe(events)
     }
     fn non_retryable_terminal(&self) -> bool {
@@ -5454,7 +6017,12 @@ impl SseParser {
     fn observe(&mut self, events: Vec<Value>) -> SsePushOut {
         let mut out = SsePushOut::default();
         for value in events {
-            self.observation.observe(&value);
+            if self.strict_responses_usage {
+                self.observation
+                    .observe_with_responses_usage(&value, reported_event_usage(&value));
+            } else {
+                self.observation.observe(&value);
+            }
             let event_type = value.get("type").and_then(Value::as_str);
             let failed = if crate::response_events::is_terminal_response_event(&value) {
                 let result = crate::response_events::terminal_status(&value);
@@ -5705,7 +6273,7 @@ mod tests {
         let upstream = upstream_path_and_query(
             Some(&original),
             ProtocolPlan::native(ApiFormat::ChatCompletions),
-            ProxyOperation::Messages,
+            ProxyOperation::Generate,
         )
         .expect("upstream path");
 
@@ -5721,7 +6289,7 @@ mod tests {
         let upstream = upstream_path_and_query(
             Some(&original),
             ProtocolPlan::native(ApiFormat::Responses),
-            ProxyOperation::Messages,
+            ProxyOperation::Generate,
         )
         .expect("upstream path");
 
@@ -5737,7 +6305,7 @@ mod tests {
         let upstream = upstream_path_and_query(
             Some(&original),
             ProtocolPlan::responses_via_chat(),
-            ProxyOperation::Messages,
+            ProxyOperation::Generate,
         )
         .expect("upstream path");
 
@@ -5752,7 +6320,7 @@ mod tests {
         let messages = upstream_path_and_query(
             Some(&original),
             ProtocolPlan::native(ApiFormat::AnthropicMessages),
-            ProxyOperation::Messages,
+            ProxyOperation::Generate,
         )
         .expect("messages path");
         assert_eq!(messages, "/messages?beta=true");
@@ -5766,10 +6334,42 @@ mod tests {
         let bridged = upstream_path_and_query(
             Some(&original),
             ProtocolPlan::messages_via_chat(),
-            ProxyOperation::Messages,
+            ProxyOperation::Generate,
         )
         .expect("converted messages path");
         assert_eq!(bridged, "/chat/completions?beta=true");
+    }
+
+    #[test]
+    fn responses_count_tokens_requires_official_or_explicitly_enabled_api_base() {
+        let protocol = ProtocolPlan::messages_via_responses();
+        for base in ["https://api.openai.com", "https://api.openai.com/v1/"] {
+            assert!(super::supports_count_tokens(protocol, base, &[]), "{base}");
+        }
+        for base in [
+            "http://api.openai.com/v1",
+            "https://api.openai.com/custom",
+            "https://api.openai.com.example.org/v1",
+        ] {
+            assert!(!super::supports_count_tokens(protocol, base, &[]), "{base}");
+        }
+        let endpoint = "https://compatible.example.org/vendor/v2";
+        let allowlist =
+            [
+                crate::upstream_url::build_upstream_uri(endpoint, "/responses/input_tokens")
+                    .unwrap(),
+            ];
+        assert!(!super::supports_count_tokens(protocol, endpoint, &[]));
+        assert!(super::supports_count_tokens(
+            protocol,
+            &format!("{endpoint}/"),
+            &allowlist
+        ));
+        assert!(!super::supports_count_tokens(
+            protocol,
+            "https://compatible.example.org/vendor/v3",
+            &allowlist
+        ));
     }
 
     #[test]
@@ -5819,6 +6419,7 @@ mod tests {
                     available: true,
                     responses_via_chat_enabled: false,
                     messages_via_chat_enabled: true,
+                    messages_via_responses_enabled: false,
                 },
             )]),
         );
@@ -6161,6 +6762,7 @@ mod tests {
                     available: true,
                     responses_via_chat_enabled: true,
                     messages_via_chat_enabled: false,
+                    messages_via_responses_enabled: false,
                 },
             )]),
         );
@@ -6241,6 +6843,7 @@ mod tests {
                     available: true,
                     responses_via_chat_enabled: false,
                     messages_via_chat_enabled: false,
+                    messages_via_responses_enabled: false,
                 },
             )]),
         );
@@ -6253,6 +6856,7 @@ mod tests {
                     available: true,
                     responses_via_chat_enabled: false,
                     messages_via_chat_enabled: false,
+                    messages_via_responses_enabled: false,
                 },
             )]),
         );
@@ -6302,6 +6906,7 @@ mod tests {
                     available: true,
                     responses_via_chat_enabled: false,
                     messages_via_chat_enabled: false,
+                    messages_via_responses_enabled: false,
                 },
             )]),
         );
@@ -6591,6 +7196,7 @@ mod tests {
         let attempts = build_scheduled_attempts(
             vec![schedulable_provider(1, 10), schedulable_provider(2, 0)],
             Some(1),
+            ProxyOperation::Generate,
         );
 
         assert_eq!(attempts.first().map(|attempt| attempt.provider.id), Some(1));
@@ -6601,7 +7207,7 @@ mod tests {
         let providers = (1..=6)
             .map(|id| schedulable_provider(id, 100))
             .collect::<Vec<_>>();
-        let attempts = build_scheduled_attempts(providers, None);
+        let attempts = build_scheduled_attempts(providers, None, ProxyOperation::Generate);
         let provider_ids = attempts
             .iter()
             .map(|attempt| attempt.provider.id)

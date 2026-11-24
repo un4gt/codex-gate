@@ -1,0 +1,11 @@
+version = "1.0"
+
+[agent]
+timeout_sec = 120
+
+[verifier]
+timeout_sec = 30
+
+[environment]
+docker_image = "codex-gate-responses-messages-harbor:local"
+workdir = "/app"

@@ -150,7 +150,18 @@ pub(crate) struct SseDecoder {
 
 impl SseDecoder {
     pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<Value> {
+        self.decode_bytes(bytes, false)
+    }
+
+    pub fn push_bytes_until_error(&mut self, bytes: &[u8]) -> Vec<Value> {
+        self.decode_bytes(bytes, true)
+    }
+
+    fn decode_bytes(&mut self, bytes: &[u8], stop_on_error: bool) -> Vec<Value> {
         let mut events = Vec::new();
+        if stop_on_error && self.error.is_some() {
+            return events;
+        }
         for &byte in bytes {
             if byte == b'\n' {
                 if let Some(event) = self.complete_line() {
@@ -170,6 +181,9 @@ impl SseDecoder {
                 if !self.discarding || self.line.len() < 2 {
                     self.line.push(byte);
                 }
+            }
+            if stop_on_error && self.error.is_some() {
+                break;
             }
         }
         events
@@ -436,18 +450,28 @@ pub(crate) struct Observation {
 }
 impl Observation {
     pub fn observe(&mut self, value: &Value) {
+        let is_messages = is_messages_stream_event(value);
+        self.observe_with_responses_usage(
+            value,
+            if is_messages {
+                None
+            } else {
+                event_usage(value)
+            },
+        );
+        if is_messages && messages_usage(value).is_some() {
+            let mut usage = self.usage.unwrap_or_default();
+            merge_messages_usage(&mut usage, value);
+            self.usage = Some(usage);
+        }
+    }
+
+    pub fn observe_with_responses_usage(&mut self, value: &Value, usage: Option<Usage>) {
         if self.first_output_kind.is_none() {
             self.first_output_kind = output_event_kind(value);
         }
         let terminal = is_terminal_response_event(value);
-        if is_messages_stream_event(value) {
-            let mut usage = self.usage.unwrap_or_default();
-            let has_usage = messages_usage(value).is_some();
-            merge_messages_usage(&mut usage, value);
-            if has_usage {
-                self.usage = Some(usage);
-            }
-        } else if let Some(usage) = event_usage(value)
+        if let Some(usage) = usage
             && (terminal || !self.terminal_usage)
         {
             self.usage = Some(usage);

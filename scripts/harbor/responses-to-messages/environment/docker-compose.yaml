@@ -1,0 +1,5 @@
+services:
+  main:
+    image: codex-gate-responses-messages-harbor:local
+    command: ["sleep", "infinity"]
+    network_mode: none

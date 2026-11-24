@@ -28,6 +28,7 @@ pub struct Config {
     pub upstream_pool_idle_timeout: Duration,
     pub upstream_pool_max_idle_per_host: usize,
     pub upstream_request_timeout: Duration,
+    pub responses_input_tokens_uris: Vec<hyper::Uri>,
     pub affinity_ttl: Duration,
     pub affinity_max_entries: usize,
     pub stream_preflight_timeout: Duration,
@@ -126,6 +127,16 @@ impl Config {
                 .unwrap_or(120_000)
                 .max(1_000),
         );
+        let responses_input_tokens_uris = getenv_string("RESPONSES_INPUT_TOKENS_BASE_URLS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+            .map(|base| {
+                crate::upstream_url::build_upstream_uri(base, "/responses/input_tokens")
+                    .map_err(|error| format!("env RESPONSES_INPUT_TOKENS_BASE_URLS: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let affinity_ttl = Duration::from_millis(
             getenv_u64("SESSION_AFFINITY_TTL_MS")
                 .unwrap_or(30 * 60 * 1_000)
@@ -202,6 +213,7 @@ impl Config {
             upstream_pool_idle_timeout,
             upstream_pool_max_idle_per_host,
             upstream_request_timeout,
+            responses_input_tokens_uris,
             affinity_ttl,
             affinity_max_entries,
             stream_preflight_timeout,

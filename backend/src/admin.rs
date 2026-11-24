@@ -887,31 +887,26 @@ async fn sync_provider_models_inner(req: Request<Incoming>, state: SharedState) 
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PatchProviderModelReq {
-    alias: Option<Option<String>>,
-    enabled: Option<bool>,
-    responses_via_chat_enabled: Option<bool>,
-    messages_via_chat_enabled: Option<bool>,
-}
-
 async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> HttpResponse {
     let path = req.uri().path();
     let Some(model_id) = parse_id_suffix(path, "/api/v1/provider-models/") else {
         return http::json_error(StatusCode::BAD_REQUEST, "invalid model id");
     };
 
-    let (_, patch, _raw) =
-        match http::read_json_limited::<PatchProviderModelReq>(req, state.config.max_request_bytes)
-            .await
-        {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-
-    if patch.responses_via_chat_enabled == Some(true)
-        || patch.messages_via_chat_enabled == Some(true)
+    let (_, patch, _raw) = match http::read_json_limited::<crate::db::ProviderModelPatch>(
+        req,
+        state.config.max_request_bytes,
+    )
+    .await
     {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    let enable_chat = patch.responses_via_chat_enabled == Some(true)
+        || patch.messages_via_chat_enabled == Some(true);
+    let enable_responses = patch.messages_via_responses_enabled == Some(true);
+    if enable_chat || enable_responses {
         let (models, providers) = match tokio::try_join!(
             state.db.list_all_provider_models(),
             state.db.list_upstream_providers(),
@@ -924,27 +919,32 @@ async fn patch_provider_model(req: Request<Incoming>, state: SharedState) -> Htt
         let Some(model) = models.iter().find(|model| model.id == model_id) else {
             return http::json_error(StatusCode::NOT_FOUND, "model not found");
         };
-        let compatible = providers.iter().any(|provider| {
-            provider.id == model.provider_id && provider.provider_type == "openai_compatible"
-        });
-        if !compatible {
+        let provider_type = providers
+            .iter()
+            .find(|provider| provider.id == model.provider_id)
+            .map(|provider| provider.provider_type.as_str());
+        if enable_chat && provider_type != Some("openai_compatible") {
             return http::json_error(
                 StatusCode::BAD_REQUEST,
                 "chat conversion flags are only valid for openai_compatible models",
+            );
+        }
+        if enable_responses
+            && !matches!(
+                provider_type,
+                Some("openai" | "openai_compatible_responses")
+            )
+        {
+            return http::json_error(
+                StatusCode::BAD_REQUEST,
+                "Responses-to-Messages conversion requires an openai or openai_compatible_responses provider",
             );
         }
     }
 
     if let Err(e) = state
         .db
-        .update_provider_model(
-            model_id,
-            patch.alias,
-            patch.enabled,
-            patch.responses_via_chat_enabled,
-            patch.messages_via_chat_enabled,
-            util::now_ms(),
-        )
+        .update_provider_model(model_id, patch, util::now_ms())
         .await
     {
         let message = e.to_string();

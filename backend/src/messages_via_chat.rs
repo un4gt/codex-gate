@@ -14,7 +14,7 @@ pub struct ConversionContext {
 }
 
 impl ConversionContext {
-    fn warn(&mut self, code: &'static str) {
+    pub(crate) fn warn(&mut self, code: &'static str) {
         if !self.warnings.iter().any(|warning| warning == code) {
             self.warnings.push(code.to_string());
         }

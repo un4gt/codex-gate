@@ -14,6 +14,7 @@ mod http;
 mod key_rotation;
 mod log_archive;
 mod messages_via_chat;
+mod messages_via_responses;
 mod metrics;
 mod notification;
 mod openai;

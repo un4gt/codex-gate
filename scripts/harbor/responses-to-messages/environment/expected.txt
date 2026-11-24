@@ -1,0 +1,2 @@
+HARNESS_EXPECTED_ADDITION
+The add function should return the sum of its arguments.

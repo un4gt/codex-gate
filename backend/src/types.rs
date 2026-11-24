@@ -115,6 +115,8 @@ pub struct ProviderModel {
     pub available: bool,
     pub responses_via_chat_enabled: bool,
     pub messages_via_chat_enabled: bool,
+    #[serde(default)]
+    pub messages_via_responses_enabled: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }

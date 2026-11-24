@@ -951,6 +951,7 @@ async fn connect_selected_upstream(
         &ctx.api_key,
         affinity.as_ref(),
         false,
+        proxy::ProxyOperation::Generate,
     )
     .await
     .map_err(|error| {
