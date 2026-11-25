@@ -1,6 +1,7 @@
 mod admin;
 mod affinity;
 mod anthropic;
+mod api_key_usage;
 mod cache;
 mod codex_catalog;
 mod codex_oauth;
@@ -314,6 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         affinity,
         provider_runtime,
         quota,
+        api_key_usage: Default::default(),
         codex_oauth,
         metrics,
         system_status,

@@ -28,6 +28,7 @@ pub struct AppState {
     pub encrypted_content: crate::encrypted_content::RecoveryBook,
     pub provider_runtime: Arc<ProviderRuntimeBook>,
     pub quota: Arc<QuotaBook>,
+    pub api_key_usage: crate::api_key_usage::ApiKeyUsageLimiter,
     pub codex_oauth: CodexOAuthManager,
     pub metrics: Arc<Metrics>,
     pub system_status: SystemStatusMonitor,

@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 
 use crate::affinity::{AffinityBinding, AffinityIdentity, extract_affinity_identity};
+use crate::api_key_usage::{ApiKeyUsagePermit, KeyAdmissionError, settle_api_key_usage};
 use crate::cache::upstream_cache::UpstreamSnapshot;
 use crate::health::RuntimeHealthAttemptGuard;
 use crate::http::{self, HttpResponse};
@@ -81,6 +82,21 @@ fn proxy_error(
         }
         _ => http::json_error(status, message),
     }
+}
+
+pub(crate) fn key_admission_response(
+    api_format: ApiFormat,
+    error: KeyAdmissionError,
+) -> HttpResponse {
+    if api_format != ApiFormat::AnthropicMessages && matches!(error, KeyAdmissionError::Exhausted) {
+        return http::json(
+            error.status(),
+            &serde_json::json!({
+                "error": {"type": "insufficient_quota", "code": error.code(), "message": error.message()}
+            }),
+        );
+    }
+    proxy_error(api_format, error.status(), error.message())
 }
 
 pub async fn handle(req: Request<Incoming>, state: SharedState) -> HttpResponse {
@@ -162,6 +178,14 @@ async fn list_models(req: Request<Incoming>, state: SharedState) -> HttpResponse
     let Some(api_key) = auth else {
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
     };
+    if let Err(error) = state.api_key_usage.admit(&state.db, &api_key).await {
+        let format = if anthropic_client {
+            ApiFormat::AnthropicMessages
+        } else {
+            ApiFormat::Responses
+        };
+        return key_admission_response(format, error);
+    }
     let snap = match state
         .caches
         .upstream
@@ -560,6 +584,13 @@ async fn proxy_openai(
         );
         return proxy_error(api_format, StatusCode::BAD_REQUEST, "missing model");
     };
+    let key_usage_permit = match state.api_key_usage.admit(&state.db, &api_key).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            record_request_metric(Some(error.status().as_u16() as i32), Some(error.code()));
+            return key_admission_response(api_format, error);
+        }
+    };
 
     let request_method = parts.method.clone();
     let request_version = parts.version;
@@ -665,6 +696,7 @@ async fn proxy_openai(
     }
     routing_trace.lock().model_route = plan.route_policy.clone();
     if operation == ProxyOperation::CountTokens {
+        drop(key_usage_permit);
         return match count_messages_tokens(
             &state,
             &parts,
@@ -1591,6 +1623,8 @@ async fn proxy_openai(
         let upstream_api_format_str = api_format_name(resolved.protocol.upstream_api_format);
         let tap_config = TapConfig {
             api_key_id: api_key.id,
+            db: state.db.clone(),
+            _key_usage_permit: key_usage_permit.clone(),
             log_enabled: api_key.log_enabled,
             provider_id: Some(resolved.provider.id),
             endpoint_id: Some(resolved.endpoint.id),
@@ -5122,6 +5156,8 @@ async fn preflight_sse(
 #[derive(Clone)]
 struct TapConfig {
     api_key_id: i64,
+    db: crate::db::Database,
+    _key_usage_permit: Option<ApiKeyUsagePermit>,
     log_enabled: bool,
     provider_id: Option<i64>,
     endpoint_id: Option<i64>,
@@ -5425,7 +5461,6 @@ impl ProxyTapBody {
                 &cfg,
                 &mut telemetry_permit,
                 &mut reservation,
-                &mut false,
                 TapFinalizeInputs {
                     ttft_source: sse
                         .as_ref()
@@ -5440,7 +5475,8 @@ impl ProxyTapBody {
                     error_message: &error_message,
                     capture: &capture,
                 },
-            );
+            )
+            .await;
         });
         Self { receiver }
     }
@@ -5463,18 +5499,12 @@ impl hyper::body::Body for ProxyTapBody {
     }
 }
 
-fn finalize_tap(
+async fn finalize_tap(
     cfg: &TapConfig,
     telemetry_permit: &mut Option<mpsc::OwnedPermit<TelemetryEvent>>,
     reservation: &mut Option<UpstreamAttemptReservation>,
-    finalized: &mut bool,
     inputs: TapFinalizeInputs<'_>,
 ) {
-    if *finalized {
-        return;
-    }
-    *finalized = true;
-
     if let Some(reported) = inputs.reported_usage {
         *inputs.usage = reported.unwrap_or_default();
         *inputs.usage_observed = reported.is_some();
@@ -5491,6 +5521,14 @@ fn finalize_tap(
     }
 
     let pricing = evaluate_price(inputs.usage, *inputs.usage_observed, cfg.price.as_ref());
+    settle_api_key_usage(
+        &cfg.db,
+        cfg.api_key_id,
+        *inputs.usage,
+        *inputs.usage_observed,
+        pricing.cost,
+    )
+    .await;
     let now_ms = util::now_ms();
     let disconnected = inputs.error_type.as_deref() == Some("client_disconnected");
     // A gateway-enforced stream duration is not evidence that the upstream is

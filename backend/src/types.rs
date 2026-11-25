@@ -7,6 +7,8 @@ use crate::request_overrides::RequestOverrides;
 #[derive(Clone, Debug)]
 pub struct ApiKeyAuth {
     pub id: i64,
+    pub created_at_ms: i64,
+    pub usage_limit: Option<crate::api_key_usage::ApiKeyLimit>,
     pub enabled: bool,
     pub expires_at_ms: Option<i64>,
     pub log_enabled: bool,

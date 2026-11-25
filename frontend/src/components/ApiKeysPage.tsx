@@ -44,6 +44,8 @@ formatDateTimeLocalInput,
 parseDateTimeLocalInput,
 } from "../lib/format";
 import type {
+ApiKeyLifetimeUsage,
+ApiKeyUsageLimit,
 ApiKeyWorkspace,
 ConnectionSettings,
 CreateApiKeyInput,
@@ -64,6 +66,59 @@ function readString(formData: FormData, key: string): string {
 function readBool(formData: FormData, key: string): boolean {
   return formData.get(key) === "on";
 }
+
+const TOKENS_PER_MILLION = 1_000_000;
+
+function formatMillions(tokens: number) {
+  return `${(tokens / TOKENS_PER_MILLION).toLocaleString(undefined, { maximumFractionDigits: 6 })} M`;
+}
+
+function observedTokens(usage?: ApiKeyLifetimeUsage) {
+  return usage && (usage.observed_requests > 0 || usage.total_tokens > 0)
+    ? formatMillions(usage.total_tokens)
+    : "—";
+}
+
+function readUsageLimit(formData: FormData): ApiKeyUsageLimit | null | undefined {
+  const kind = readString(formData, "usage_limit_kind");
+  if (kind !== "tokens" && kind !== "cost_usd") return null;
+  const amount = readString(formData, "usage_limit_amount");
+  if (!/^(?:\d+\.?\d*|\.\d+)$/.test(amount) || !/[1-9]/.test(amount)) return undefined;
+  if (kind === "cost_usd") return { kind, value: amount };
+  const [whole, fractional = ""] = amount.split(".");
+  const decimals = fractional.replace(/0+$/, "");
+  const tokens = Number(`${whole || "0"}${decimals.padEnd(6, "0")}`);
+  return decimals.length <= 6 && Number.isSafeInteger(tokens) ? { kind, value: tokens } : undefined;
+}
+
+function ApiKeyLimitFields({ limit }: { limit?: ApiKeyUsageLimit | null }) {
+  const { t } = useI18n();
+  const [kind, setKind] = useState<ApiKeyUsageLimit["kind"] | "unlimited">(limit?.kind ?? "unlimited");
+  const amount = limit?.kind === kind
+    ? limit.kind === "tokens" ? String(limit.value / TOKENS_PER_MILLION) : limit.value
+    : "";
+  return (
+    <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+      <TextField
+        select fullWidth label={t("调用额度")} name="usage_limit_kind" value={kind}
+        onChange={(event) => setKind(event.target.value as typeof kind)}
+      >
+        <MenuItem value="unlimited">{t("不限额度")}</MenuItem>
+        <MenuItem value="tokens">{t("按 Token 限制")}</MenuItem>
+        <MenuItem value="cost_usd">{t("按费用限制")}</MenuItem>
+      </TextField>
+      {kind !== "unlimited" && (
+        <TextField
+          key={kind} name="usage_limit_amount" required fullWidth
+          label={t(kind === "tokens" ? "用量上限 (M)" : "费用上限 (USD)")}
+          defaultValue={amount}
+          slotProps={{ htmlInput: { inputMode: "decimal" } }}
+          helperText={t(kind === "tokens" ? "1 M 等于 1,000,000 个 Token。" : "已计价的用量计入费用额度。")}
+        />
+      )}
+    </Stack>
+  );
+}
 function isExpiringSoon(expiresAtMs: number | null) {
   return (
     typeof expiresAtMs === "number" &&
@@ -82,6 +137,8 @@ function keyStatus(item: ApiKeyWorkspace) {
     item.apiKey.expires_at_ms <= Date.now()
   )
     return { label: "已过期", tone: "error" as const };
+  if (item.apiKey.usage_limit_reached)
+    return { label: "额度已用完", tone: "error" as const };
   if (isExpiringSoon(item.apiKey.expires_at_ms))
     return {
       label: "即将过期",
@@ -131,6 +188,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     event.preventDefault();
     if (!ensureLive()) return;
     const formData = new FormData(event.currentTarget);
+    const limit = readUsageLimit(formData);
+    if (limit === undefined) {
+      setFormError(t("请输入大于零的额度。用量最多精确到 6 位小数。"));
+      return;
+    }
     const payload: CreateApiKeyInput = {
       name: readString(formData, "name"),
       enabled: readBool(formData, "enabled"),
@@ -139,6 +201,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         readString(formData, "expires_at"),
       ),
       allowed_provider_ids: createGroupIds,
+      usage_limit: limit,
     };
     if (!payload.name) {
       props.onMessage("密钥名称不能为空。");
@@ -166,6 +229,11 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
     const current = selected;
     if (!current || !ensureLive()) return;
     const formData = new FormData(event.currentTarget);
+    const limit = readUsageLimit(formData);
+    if (limit === undefined) {
+      setFormError(t("请输入大于零的额度。用量最多精确到 6 位小数。"));
+      return;
+    }
     const payload: UpdateApiKeyInput = {
       name: readString(formData, "name"),
       enabled: readBool(formData, "enabled"),
@@ -174,6 +242,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         readString(formData, "expires_at"),
       ),
       allowed_provider_ids: editGroupIds,
+      usage_limit: limit,
     };
     if (!payload.name) {
       props.onMessage("密钥名称不能为空。");
@@ -241,6 +310,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         props.items.filter(
           (item) =>
             item.apiKey.enabled &&
+            !item.apiKey.usage_limit_reached &&
             (item.apiKey.expires_at_ms === null ||
               item.apiKey.expires_at_ms > Date.now()),
         ).length,
@@ -270,6 +340,9 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
         direction="row"
         sx={{ justifyContent: "flex-end", flexWrap: "wrap", gap: 1.5 }}
       >
+        <Button type="button" variant="outlined" onClick={() => void props.onRefresh()}>
+          {t("刷新")}
+        </Button>
         {
           <Button type="button" onClick={openCreateDrawer}>
             <Plus />
@@ -336,6 +409,8 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                   <TableRow>
                     <TableCell>{t("密钥")}</TableCell>
                     <TableCell>{t("状态")}</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>{t("累计用量")}</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>{t("累计费用")}</TableCell>
                     <TableCell>{t("允许使用的上游")}</TableCell>
                     <TableCell>{t("日志")}</TableCell>
                     <TableCell>{t("到期")}</TableCell>
@@ -347,6 +422,8 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 <TableBody>
                   {props.items.map((item) => {
                     const status = keyStatus(item);
+                    const usage = item.apiKey.lifetime_usage;
+                    const limit = item.apiKey.usage_limit;
                     return (
                       <TableRow
                         key={item.apiKey.id}
@@ -402,6 +479,22 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                             }
                             label={t(status.label)}
                           />
+                        </TableCell>
+                        <TableCell align="right" sx={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                          {observedTokens(usage)}
+                          {limit?.kind === "tokens" && (
+                            <Typography component="div" variant="caption" color="text.secondary">
+                              {t("上限 {{value}}", { value: formatMillions(limit.value) })}
+                            </Typography>
+                          )}
+                        </TableCell>
+                        <TableCell align="right" sx={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                          {usage?.cost_usd != null ? `$${usage.cost_usd}` : "—"}
+                          {limit?.kind === "cost_usd" && (
+                            <Typography component="div" variant="caption" color="text.secondary">
+                              {t("上限 {{value}}", { value: `$${limit.value}` })}
+                            </Typography>
+                          )}
                         </TableCell>
                         <TableCell
                           sx={{
@@ -554,6 +647,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                 />
                 <FormHelperText>{t("留空表示不过期。")}</FormHelperText>
               </FormControl>
+              <ApiKeyLimitFields />
               <Box>
                 <FormControl fullWidth>
                   <InputLabel id={`${formId}-create-providers`}>
@@ -756,7 +850,9 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
               {t(selected?.apiKey.name ?? "密钥详情")}
             </Typography>
             <Typography color="text.secondary" sx={{ mt: 1 }}>
-              {selected ? `查看并维护 #${selected.apiKey.id}` : undefined}
+              {selected?.apiKey.created_at_ms != null
+                ? t("创建于 {{time}}", { time: formatDateTime(selected.apiKey.created_at_ms) })
+                : selected ? `#${selected.apiKey.id}` : undefined}
             </Typography>
           </Box>
           <IconButton
@@ -773,6 +869,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
             ? ((item) => {
                 const data = item;
                 const status = keyStatus(data);
+                const usage = data.apiKey.lifetime_usage;
                 return (
                   <Box
                     sx={{
@@ -781,6 +878,23 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                       gap: "1rem",
                     }}
                   >
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={{ xs: 1, sm: 3 }}>
+                      <Box>
+                        <Typography variant="caption" color="text.secondary">{t("累计用量")}</Typography>
+                        <Typography variant="subtitle1" sx={{ fontVariantNumeric: "tabular-nums" }}>{observedTokens(usage)}</Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="caption" color="text.secondary">{t("累计费用")}</Typography>
+                        <Typography variant="subtitle1" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                          {usage?.cost_usd != null ? `$${usage.cost_usd}` : "—"}
+                        </Typography>
+                        {usage && usage.total_tokens > 0 && (
+                          <Typography variant="caption" color="text.secondary">
+                            {t("已计价用量 {{value}}", { value: formatMillions(usage.priced_tokens) })}
+                          </Typography>
+                        )}
+                      </Box>
+                    </Stack>
                     <Box
                       sx={{
                         display: "grid",
@@ -942,6 +1056,7 @@ export function ApiKeysPage(props: ApiKeysPageProps) {
                             )}
                           />
                         </FormControl>
+                        <ApiKeyLimitFields key={data.apiKey.id} limit={data.apiKey.usage_limit} />
                         <Box>
                           <FormControl fullWidth>
                             <InputLabel id={`${formId}-edit-providers`}>

@@ -252,6 +252,11 @@ pub async fn handle(mut req: Request<Incoming>, state: SharedState) -> HttpRespo
         return http::json_error(StatusCode::UNAUTHORIZED, "invalid api key");
     };
 
+    if let Err(error) = state.api_key_usage.admit(&state.db, &api_key).await {
+        record_handshake_metric(&state, error.status(), Some(error.code()));
+        return proxy::key_admission_response(ApiFormat::Responses, error);
+    }
+
     if !has_any_websocket_provider(&state).await {
         return websocket_not_supported();
     }
@@ -502,6 +507,24 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                         break;
                     }
                 }
+                let _key_usage_permit = match ctx
+                    .state
+                    .api_key_usage
+                    .admit(&ctx.state.db, &ctx.api_key)
+                    .await
+                {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        let _ = send_ws_error(
+                            &mut downstream,
+                            error.status(),
+                            error.code(),
+                            error.message(),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
                 let turn_start = Instant::now();
                 let recovery_key = extract_affinity_identity(
                     &ctx.request_headers,
@@ -788,7 +811,16 @@ async fn serve_websocket(websocket: hyper_tungstenite::HyperWebsocket, ctx: WsCo
                         }
                     }
                 }
-                if let Some(mut pending) = turn_ctx.pending_turn_log.lock().take() {
+                let pending = turn_ctx.pending_turn_log.lock().take();
+                if let Some(mut pending) = pending {
+                    crate::api_key_usage::settle_api_key_usage(
+                        &ctx.state.db,
+                        ctx.api_key.id,
+                        pending.event.usage,
+                        pending.event.usage_observed,
+                        pending.pricing.cost,
+                    )
+                    .await;
                     pending.event.duration_ms = Some(
                         (turn_start.elapsed().as_millis() as i64)
                             .saturating_sub(

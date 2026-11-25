@@ -1,3 +1,4 @@
+mod api_key_usage;
 mod price_sync;
 mod provider_config;
 pub mod upstream_config;
@@ -11,6 +12,7 @@ use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool, postgres::PgPoolOptions};
 
+use crate::api_key_usage::ApiKeyLimit;
 use crate::crypto;
 use crate::pricing::{PriceCard, PriceVersion};
 #[cfg(test)]
@@ -43,6 +45,26 @@ pub(crate) struct ProviderModelPatch {
     pub responses_via_chat_enabled: Option<bool>,
     pub messages_via_chat_enabled: Option<bool>,
     pub messages_via_responses_enabled: Option<bool>,
+}
+
+#[derive(Default)]
+pub struct ApiKeySettings<'a> {
+    pub name: &'a str,
+    pub enabled: bool,
+    pub expires_at_ms: Option<i64>,
+    pub log_enabled: bool,
+    pub usage_limit: Option<Option<ApiKeyLimit>>,
+}
+
+impl ApiKeySettings<'_> {
+    fn encoded_usage_limit(&self) -> Result<Option<String>, DbError> {
+        self.usage_limit
+            .flatten()
+            .map(|limit| {
+                serde_json::to_string(&limit).map_err(|error| DbError::new(error.to_string()))
+            })
+            .transpose()
+    }
 }
 
 #[derive(Debug)]
@@ -187,7 +209,8 @@ impl Database {
             Database::Postgres(pool) => migrate_postgres(pool).await,
         }?;
         self.migrate_price_sync().await?;
-        self.migrate_upstream_config().await
+        self.migrate_upstream_config().await?;
+        self.migrate_api_key_usage().await
     }
 
     pub async fn find_api_key_by_hash(
@@ -198,7 +221,7 @@ impl Database {
             Database::Sqlite(pool) => {
                 let row = sqlx::query(
                     r#"
-SELECT id, enabled, expires_at_ms, log_enabled, name
+SELECT id, enabled, expires_at_ms, log_enabled, name, created_at_ms, usage_limit
 FROM api_keys
 WHERE key_hash = ?
 LIMIT 1
@@ -214,6 +237,8 @@ LIMIT 1
 
                 Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
+                    created_at_ms: row.get("created_at_ms"),
+                    usage_limit: api_key_usage::decode_limit(row.get("usage_limit"))?,
                     enabled: row.get::<i64, _>("enabled") != 0,
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<i64, _>("log_enabled") != 0,
@@ -225,7 +250,7 @@ LIMIT 1
             Database::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-SELECT id, enabled, expires_at_ms, log_enabled, name
+SELECT id, enabled, expires_at_ms, log_enabled, name, created_at_ms, usage_limit
 FROM api_keys
 WHERE key_hash = $1
 LIMIT 1
@@ -241,6 +266,8 @@ LIMIT 1
 
                 Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
+                    created_at_ms: row.get("created_at_ms"),
+                    usage_limit: api_key_usage::decode_limit(row.get("usage_limit"))?,
                     enabled: row.get::<bool, _>("enabled"),
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<bool, _>("log_enabled"),
@@ -260,27 +287,26 @@ LIMIT 1
     pub async fn insert_api_key(
         &self,
         key_hash: &str,
-        name: &str,
-        enabled: bool,
-        expires_at_ms: Option<i64>,
-        log_enabled: bool,
+        settings: &ApiKeySettings<'_>,
         now_ms: i64,
     ) -> Result<i64, DbError> {
+        let limit = settings.encoded_usage_limit()?;
         match self {
             Database::Sqlite(pool) => {
                 let res = sqlx::query(
                     r#"
-INSERT INTO api_keys (key_hash, name, enabled, expires_at_ms, log_enabled, created_at_ms, updated_at_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO api_keys (key_hash, name, enabled, expires_at_ms, log_enabled, created_at_ms, updated_at_ms, usage_limit)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 "#,
                 )
                 .bind(key_hash)
-                .bind(name)
-                .bind(if enabled { 1_i64 } else { 0_i64 })
-                .bind(expires_at_ms)
-                .bind(if log_enabled { 1_i64 } else { 0_i64 })
+                .bind(settings.name)
+                .bind(i64::from(settings.enabled))
+                .bind(settings.expires_at_ms)
+                .bind(i64::from(settings.log_enabled))
                 .bind(now_ms)
                 .bind(now_ms)
+                .bind(limit)
                 .execute(pool)
                 .await?;
                 Ok(res.last_insert_rowid())
@@ -288,18 +314,19 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
             Database::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-INSERT INTO api_keys (key_hash, name, enabled, expires_at_ms, log_enabled, created_at_ms, updated_at_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO api_keys (key_hash, name, enabled, expires_at_ms, log_enabled, created_at_ms, updated_at_ms, usage_limit)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id
 "#,
                 )
                 .bind(key_hash)
-                .bind(name)
-                .bind(enabled)
-                .bind(expires_at_ms)
-                .bind(log_enabled)
+                .bind(settings.name)
+                .bind(settings.enabled)
+                .bind(settings.expires_at_ms)
+                .bind(settings.log_enabled)
                 .bind(now_ms)
                 .bind(now_ms)
+                .bind(limit)
                 .fetch_one(pool)
                 .await?;
                 Ok(row.get::<i64, _>("id"))
@@ -312,7 +339,7 @@ RETURNING id
             Database::Sqlite(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, enabled, expires_at_ms, log_enabled, name
+SELECT id, enabled, expires_at_ms, log_enabled, name, created_at_ms, usage_limit
 FROM api_keys
 ORDER BY id DESC
 "#,
@@ -320,21 +347,25 @@ ORDER BY id DESC
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
-                    .map(|row| ApiKeyAuth {
-                        id: row.get::<i64, _>("id"),
-                        enabled: row.get::<i64, _>("enabled") != 0,
-                        expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
-                        log_enabled: row.get::<i64, _>("log_enabled") != 0,
-                        name: row.get::<String, _>("name"),
-                        provider_groups: Vec::new(),
-                        allowed_provider_ids: Vec::new(),
+                    .map(|row| {
+                        Ok(ApiKeyAuth {
+                            id: row.get::<i64, _>("id"),
+                            created_at_ms: row.get("created_at_ms"),
+                            usage_limit: api_key_usage::decode_limit(row.get("usage_limit"))?,
+                            enabled: row.get::<i64, _>("enabled") != 0,
+                            expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
+                            log_enabled: row.get::<i64, _>("log_enabled") != 0,
+                            name: row.get::<String, _>("name"),
+                            provider_groups: Vec::new(),
+                            allowed_provider_ids: Vec::new(),
+                        })
                     })
-                    .collect()
+                    .collect::<Result<_, DbError>>()?
             }
             Database::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-SELECT id, enabled, expires_at_ms, log_enabled, name
+SELECT id, enabled, expires_at_ms, log_enabled, name, created_at_ms, usage_limit
 FROM api_keys
 ORDER BY id DESC
 "#,
@@ -342,16 +373,20 @@ ORDER BY id DESC
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
-                    .map(|row| ApiKeyAuth {
-                        id: row.get::<i64, _>("id"),
-                        enabled: row.get::<bool, _>("enabled"),
-                        expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
-                        log_enabled: row.get::<bool, _>("log_enabled"),
-                        name: row.get::<String, _>("name"),
-                        provider_groups: Vec::new(),
-                        allowed_provider_ids: Vec::new(),
+                    .map(|row| {
+                        Ok(ApiKeyAuth {
+                            id: row.get::<i64, _>("id"),
+                            created_at_ms: row.get("created_at_ms"),
+                            usage_limit: api_key_usage::decode_limit(row.get("usage_limit"))?,
+                            enabled: row.get::<bool, _>("enabled"),
+                            expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
+                            log_enabled: row.get::<bool, _>("log_enabled"),
+                            name: row.get::<String, _>("name"),
+                            provider_groups: Vec::new(),
+                            allowed_provider_ids: Vec::new(),
+                        })
                     })
-                    .collect()
+                    .collect::<Result<_, DbError>>()?
             }
         };
         let groups_by_key = self.list_all_api_key_provider_groups().await?;
@@ -367,7 +402,7 @@ ORDER BY id DESC
             Database::Sqlite(pool) => {
                 let row = sqlx::query(
                     r#"
-SELECT id, enabled, expires_at_ms, log_enabled, name
+SELECT id, enabled, expires_at_ms, log_enabled, name, created_at_ms, usage_limit
 FROM api_keys
 WHERE id = ?
 LIMIT 1
@@ -381,6 +416,8 @@ LIMIT 1
                 };
                 Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
+                    created_at_ms: row.get("created_at_ms"),
+                    usage_limit: api_key_usage::decode_limit(row.get("usage_limit"))?,
                     enabled: row.get::<i64, _>("enabled") != 0,
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<i64, _>("log_enabled") != 0,
@@ -392,7 +429,7 @@ LIMIT 1
             Database::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-SELECT id, enabled, expires_at_ms, log_enabled, name
+SELECT id, enabled, expires_at_ms, log_enabled, name, created_at_ms, usage_limit
 FROM api_keys
 WHERE id = $1
 LIMIT 1
@@ -406,6 +443,8 @@ LIMIT 1
                 };
                 Some(ApiKeyAuth {
                     id: row.get::<i64, _>("id"),
+                    created_at_ms: row.get("created_at_ms"),
+                    usage_limit: api_key_usage::decode_limit(row.get("usage_limit"))?,
                     enabled: row.get::<bool, _>("enabled"),
                     expires_at_ms: row.get::<Option<i64>, _>("expires_at_ms"),
                     log_enabled: row.get::<bool, _>("log_enabled"),
@@ -425,26 +464,27 @@ LIMIT 1
     pub async fn update_api_key(
         &self,
         id: i64,
-        name: &str,
-        enabled: bool,
-        expires_at_ms: Option<i64>,
-        log_enabled: bool,
+        settings: &ApiKeySettings<'_>,
         now_ms: i64,
     ) -> Result<(), DbError> {
+        let limit = settings.encoded_usage_limit()?;
         match self {
             Database::Sqlite(pool) => {
                 sqlx::query(
                     r#"
 UPDATE api_keys
-SET name = ?, enabled = ?, expires_at_ms = ?, log_enabled = ?, updated_at_ms = ?
+SET name = ?, enabled = ?, expires_at_ms = ?, log_enabled = ?, updated_at_ms = ?,
+    usage_limit = CASE WHEN ? THEN ? ELSE usage_limit END
 WHERE id = ?
 "#,
                 )
-                .bind(name)
-                .bind(if enabled { 1_i64 } else { 0_i64 })
-                .bind(expires_at_ms)
-                .bind(if log_enabled { 1_i64 } else { 0_i64 })
+                .bind(settings.name)
+                .bind(i64::from(settings.enabled))
+                .bind(settings.expires_at_ms)
+                .bind(i64::from(settings.log_enabled))
                 .bind(now_ms)
+                .bind(settings.usage_limit.is_some())
+                .bind(limit)
                 .bind(id)
                 .execute(pool)
                 .await?;
@@ -454,15 +494,18 @@ WHERE id = ?
                 sqlx::query(
                     r#"
 UPDATE api_keys
-SET name = $1, enabled = $2, expires_at_ms = $3, log_enabled = $4, updated_at_ms = $5
-WHERE id = $6
+SET name = $1, enabled = $2, expires_at_ms = $3, log_enabled = $4, updated_at_ms = $5,
+    usage_limit = CASE WHEN $6 THEN $7 ELSE usage_limit END
+WHERE id = $8
 "#,
                 )
-                .bind(name)
-                .bind(enabled)
-                .bind(expires_at_ms)
-                .bind(log_enabled)
+                .bind(settings.name)
+                .bind(settings.enabled)
+                .bind(settings.expires_at_ms)
+                .bind(settings.log_enabled)
                 .bind(now_ms)
+                .bind(settings.usage_limit.is_some())
+                .bind(limit)
                 .bind(id)
                 .execute(pool)
                 .await?;
@@ -8530,7 +8573,16 @@ CREATE TABLE stats_events (
             .await
             .expect("insert provider");
         let api_key_id = db
-            .insert_api_key("hash-a", "key-a", true, None, true, 1)
+            .insert_api_key(
+                "hash-a",
+                &super::ApiKeySettings {
+                    name: "key-a",
+                    enabled: true,
+                    log_enabled: true,
+                    ..Default::default()
+                },
+                1,
+            )
             .await
             .expect("insert api key");
 
@@ -8586,11 +8638,29 @@ CREATE TABLE stats_events (
     async fn api_key_lookup_should_load_only_the_target_keys_provider_groups() {
         let db = sqlite_memory_db().await;
         let key_a = db
-            .insert_api_key("hash-a", "key-a", true, None, true, 1)
+            .insert_api_key(
+                "hash-a",
+                &super::ApiKeySettings {
+                    name: "key-a",
+                    enabled: true,
+                    log_enabled: true,
+                    ..Default::default()
+                },
+                1,
+            )
             .await
             .expect("insert key a");
         let key_b = db
-            .insert_api_key("hash-b", "key-b", true, None, true, 1)
+            .insert_api_key(
+                "hash-b",
+                &super::ApiKeySettings {
+                    name: "key-b",
+                    enabled: true,
+                    log_enabled: true,
+                    ..Default::default()
+                },
+                1,
+            )
             .await
             .expect("insert key b");
         let group_a = db

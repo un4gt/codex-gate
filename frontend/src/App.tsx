@@ -1547,10 +1547,8 @@ function OAuthRoutePage(props: { data: AppDataContext }) {
 }
 function KeysRoutePage(props: { data: AppDataContext }) {
   useEffect(() => {
-    if (props.data.apiKeys.length === 0) {
-      void props.data.loadApiKeys();
-    }
-  }, [props.data.apiKeys.length, props.data.loadApiKeys]);
+    void props.data.loadApiKeys();
+  }, [props.data.loadApiKeys]);
   return (
     <ApiKeysPage
       settings={props.data.settings}

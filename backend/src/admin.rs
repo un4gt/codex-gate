@@ -1785,6 +1785,7 @@ async fn delete_provider_group(req: Request<Incoming>, state: SharedState) -> Ht
 struct CreateApiKeyReq {
     name: String,
     enabled: Option<bool>,
+    usage_limit: Option<crate::api_key_usage::ApiKeyLimit>,
     #[serde(alias = "expiresAtMs")]
     expires_at_ms: Option<i64>,
     #[serde(alias = "logEnabled")]
@@ -1795,10 +1796,13 @@ struct CreateApiKeyReq {
 }
 
 async fn list_api_keys(_req: Request<Incoming>, state: SharedState) -> HttpResponse {
-    match state.db.list_api_keys().await {
-        Ok(items) => http::json(
+    match tokio::try_join!(state.db.list_api_keys(), state.db.list_api_key_usage()) {
+        Ok((items, usage)) => http::json(
             StatusCode::OK,
-            &items.iter().map(api_key_to_json).collect::<Vec<_>>(),
+            &items
+                .iter()
+                .map(|key| api_key_to_json(key, usage.get(&key.id).copied().unwrap_or_default()))
+                .collect::<Vec<_>>(),
         ),
         Err(e) => http::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -1814,6 +1818,12 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
 
     if body.name.trim().is_empty() {
         return http::json_error(StatusCode::BAD_REQUEST, "name is empty");
+    }
+    if body.usage_limit.is_some_and(|limit| !limit.is_positive()) {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "usage limit must be greater than zero",
+        );
     }
 
     if body.allowed_provider_ids.is_some() && body.provider_group_ids.is_some() {
@@ -1860,10 +1870,13 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         .db
         .insert_api_key(
             &key_hash,
-            body.name.trim(),
-            enabled,
-            body.expires_at_ms,
-            log_enabled,
+            &crate::db::ApiKeySettings {
+                name: body.name.trim(),
+                enabled,
+                expires_at_ms: body.expires_at_ms,
+                log_enabled,
+                usage_limit: Some(body.usage_limit),
+            },
             now_ms,
         )
         .await
@@ -1895,6 +1908,8 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         "name": body.name.trim(),
         "enabled": enabled,
         "expires_at_ms": body.expires_at_ms,
+        "created_at_ms": now_ms,
+        "usage_limit": body.usage_limit,
         "log_enabled": log_enabled,
         "provider_groups": available_groups
             .iter()
@@ -1909,6 +1924,8 @@ async fn create_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
 struct PatchApiKeyReq {
     name: Option<String>,
     enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    usage_limit: Option<Option<crate::api_key_usage::ApiKeyLimit>>,
     #[serde(
         default,
         alias = "expiresAtMs",
@@ -1969,6 +1986,16 @@ async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
     if new_name.trim().is_empty() {
         return http::json_error(StatusCode::BAD_REQUEST, "name is empty");
     }
+    if patch
+        .usage_limit
+        .flatten()
+        .is_some_and(|limit| !limit.is_positive())
+    {
+        return http::json_error(
+            StatusCode::BAD_REQUEST,
+            "usage limit must be greater than zero",
+        );
+    }
     let new_enabled = patch.enabled.unwrap_or(current.enabled);
     let new_expires = patch.expires_at_ms.unwrap_or(current.expires_at_ms);
     let new_log_enabled = patch.log_enabled.unwrap_or(current.log_enabled);
@@ -1989,10 +2016,13 @@ async fn update_api_key(req: Request<Incoming>, state: SharedState) -> HttpRespo
         .db
         .update_api_key(
             id,
-            new_name.trim(),
-            new_enabled,
-            new_expires,
-            new_log_enabled,
+            &crate::db::ApiKeySettings {
+                name: new_name.trim(),
+                enabled: new_enabled,
+                expires_at_ms: new_expires,
+                log_enabled: new_log_enabled,
+                usage_limit: patch.usage_limit,
+            },
             now_ms,
         )
         .await
@@ -4432,10 +4462,14 @@ fn request_log_to_json(
     value
 }
 
-fn api_key_to_json(k: &ApiKeyAuth) -> Value {
+fn api_key_to_json(k: &ApiKeyAuth, usage: crate::api_key_usage::ApiKeyUsage) -> Value {
     serde_json::json!({
         "id": k.id,
         "name": k.name,
+        "created_at_ms": k.created_at_ms,
+        "usage_limit": k.usage_limit,
+        "lifetime_usage": usage,
+        "usage_limit_reached": k.usage_limit.is_some_and(|limit| limit.reached(&usage)),
         "enabled": k.enabled,
         "expires_at_ms": k.expires_at_ms,
         "log_enabled": k.log_enabled,

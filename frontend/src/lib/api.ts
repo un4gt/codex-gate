@@ -530,7 +530,7 @@ export async function loadApiKeyWorkspace(settings: ConnectionSettings): Promise
       requests: 0,
       success: 0,
       failed: 0,
-      tokens: 0,
+      tokens: apiKey.lifetime_usage?.total_tokens ?? 0,
       averageWaitMs: 0,
       activeDays: 0,
     },

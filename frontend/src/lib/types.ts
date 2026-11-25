@@ -372,6 +372,17 @@ export interface NotificationSchedulePreview {
   occurrences_ms: number[];
 }
 
+export type ApiKeyUsageLimit =
+  | { kind: 'tokens'; value: number }
+  | { kind: 'cost_usd'; value: string };
+
+export interface ApiKeyLifetimeUsage {
+  total_tokens: number;
+  observed_requests: number;
+  priced_tokens: number;
+  cost_usd: string | null;
+}
+
 export interface ApiKeySummary {
   id: number;
   name: string;
@@ -380,6 +391,10 @@ export interface ApiKeySummary {
   log_enabled: boolean;
   provider_groups: ProviderGroupRef[];
   allowed_provider_ids?: number[];
+  created_at_ms?: number;
+  usage_limit?: ApiKeyUsageLimit | null;
+  lifetime_usage?: ApiKeyLifetimeUsage;
+  usage_limit_reached?: boolean;
 }
 
 export interface CreateApiKeyInput {
@@ -389,6 +404,7 @@ export interface CreateApiKeyInput {
   log_enabled: boolean;
   allowed_provider_ids: number[];
   provider_group_ids?: number[];
+  usage_limit?: ApiKeyUsageLimit | null;
 }
 
 export interface UpdateApiKeyInput {
@@ -398,6 +414,7 @@ export interface UpdateApiKeyInput {
   log_enabled?: boolean;
   provider_group_ids?: number[];
   allowed_provider_ids?: number[];
+  usage_limit?: ApiKeyUsageLimit | null;
 }
 
 export interface CreatedApiKey {
